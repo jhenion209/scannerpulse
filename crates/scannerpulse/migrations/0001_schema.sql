@@ -127,9 +127,12 @@ CREATE TABLE favorite_talkgroups (
 -- constraints must contain started_at.
 --
 -- Safe to call from several sessions at once: callers queue on an advisory
--- lock. Creating a partition takes a brief exclusive lock on calls and on
--- transcripts. If that lock is not granted within lock_timeout the call fails,
--- and the caller tries again later.
+-- lock. When both partitions exist the call returns at once and takes no lock.
+-- Creating a partition locks calls and transcripts exclusively, and locks the
+-- tables that calls refers to against writes, until the caller's transaction
+-- ends: call this function in a transaction of its own. A wait for any of
+-- these locks ends after lock_timeout. Try again after a lock timeout or a
+-- deadlock.
 --
 -- A new partition is given the owner of its parent, whoever calls this
 -- function: a later ALTER TABLE on the parent changes every partition and
@@ -155,11 +158,14 @@ BEGIN
     PERFORM pg_advisory_xact_lock(1397048658, 1);
     FOREACH parent IN ARRAY ARRAY['calls', 'transcripts'] LOOP
         part := parent || '_' || suffix;
-        IF to_regclass(part) IS NULL THEN
-            EXECUTE format('CREATE TABLE %I PARTITION OF %I %s FOR VALUES FROM (%L) TO (%L)',
-                           part, parent,
-                           CASE WHEN parent = 'calls' THEN '(UNIQUE (location_id, rel_path))' ELSE '' END,
-                           lo, hi);
+        -- IF NOT EXISTS although the lock is held: a session that waited for
+        -- the lock may still remember the partition as missing.
+        EXECUTE format('CREATE TABLE IF NOT EXISTS %I PARTITION OF %I %s FOR VALUES FROM (%L) TO (%L)',
+                       part, parent,
+                       CASE WHEN parent = 'calls' THEN '(UNIQUE (location_id, rel_path))' ELSE '' END,
+                       lo, hi);
+        IF (SELECT c.relowner <> p.relowner FROM pg_class c, pg_class p
+            WHERE c.oid = part::regclass AND p.oid = parent::regclass) THEN
             EXECUTE format('ALTER TABLE %I OWNER TO %I', part,
                            (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = parent::regclass));
         END IF;

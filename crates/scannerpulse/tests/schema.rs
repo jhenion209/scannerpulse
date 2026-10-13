@@ -31,7 +31,7 @@ const INSERT_CALL: &str = "INSERT INTO calls (started_at, talkgroup_id, source_i
 
 /// Inserts one call; the row holds its `id` and the name of its partition, `part`.
 async fn add_call(
-    pool: &PgPool,
+    executor: impl sqlx::PgExecutor<'_>,
     (talkgroup, location, source): (i32, i16, i16),
     started_at: &str,
     rel_path: &str,
@@ -42,7 +42,7 @@ async fn add_call(
         .bind(source)
         .bind(location)
         .bind(rel_path)
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await
 }
 
@@ -187,6 +187,53 @@ async fn partition_bounds_are_utc_whatever_the_session_zone(pool: PgPool) -> sql
         .fetch_one(&mut *conn)
         .await
         .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("no partition of relation \"calls\""),
+        "{err}"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn partition_bounds_are_utc_whatever_the_session_date_style(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let ids = seed(&pool).await?;
+    let mut conn = pool.acquire().await?;
+    // The function sets its own time zone and date style. Without that, it would write
+    // the bounds in this session's style, with a zone abbreviation, and PostgreSQL
+    // reads IST as Israel Standard Time, not as India's.
+    sqlx::query("SET TIME ZONE 'Asia/Kolkata'")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SET datestyle = 'SQL, DMY'")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SELECT ensure_month_partitions('2031-07-10')")
+        .execute(&mut *conn)
+        .await?;
+    // The first and the last instant of July in UTC are in July's partition ...
+    for (started_at, rel_path) in [
+        ("2031-07-01 00:00:00+00", "2031-07-01/f.mp3"),
+        ("2031-07-31 23:59:59.999+00", "2031-07-31/g.mp3"),
+    ] {
+        let row = add_call(&mut *conn, ids, started_at, rel_path).await?;
+        assert_eq!(
+            row.get::<String, _>("part"),
+            "calls_y2031m07",
+            "{started_at}"
+        );
+    }
+    // ... and the first instant of August is not.
+    let err = add_call(
+        &mut *conn,
+        ids,
+        "2031-08-01 00:00:00+00",
+        "2031-08-01/h.mp3",
+    )
+    .await
+    .unwrap_err();
     assert!(
         err.to_string()
             .contains("no partition of relation \"calls\""),
@@ -343,6 +390,40 @@ async fn two_sessions_creating_the_same_month_both_succeed(pool: PgPool) -> sqlx
                 .execute(&pool)
                 .await
         }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    a.commit().await?;
+    b.await.expect("session B panicked")?;
+
+    let relations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relname = 'calls_y2031m05'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(relations, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_waiting_session_that_created_another_month_also_succeeds(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    // Session B has already run the creating path once on its connection, so it
+    // has nothing new to read from the catalog when it wakes up.
+    let mut conn_b = pool.acquire().await?;
+    sqlx::query("SELECT ensure_month_partitions('2031-06-10')")
+        .execute(&mut *conn_b)
+        .await?;
+    // Session A creates another month and keeps its transaction open.
+    let mut a = pool.begin().await?;
+    sqlx::query("SELECT ensure_month_partitions('2031-05-10')")
+        .execute(&mut *a)
+        .await?;
+    // Session B asks for A's month on that same connection. It must wait for A,
+    // then see that the month exists, not fail.
+    let b = tokio::spawn(async move {
+        sqlx::query("SELECT ensure_month_partitions('2031-05-10')")
+            .execute(&mut *conn_b)
+            .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     a.commit().await?;

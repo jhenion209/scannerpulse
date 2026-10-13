@@ -1,9 +1,13 @@
 use std::process::ExitCode;
+use std::time::Duration;
 
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// How long `db-update` waits for the database server to accept the connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const USAGE: &str = "\
 usage: scannerpulse db-update [--quiet]
@@ -64,8 +68,17 @@ async fn main() -> ExitCode {
 
 async fn db_update(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set")?;
-    // One connection, not a pool: a wrong address fails at once with the real error.
-    let mut conn = PgConnection::connect(&url).await?;
+    // One connection, not a pool: a refused connection fails at once with the real
+    // error. An address that never answers would wait for the operating system's own
+    // limit, which is minutes, so give up after CONNECT_TIMEOUT.
+    let mut conn = tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(&url))
+        .await
+        .map_err(|_| {
+            format!(
+                "the database server did not answer within {} seconds",
+                CONNECT_TIMEOUT.as_secs()
+            )
+        })??;
     let before = applied(&mut conn).await?;
     MIGRATOR.run(&mut conn).await?;
     if !quiet {
