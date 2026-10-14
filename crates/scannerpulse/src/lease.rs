@@ -1,19 +1,22 @@
-//! The processing lease (today's HA Method B): one host at a time files and
-//! transcribes. The row `processing` names the holder until it expires, and
-//! every running host keeps a heartbeat row `ingest:<host>`. All times are the
-//! database's clock, so the hosts' clocks never matter.
+//! The processing lease: one host at a time files calls. The `processing` row
+//! of `leases` names the holder and when its hold ends; each running host also
+//! renews a heartbeat row, `ingest:<host>`. Every time comes from the database
+//! server, so the hosts' own clocks play no part.
 //!
-//! - The holder renews every `renew` with a lifetime of `ttl`.
-//! - The preferred host takes an expired lease at once; the other waits
-//!   `grace` more, so that a short database failover does not move the work.
-//! - A holder that is not preferred hands the lease back once the other
-//!   host's heartbeat has run for `return_after` without a gap and from the
-//!   same process (a new process restarts the count).
+//! - The holder renews its hold every `renew`, for `ttl`.
+//! - When a hold has run out, the preferred host may take the lease at once;
+//!   the other host must wait `grace` longer, so that a brief database
+//!   failover leaves the work where it was.
+//! - A holder that is not the preferred host gives the lease back once the
+//!   preferred host's heartbeat has been renewed for `return_after` without a
+//!   gap, by one process throughout (a restarted process starts the count
+//!   again).
 //!
-//! Fencing: `held` compares the monotonic clock with a deadline taken just
-//! before the last successful renewal was sent, minus a margin. It needs no
-//! database call, and a process that was frozen and resumes finds its deadline
-//! passed. `store::record` checks the lease row again in its transaction.
+//! The lease also guards every write. `held` answers from a local monotonic
+//! deadline: the instant just before the last successful renewal was sent,
+//! plus `ttl`, minus `margin`. It asks the database nothing, so a process that
+//! was paused and resumes sees at once that its deadline has passed.
+//! `store::record` checks the lease row once more inside its transaction.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -117,11 +120,11 @@ impl Lease {
         self.state().yielding
     }
 
-    /// One round: the heartbeat, the lease, and the watch on the other host.
-    /// A host whose paths fail (`healthy` false) gives the lease up and stops
-    /// its heartbeat, so the other host neither waits for it nor hands the
-    /// lease back to it. After a database error the deadline of the last good
-    /// renewal runs out by itself.
+    /// One round: this host's heartbeat, the lease, and the watch on the other
+    /// host. A host whose paths fail (`healthy` false) gives the lease up and
+    /// stops its heartbeat, so that the other host neither waits for it nor
+    /// passes the lease back to it. A database error extends nothing: the hold
+    /// ends when its local deadline passes.
     pub async fn tick(&self, conn: &mut PgConnection, healthy: bool) -> sqlx::Result<()> {
         let result = self.round(conn, healthy).await;
         if result.is_err() {
@@ -185,8 +188,9 @@ impl Lease {
             return Ok(());
         };
         let now = Instant::now();
-        // A new process on the other host starts the count again: a crash loop
-        // must not get the lease back.
+        // A heartbeat from another process means the preferred host restarted:
+        // the count begins again, so a host that keeps crashing never gets the
+        // lease back.
         let since = match state.peer.take() {
             Some((seen, since)) if seen == peer => since,
             _ => {
@@ -201,8 +205,8 @@ impl Lease {
         Ok(())
     }
 
-    /// The heartbeat of the one other running host, or `None` when there is
-    /// none, or more than one.
+    /// The heartbeat holder of the other running host; `None` unless exactly
+    /// one other host runs.
     async fn live_peer(&self, conn: &mut PgConnection) -> sqlx::Result<Option<String>> {
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT holder FROM leases \
@@ -218,9 +222,8 @@ impl Lease {
         })
     }
 
-    /// Gives the lease to the preferred host. False, and nothing changes,
-    /// unless this lease is handing back and knows the other host: the other
-    /// host may have restarted since.
+    /// Passes the lease to the preferred host when this lease is handing back
+    /// and knows that host; otherwise returns false and changes nothing.
     pub async fn hand_over(&self, conn: &mut PgConnection) -> sqlx::Result<bool> {
         let peer = {
             let mut state = self.state();
@@ -249,9 +252,9 @@ impl Lease {
         Ok(done.rows_affected() == 1)
     }
 
-    /// A clean stop: the lease is given up, so the other host takes it at its
-    /// next round (a day in the past is beyond any grace), and this host's
-    /// heartbeat is removed.
+    /// A clean stop: gives the lease up and deletes this host's heartbeat. The
+    /// hold is marked as ended a day ago, longer than any grace, so the other
+    /// host takes the lease at its next round.
     pub async fn release(&self, conn: &mut PgConnection) -> sqlx::Result<()> {
         {
             let mut state = self.state();
