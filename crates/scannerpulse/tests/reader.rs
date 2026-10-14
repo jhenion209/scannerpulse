@@ -252,6 +252,21 @@ fn a_damaged_tag_is_read_as_no_tag() {
 }
 
 #[test]
+fn a_tag_damaged_after_its_first_frame_is_read_as_no_tag() {
+    let mut tag = id3::Tag::new();
+    tag.set_title("127\"Alpha Fire\"");
+    tag.set_artist("711351");
+    let mut data = Vec::new();
+    tag.write_to(&mut data, id3::Version::Id3v24).unwrap();
+    // The later frame's text encoding byte is none of the four that ID3v2.4 allows.
+    let find = |id: &[u8]| data.windows(4).position(|w| w == id).unwrap();
+    let later = find(b"TIT2").max(find(b"TPE1"));
+    data[later + 10] = 0x09;
+    data.extend_from_slice(&common::frames(28));
+    assert_eq!(reader::tags(&data), Tags::default());
+}
+
+#[test]
 fn a_file_without_a_date_or_a_frame_is_rejected() {
     let mtime = utc("2031-01-15T18:00:05Z");
     let err = reader::read_bytes("recording.mp3", &common::frames(5), mtime, CHICAGO).unwrap_err();

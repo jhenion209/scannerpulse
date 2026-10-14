@@ -162,19 +162,14 @@ pub fn start_time(name: &str) -> Option<NaiveDateTime> {
     Some(date.and_time(time))
 }
 
-/// The ID3v2 tag at the start of `data`. A tag that cannot be read gives what
-/// was read before the fault, or nothing.
+/// The ID3v2 tag at the start of `data`. A tag that cannot be read gives no values, as today's recorder reads it.
 pub fn tags(data: &[u8]) -> Tags {
     let len = mp3::id3v2_len(data);
     if len == 0 || len > data.len() {
         return Tags::default();
     }
-    let tag = match id3::Tag::read_from2(Cursor::new(&data[..len])) {
-        Ok(tag) => tag,
-        Err(error) => match error.partial_tag {
-            Some(tag) => tag,
-            None => return Tags::default(),
-        },
+    let Ok(tag) = id3::Tag::read_from2(Cursor::new(&data[..len])) else {
+        return Tags::default();
     };
     Tags {
         title: tag.title().and_then(first_value),
