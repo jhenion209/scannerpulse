@@ -116,6 +116,24 @@ fn an_event_brings_a_file_in_before_the_next_rescan() {
 }
 
 #[test]
+fn an_event_for_a_hidden_or_linked_file_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let hidden = dir.path().join(".hidden/e.mp3");
+    fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+    fs::write(&hidden, b"x").unwrap();
+    let target = elsewhere.path().join("t.mp3");
+    fs::write(&target, b"x").unwrap();
+    let link = dir.path().join("link.mp3");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let mut watcher = Watcher::new(vec![source(3, dir.path())], WAIT);
+    let t0 = Instant::now();
+    watcher.touch(&hidden, t0);
+    watcher.touch(&link, t0);
+    assert!(watcher.settle(t0 + WAIT).is_empty());
+}
+
+#[test]
 fn a_file_gone_from_its_source_is_forgotten() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.mp3");

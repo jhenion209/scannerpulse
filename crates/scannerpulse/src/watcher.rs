@@ -59,10 +59,11 @@ impl Watcher {
         let Some((source_id, rel_path)) = self.inside(path) else {
             return;
         };
-        if !is_audio(path) {
+        // The rules of `list`: an mp3, nothing hidden on the way, no link.
+        if !is_audio(path) || rel_path.split('/').any(|part| part.starts_with('.')) {
             return;
         }
-        match fs::metadata(path) {
+        match fs::symlink_metadata(path) {
             Ok(meta) if meta.is_file() => self.observe(source_id, rel_path, &meta, now),
             _ => {
                 self.files.remove(&(source_id, rel_path));
