@@ -2,7 +2,7 @@
 //! source, with a 5 s limit, each in a thread of its own, so that a hung mount
 //! cannot block the process. When the archive, or every source, has failed
 //! for 60 s, the host is unhealthy: it gives up the lease and takes none until
-//! its paths answer again (spec, Section 5).
+//! its paths answer again.
 
 use std::fs;
 use std::io;

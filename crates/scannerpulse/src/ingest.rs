@@ -1,7 +1,7 @@
 //! `scannerpulse ingest`: the watcher on every host, the filer on the lease
 //! holder only, the lease and path health, and a summary in the journal every
 //! minute. A database outage pauses the work, which is tried again every 5 s;
-//! only a setup error stops the process (spec, Section 9).
+//! only a setup error stops the process.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};

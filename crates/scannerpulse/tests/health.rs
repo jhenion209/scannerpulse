@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use scannerpulse::health::{Health, HealthTimings, read_dir_probe};
 use tokio::time::sleep;
 
-/// The spec's timings, shortened.
+/// The default timings, shortened.
 fn quick() -> HealthTimings {
     HealthTimings {
         every: Duration::from_millis(50),

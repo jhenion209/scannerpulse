@@ -1,5 +1,5 @@
 //! The filer: takes waiting files, oldest first, and files each one into the
-//! archive in four steps, each safe against a crash (spec, Section 3):
+//! archive in four steps, each safe against a crash:
 //!
 //! 1. copy the file into its folder as `<name>.part` and check the copy;
 //! 2. give the copy its name;

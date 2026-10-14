@@ -1,6 +1,6 @@
 //! What a recorder's file says about its call: the ID3 tag, the file name and
-//! the audio frames, read by the rules of today's recorder and of the
-//! migration, so that a call filed by ingest matches a migrated one.
+//! the audio frames. The same file always gives the same call, whichever
+//! host or tool reads it.
 
 use std::fmt;
 use std::io::{self, Cursor};
@@ -86,8 +86,8 @@ impl std::error::Error for ReadError {}
 static TITLE_TALKGROUP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^([0-9]{1,18})"([^"]+)""#).unwrap());
 static CHANNEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^([0-9]+)[-"](.+?)"?$"#).unwrap());
-// The migration's P:<number>(?![0-9])[^"]*"<name>", without the look-ahead,
-// which this regex engine does not have.
+// The first number, not followed by another digit, and the first quoted
+// name after it.
 static PATCH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^P:([0-9]{1,18})(?:[^0-9"][^"]*)?"([^"]+)""#).unwrap());
 static RADIO: LazyLock<Regex> =
@@ -162,7 +162,7 @@ pub fn start_time(name: &str) -> Option<NaiveDateTime> {
     Some(date.and_time(time))
 }
 
-/// The ID3v2 tag at the start of `data`. A tag that cannot be read gives no values, as today's recorder reads it.
+/// The ID3v2 tag at the start of `data`. A tag that cannot be read gives no values.
 pub fn tags(data: &[u8]) -> Tags {
     let len = mp3::id3v2_len(data);
     if len == 0 || len > data.len() {

@@ -21,7 +21,7 @@ pub enum TimeHow {
 }
 
 /// How near the modification time must be to an instant of the repeated hour
-/// to choose it (the migration's rule).
+/// to choose it: a window of 30 minutes.
 pub const MTIME_WINDOW_SECONDS: i64 = 1800;
 
 /// The instant of a local time in `zone`. `mtime` is the file's modification

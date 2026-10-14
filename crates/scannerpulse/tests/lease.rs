@@ -10,7 +10,7 @@ use scannerpulse::store::{self, NewCall, RecordError, Seen};
 use sqlx::{Connection, PgPool};
 use tokio::time::sleep;
 
-/// The spec's timings, shortened so that the tests run in seconds. A round
+/// The default timings, shortened so that the tests run in seconds. A round
 /// takes up to half a second when the tests run side by side, so the waits
 /// leave that much room.
 fn quick() -> Timings {
@@ -220,9 +220,9 @@ async fn a_frozen_holder_cannot_record_once_its_lease_is_gone(pool: PgPool) -> s
     Ok(())
 }
 
-// The freeze drill of 2026-10-05: a holder frozen inside the transaction that
-// records a call holds the lease row FOR SHARE. The server ends that
-// transaction after the idle limit, and the takeover goes ahead.
+// A holder frozen inside the transaction that records a call holds the lease
+// row FOR SHARE. The server ends that transaction after the idle limit, and
+// the takeover goes ahead.
 #[sqlx::test(migrations = "./migrations")]
 async fn a_holder_frozen_in_its_transaction_blocks_a_takeover_for_seconds_only(
     pool: PgPool,

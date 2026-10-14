@@ -2,7 +2,7 @@
 //! being lost or filed twice.
 //!
 //! A file goes to `<local date>/<talkgroup folder>/<file name>` under the root
-//! of the primary location, as today's recorder files it. It is written as
+//! of the primary location. It is written as
 //! `<name>.part`, read back and compared, and only then given its name.
 
 use std::fs::{self, File};

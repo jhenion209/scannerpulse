@@ -11,7 +11,7 @@ use sqlx::PgPool;
 
 const NAME: &str = "20310115_120000SYSC_East_Charlie__TO_330_FROM_5150.mp3";
 
-/// The spec's timings, shortened.
+/// The default timings, shortened.
 fn config(pool: &PgPool) -> Config {
     Config {
         database: (*pool.connect_options()).clone(),
