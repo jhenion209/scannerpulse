@@ -143,6 +143,9 @@ pub struct Waiting {
     /// The call it was filed as, when it was filed before and seen again.
     pub call_id: Option<i64>,
     pub call_started_at: Option<DateTime<Utc>>,
+    /// True when it is the very file filed as that call: the modification
+    /// time stored on the row equals the call's.
+    pub same_file: bool,
 }
 
 /// Waiting files, oldest first, leaving out the ids in `skip`.
@@ -152,8 +155,12 @@ pub async fn waiting(
     skip: &[i64],
 ) -> sqlx::Result<Vec<Waiting>> {
     sqlx::query_as(
-        "SELECT id, source_id, rel_path, size, seen_at, call_id, call_started_at FROM ingest_files \
-         WHERE state = 'waiting' AND id <> ALL($2) ORDER BY first_seen, id LIMIT $1",
+        "SELECT f.id, f.source_id, f.rel_path, f.size, f.seen_at, f.call_id, f.call_started_at, \
+                c.id IS NOT NULL AS same_file \
+         FROM ingest_files f \
+         LEFT JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
+             AND c.file_mtime IS NOT DISTINCT FROM f.file_mtime \
+         WHERE f.state = 'waiting' AND f.id <> ALL($2) ORDER BY f.first_seen, f.id LIMIT $1",
     )
     .bind(limit)
     .bind(skip)

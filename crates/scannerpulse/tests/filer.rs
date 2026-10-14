@@ -474,17 +474,25 @@ async fn a_filed_file_seen_again_after_its_deletion_stays_filed(pool: PgPool) ->
     let site = Site::new(pool).await;
     let data = bravo();
     let source = site.arrive(NAME, &data).await;
+    // What the rescan listed before step 4.
+    let meta = fs::metadata(&source).unwrap();
+    let listed = Seen {
+        rel_path: NAME.to_string(),
+        size: meta.len() as i64,
+        file_mtime: meta.modified().unwrap().into(),
+    };
     let mut filer = site.filer();
     let done = outcomes(filer.pass(10).await?);
     let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
     };
     assert_eq!(site.state(NAME).await.0, "done");
+    assert!(!source.exists());
 
-    fs::write(&source, &data).unwrap();
-    site.seen(NAME).await;
+    store::upsert_seen(&site.pool, site.source_row.id, &[listed])
+        .await
+        .unwrap();
     assert_eq!(site.state(NAME).await.0, "waiting");
-    fs::remove_file(&source).unwrap();
 
     let done = outcomes(filer.pass(10).await?);
     assert_eq!(done, [Outcome::AlreadyFiled(id)]);
@@ -521,5 +529,35 @@ async fn a_call_in_the_spring_gap_is_filed_shifted_and_counted(pool: PgPool) -> 
         line.contains("1 shifted (spring gap), 0 guessed (repeated hour)"),
         "{line}"
     );
+    Ok(())
+}
+
+// In the repeated hour a second recording can come under the name of one
+// already filed. If it vanishes, it is not taken for the first one.
+#[sqlx::test(migrations = "./migrations")]
+async fn another_file_under_a_filed_name_is_not_taken_as_filed(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    let data = bravo();
+    let source = site.arrive(NAME, &data).await;
+    let mut filer = site.filer();
+    let done = outcomes(filer.pass(10).await?);
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
+
+    let other = Seen {
+        rel_path: NAME.to_string(),
+        size: data.len() as i64,
+        file_mtime: "2031-01-15T18:05:00Z".parse::<DateTime<Utc>>().unwrap(),
+    };
+    store::upsert_seen(&site.pool, site.source_row.id, &[other])
+        .await
+        .unwrap();
+    assert!(!source.exists());
+
+    let done = outcomes(filer.pass(10).await?);
+    assert!(
+        matches!(&done[..], [Outcome::Later { why, .. }] if why.starts_with("missing")),
+        "{done:?}"
+    );
+    assert_eq!(site.state(NAME).await.0, "waiting");
     Ok(())
 }

@@ -279,15 +279,18 @@ impl Filer {
         Ok(Outcome::Rejected(why))
     }
 
-    /// A waiting file that is gone from its source. A file filed before is
-    /// done again at once with its call. Otherwise the other host may have
+    /// A waiting file that is gone from its source. The same file filed
+    /// before is done again at once with its call. Otherwise the other host may have
     /// filed it before it lost the lease, so after the grace the archive is
     /// searched for a copy of the same name and size, in the folders of the
     /// name's date and the day on each side.
     async fn missing(&mut self, row: &Waiting) -> sqlx::Result<Outcome> {
         // Filed before, then seen again by a rescan just before step 4
-        // deleted it: done again with its call, without a search.
-        if let (Some(id), Some(started_at)) = (row.call_id, row.call_started_at) {
+        // deleted it: done again with its call, without a search. Another
+        // recording under the same name takes the usual path.
+        if let (true, Some(id), Some(started_at)) =
+            (row.same_file, row.call_id, row.call_started_at)
+        {
             if !self.fence.held() {
                 return Ok(Outcome::LeaseLost);
             }
