@@ -2,8 +2,8 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -258,15 +258,14 @@ async fn a_crash_after_recording_deletes_the_source_on_the_next_pass(
 }
 
 /// Says "held" this many times, then never again: the lease is lost part way.
-struct LosingFence(AtomicUsize);
+struct LosingFence(Mutex<usize>);
 
 impl Fence for LosingFence {
     fn held(&self) -> bool {
-        self.0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok()
+        let mut left = self.0.lock().unwrap();
+        let held = *left > 0;
+        *left = left.saturating_sub(1);
+        held
     }
     fn holder(&self) -> &str {
         HOLDER
@@ -281,7 +280,7 @@ async fn a_lease_lost_during_the_repair_keeps_the_source(pool: PgPool) -> sqlx::
     let (source, id) = filed_but_left_in_source(&site).await?;
     let mut filer = Filer::new(
         site.pool.clone(),
-        Arc::new(LosingFence(AtomicUsize::new(2))),
+        Arc::new(LosingFence(Mutex::new(2))),
         site.location.clone(),
         vec![site.source_row.clone()],
         ZONE,
