@@ -1,22 +1,8 @@
-//! The processing lease: one host at a time files calls. The `processing` row
-//! of `leases` names the holder and when its hold ends; each running host also
-//! renews a heartbeat row, `ingest:<host>`. Every time comes from the database
-//! server, so the hosts' own clocks play no part.
-//!
-//! - The holder renews its hold every `renew`, for `ttl`.
-//! - When a hold has run out, the preferred host may take the lease at once;
-//!   the other host must wait `grace` longer, so that a brief database
-//!   failover leaves the work where it was.
-//! - A holder that is not the preferred host gives the lease back once the
-//!   preferred host's heartbeat has been renewed for `return_after` without a
-//!   gap, by one process throughout (a restarted process starts the count
-//!   again).
-//!
-//! The lease also guards every write. `held` answers from a local monotonic
-//! deadline: the instant just before the last successful renewal was sent,
-//! plus `ttl`, minus `margin`. It asks the database nothing, so a process that
-//! was paused and resumes sees at once that its deadline has passed.
-//! `store::record` checks the lease row once more inside its transaction.
+//! The processing lease, kept in the `leases` table. The `processing` row
+//! names the process that files calls and when its hold expires; each running
+//! host also writes an `ingest:<host>` heartbeat row. [`Timings`] holds the
+//! intervals, [`Lease::tick`] runs one round, and [`Lease::held`] is the check
+//! made before every write.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -99,6 +85,8 @@ impl Lease {
         &self.me
     }
 
+    /// True until the deadline that the last successful renewal set: the
+    /// monotonic time read before its statement was sent, plus `ttl - margin`.
     pub fn held(&self) -> bool {
         self.state()
             .deadline
@@ -120,11 +108,13 @@ impl Lease {
         self.state().yielding
     }
 
-    /// One round: this host's heartbeat, the lease, and the watch on the other
-    /// host. A host whose paths fail (`healthy` false) gives the lease up and
-    /// stops its heartbeat, so that the other host neither waits for it nor
-    /// passes the lease back to it. A database error extends nothing: the hold
-    /// ends when its local deadline passes.
+    /// One round. Writes this host's heartbeat, then takes or renews the
+    /// `processing` row: renewed when this process holds it, taken when it
+    /// expired more than the grace ago (no grace for the preferred host). A
+    /// holder that is not preferred starts handing back once the other host's
+    /// heartbeat, from one process, has been seen for `return_after`. With
+    /// `healthy` false the lease and the heartbeat are released instead. A
+    /// failed round leaves the deadline as it was.
     pub async fn tick(&self, conn: &mut PgConnection, healthy: bool) -> sqlx::Result<()> {
         let result = self.round(conn, healthy).await;
         if result.is_err() {
@@ -252,9 +242,8 @@ impl Lease {
         Ok(done.rows_affected() == 1)
     }
 
-    /// A clean stop: gives the lease up and deletes this host's heartbeat. The
-    /// hold is marked as ended a day ago, longer than any grace, so the other
-    /// host takes the lease at its next round.
+    /// Sets the `processing` row's holder to '' with an expiry a day back, when
+    /// this process holds it, and deletes this host's heartbeat.
     pub async fn release(&self, conn: &mut PgConnection) -> sqlx::Result<()> {
         {
             let mut state = self.state();
