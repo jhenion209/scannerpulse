@@ -464,3 +464,34 @@ fn copies_are_looked_for_on_the_day_and_the_day_on_each_side() {
         ]
     );
 }
+
+// A rescan that lists the file before step 4 deletes it, and records it after,
+// puts the done row back to waiting with its file gone. The row keeps its call.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_filed_file_seen_again_after_its_deletion_stays_filed(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    let data = bravo();
+    let source = site.arrive(NAME, &data).await;
+    let mut filer = site.filer();
+    let done = outcomes(filer.pass(10).await?);
+    let [Outcome::Filed(id)] = done[..] else {
+        panic!("{done:?}")
+    };
+    assert_eq!(site.state(NAME).await.0, "done");
+
+    fs::write(&source, &data).unwrap();
+    site.seen(NAME).await;
+    assert_eq!(site.state(NAME).await.0, "waiting");
+    fs::remove_file(&source).unwrap();
+
+    let done = outcomes(filer.pass(10).await?);
+    assert_eq!(done, [Outcome::AlreadyFiled(id)]);
+    assert_eq!(site.state(NAME).await, ("done".to_string(), None));
+    assert_eq!(site.calls().await, [(id, rel())]);
+    let rejected: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_files WHERE state = 'rejected'")
+            .fetch_one(&site.pool)
+            .await?;
+    assert_eq!(rejected, 0);
+    Ok(())
+}

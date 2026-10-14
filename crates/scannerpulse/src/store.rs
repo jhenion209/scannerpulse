@@ -22,6 +22,10 @@ pub const PROCESSING_LEASE: &str = "processing";
 /// takeover.
 pub const FENCE_IDLE_TIMEOUT: &str = "5s";
 
+/// How the reason of a file rejected as gone from its source begins. Such a
+/// file waits again when it comes back.
+pub const MISSING: &str = "missing";
+
 /// Runs one database call under `limit`. A call that takes longer is a
 /// database error, so the caller's usual pause and retry apply.
 pub async fn limited<T>(
@@ -109,11 +113,11 @@ pub async fn upsert_seen(
          FROM unnest($2::text[], $3::bigint[], $4::timestamptz[]) AS u (rel_path, size, file_mtime) \
          ON CONFLICT (source_id, rel_path) DO UPDATE SET \
              seen_at = now(), size = EXCLUDED.size, file_mtime = EXCLUDED.file_mtime, \
-             state = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE 'missing%' \
+             state = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
                            AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                            AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
                           THEN 'rejected' ELSE 'waiting' END, \
-             reason = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE 'missing%' \
+             reason = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
                             AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                             AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
                            THEN f.reason END",
@@ -122,6 +126,7 @@ pub async fn upsert_seen(
     .bind(paths)
     .bind(sizes)
     .bind(mtimes)
+    .bind(MISSING)
     .execute(db)
     .await?;
     Ok(done.rows_affected())
@@ -135,6 +140,9 @@ pub struct Waiting {
     pub rel_path: String,
     pub size: Option<i64>,
     pub seen_at: DateTime<Utc>,
+    /// The call it was filed as, when it was filed before and seen again.
+    pub call_id: Option<i64>,
+    pub call_started_at: Option<DateTime<Utc>>,
 }
 
 /// Waiting files, oldest first, leaving out the ids in `skip`.
@@ -144,7 +152,7 @@ pub async fn waiting(
     skip: &[i64],
 ) -> sqlx::Result<Vec<Waiting>> {
     sqlx::query_as(
-        "SELECT id, source_id, rel_path, size, seen_at FROM ingest_files \
+        "SELECT id, source_id, rel_path, size, seen_at, call_id, call_started_at FROM ingest_files \
          WHERE state = 'waiting' AND id <> ALL($2) ORDER BY first_seen, id LIMIT $1",
     )
     .bind(limit)

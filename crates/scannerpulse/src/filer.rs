@@ -23,7 +23,7 @@ use sqlx::PgPool;
 
 use crate::archive::{self, Place};
 use crate::reader::{self, FileCall, ReadError};
-use crate::store::{self, Location, NewCall, RecordError, Source, Waiting, limited};
+use crate::store::{self, Location, MISSING, NewCall, RecordError, Source, Waiting, limited};
 
 /// Whether this host may file now, and under which name it holds the lease.
 /// The lease answers `held` from its local deadline, without a database call.
@@ -277,15 +277,29 @@ impl Filer {
         Ok(Outcome::Rejected(why))
     }
 
-    /// A waiting file that is gone from its source. The other host may have
+    /// A waiting file that is gone from its source. A file filed before is
+    /// done again at once with its call. Otherwise the other host may have
     /// filed it before it lost the lease, so after the grace the archive is
     /// searched for a copy of the same name and size, in the folders of the
     /// name's date and the day on each side.
     async fn missing(&mut self, row: &Waiting) -> sqlx::Result<Outcome> {
+        // Filed before, then seen again by a rescan just before step 4
+        // deleted it: done again with its call, without a search.
+        if let (Some(id), Some(started_at)) = (row.call_id, row.call_started_at) {
+            if !self.fence.held() {
+                return Ok(Outcome::LeaseLost);
+            }
+            limited(
+                self.db_limit,
+                store::mark_done(&self.pool, row.id, (id, started_at)),
+            )
+            .await?;
+            return Ok(Outcome::AlreadyFiled(id));
+        }
         let gone = (Utc::now() - row.seen_at).to_std().unwrap_or_default();
         if gone < self.missing_grace {
             return Ok(Outcome::Later {
-                why: "missing from its source; waiting for the grace to end".to_string(),
+                why: format!("{MISSING} from its source; waiting for the grace to end"),
                 retry: (self.missing_grace - gone).min(RETRY_AFTER),
             });
         }
@@ -294,7 +308,7 @@ impl Filer {
             reader::start_time(name),
             row.size.and_then(|size| u64::try_from(size).ok()),
         ) else {
-            return self.reject(row, "missing".to_string()).await;
+            return self.reject(row, MISSING.to_string()).await;
         };
         let copies = match find_copies(&self.location.root, start.date(), name, size) {
             Ok(copies) => copies,
@@ -306,11 +320,11 @@ impl Filer {
             }
         };
         let path = match copies.as_slice() {
-            [] => return self.reject(row, "missing".to_string()).await,
+            [] => return self.reject(row, MISSING.to_string()).await,
             [path] => path,
             more => {
                 let why = format!(
-                    "missing: {} files of the same name and size in the archive",
+                    "{MISSING}: {} files of the same name and size in the archive",
                     more.len()
                 );
                 return self.reject(row, why).await;
@@ -321,7 +335,7 @@ impl Filer {
             .ok()
             .and_then(|rel| rel.to_str())
         else {
-            return self.reject(row, "missing".to_string()).await;
+            return self.reject(row, MISSING.to_string()).await;
         };
         let call = match reader::read_path(path, self.zone) {
             Ok((call, _)) => call,
