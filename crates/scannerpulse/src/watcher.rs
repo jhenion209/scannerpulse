@@ -78,9 +78,15 @@ impl Watcher {
         let mut still_there = HashSet::new();
         let mut listed = HashSet::new();
         for source in self.sources.clone() {
-            let Ok(found) = list(&source.path, &mut self.reported) else {
-                crate::log::warn(format!("cannot list the source {}", source.path.display()));
-                continue;
+            let found = match list(&source.path, &mut self.reported) {
+                Ok(found) => found,
+                Err(error) => {
+                    crate::log::warn(format!(
+                        "cannot list the source {}: {error}",
+                        source.path.display()
+                    ));
+                    continue;
+                }
             };
             listed.insert(source.id);
             for (rel_path, meta) in found {

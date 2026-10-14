@@ -17,6 +17,9 @@ listen.
   of them work at a time, and the other takes over when it stops. It reads
   `DATABASE_URL`, `SCANNERPULSE_HOST` (default: the host's name) and
   `SCANNERPULSE_PREFERRED` (`true` on the host that should work when both run).
+  The rest of its configuration is in the database: the `time_zone` setting,
+  the primary archive location and the enabled sources. Until a web interface
+  exists, these are added with SQL.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
