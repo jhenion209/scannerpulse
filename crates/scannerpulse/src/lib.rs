@@ -2,6 +2,8 @@
 
 pub mod archive;
 pub mod filer;
+pub mod health;
+pub mod lease;
 pub mod localtime;
 pub mod log;
 pub mod mp3;

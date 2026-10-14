@@ -4,28 +4,33 @@ use std::time::Duration;
 
 use chrono::SecondsFormat;
 use scannerpulse::MIGRATOR;
+use scannerpulse::lease;
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
 
-/// How long `db-update` waits for the database server to accept the connection.
+/// How long a command waits for the database server to accept the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const USAGE: &str = "\
 usage: scannerpulse db-update [--quiet]
+       scannerpulse lease
        scannerpulse read --zone ZONE FILE...
        scannerpulse --version
        scannerpulse --help
 
 db-update   create or update the database schema (reads DATABASE_URL)
+lease       show which host holds the processing lease, and each host's
+            heartbeat; exit 0 when the lease has a valid holder
 read        print what ingest reads from each file, one JSON line per file;
             ZONE is the time zone of the times in the file names";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     DbUpdate { quiet: bool },
+    Lease,
     Read { zone: String, files: Vec<String> },
     Version,
     Help,
@@ -37,6 +42,7 @@ fn parse(args: &[&str]) -> Option<Command> {
     match args {
         ["db-update"] => Some(Command::DbUpdate { quiet: false }),
         ["db-update", "--quiet"] => Some(Command::DbUpdate { quiet: true }),
+        ["lease"] => Some(Command::Lease),
         ["read", "--zone", zone, files @ ..] if !files.is_empty() => Some(Command::Read {
             zone: zone.to_string(),
             files: files.iter().map(|file| file.to_string()).collect(),
@@ -63,6 +69,7 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Command::Lease) => lease_status().await,
         Some(Command::Read { zone, files }) => read(&zone, &files),
         Some(Command::Version) => {
             println!("scannerpulse {}", env!("CARGO_PKG_VERSION"));
@@ -79,12 +86,13 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn db_update(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// One connection to DATABASE_URL, not a pool: a refused connection fails at
+/// once with the real error. An address that never answers would wait for the
+/// operating system's own limit, which is minutes, so give up after
+/// CONNECT_TIMEOUT.
+async fn connect() -> Result<PgConnection, Box<dyn std::error::Error>> {
     let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set")?;
-    // One connection, not a pool: a refused connection fails at once with the real
-    // error. An address that never answers would wait for the operating system's own
-    // limit, which is minutes, so give up after CONNECT_TIMEOUT.
-    let mut conn = tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(&url))
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(&url))
         .await
         .map_err(|_| {
             format!(
@@ -92,6 +100,34 @@ async fn db_update(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
                 CONNECT_TIMEOUT.as_secs()
             )
         })??;
+    Ok(conn)
+}
+
+async fn lease_status() -> ExitCode {
+    let status = match connect().await {
+        Ok(mut conn) => lease::status(&mut conn).await.map_err(Into::into),
+        Err(error) => Err(error),
+    };
+    match status {
+        Ok(status) => {
+            for line in status.lines() {
+                println!("{line}");
+            }
+            if status.valid() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("lease: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn db_update(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = connect().await?;
     let before = applied(&mut conn).await?;
     MIGRATOR.run(&mut conn).await?;
     if !quiet {
@@ -201,6 +237,12 @@ mod tests {
     fn version_and_help_stand_alone() {
         assert_eq!(parse(&["--version"]), Some(Command::Version));
         assert_eq!(parse(&["--help"]), Some(Command::Help));
+    }
+
+    #[test]
+    fn lease_takes_no_argument() {
+        assert_eq!(parse(&["lease"]), Some(Command::Lease));
+        assert_eq!(parse(&["lease", "--quiet"]), None);
     }
 
     #[test]
