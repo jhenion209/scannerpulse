@@ -5,6 +5,7 @@ pub mod localtime;
 pub mod mp3;
 pub mod reader;
 pub mod settings;
+pub mod store;
 
 /// The schema, applied by `scannerpulse db-update`.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
