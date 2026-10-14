@@ -64,8 +64,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// The host's settings from the environment, until sub-project 5 sets the
-    /// host configuration file: DATABASE_URL (the password in the file that
+    /// The host's settings from the environment, until a host configuration
+    /// file takes their place: DATABASE_URL (the password in the file that
     /// PGPASSFILE names), SCANNERPULSE_HOST (default: the system's host name)
     /// and SCANNERPULSE_PREFERRED (`true` on one host of a pair).
     pub fn from_env() -> Result<Config, String> {

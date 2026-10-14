@@ -1,4 +1,4 @@
--- Ingest (sub-project 2): the files seen in the sources, the transcription
+-- Ingest: the files seen in the sources, the transcription
 -- queue, the processing lease, the settings, and the evaluation sets and runs
 -- of the transcription improvement module. Additive, like every migration
 -- after 0001.
