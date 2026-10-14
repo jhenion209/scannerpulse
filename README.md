@@ -7,6 +7,19 @@ listen.
 
 **Status: early development. There is nothing to install yet.**
 
+## Commands
+
+`scannerpulse --help` lists them. So far:
+
+- `db-update` creates or updates the database schema.
+- `ingest` watches the source folders and files each new call into the
+  archive. Two hosts can run it side by side: a lease in the database lets one
+  of them work at a time, and the other takes over when it stops. It reads
+  `DATABASE_URL`, `SCANNERPULSE_HOST` (default: the host's name) and
+  `SCANNERPULSE_PREFERRED` (`true` on the host that should work when both run).
+- `lease` shows which host holds the lease, and each host's heartbeat.
+- `read --zone ZONE FILE...` prints what ingest reads from each file.
+
 ## Licence
 
 Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`) or
