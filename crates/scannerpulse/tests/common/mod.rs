@@ -1,0 +1,32 @@
+//! Shared by the integration tests. All values are invented.
+#![allow(dead_code)]
+
+/// The header of an MPEG-2 layer III frame: 32 kbit/s, 16 kHz, mono, no CRC.
+/// The frame is 144 bytes long and holds 576 samples, 36 ms.
+pub const FRAME_HEADER: [u8; 4] = [0xFF, 0xF3, 0x48, 0xC4];
+pub const FRAME_LEN: usize = 144;
+
+/// One silent frame of that kind.
+pub fn frame() -> Vec<u8> {
+    let mut frame = vec![0u8; FRAME_LEN];
+    frame[..4].copy_from_slice(&FRAME_HEADER);
+    frame
+}
+
+/// `n` such frames, 36 ms each.
+pub fn frames(n: usize) -> Vec<u8> {
+    frame().repeat(n)
+}
+
+/// An ID3v2.4 header for a tag body of `body` bytes, which the caller appends.
+pub fn id3v2_header(body: usize) -> Vec<u8> {
+    let size = [
+        ((body >> 21) & 0x7F) as u8,
+        ((body >> 14) & 0x7F) as u8,
+        ((body >> 7) & 0x7F) as u8,
+        (body & 0x7F) as u8,
+    ];
+    let mut header = b"ID3\x04\x00\x00".to_vec();
+    header.extend_from_slice(&size);
+    header
+}
