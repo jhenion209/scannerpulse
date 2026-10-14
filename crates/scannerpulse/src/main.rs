@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use chrono::SecondsFormat;
 use scannerpulse::MIGRATOR;
-use scannerpulse::lease;
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
+use scannerpulse::{ingest, lease};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -16,12 +16,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const USAGE: &str = "\
 usage: scannerpulse db-update [--quiet]
+       scannerpulse ingest
        scannerpulse lease
        scannerpulse read --zone ZONE FILE...
        scannerpulse --version
        scannerpulse --help
 
 db-update   create or update the database schema (reads DATABASE_URL)
+ingest      watch the sources and file their calls into the archive, sharing
+            the work with the other host through the lease (reads
+            DATABASE_URL, SCANNERPULSE_HOST, SCANNERPULSE_PREFERRED)
 lease       show which host holds the processing lease, and each host's
             heartbeat; exit 0 when the lease has a valid holder
 read        print what ingest reads from each file, one JSON line per file;
@@ -30,6 +34,7 @@ read        print what ingest reads from each file, one JSON line per file;
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     DbUpdate { quiet: bool },
+    Ingest,
     Lease,
     Read { zone: String, files: Vec<String> },
     Version,
@@ -42,6 +47,7 @@ fn parse(args: &[&str]) -> Option<Command> {
     match args {
         ["db-update"] => Some(Command::DbUpdate { quiet: false }),
         ["db-update", "--quiet"] => Some(Command::DbUpdate { quiet: true }),
+        ["ingest"] => Some(Command::Ingest),
         ["lease"] => Some(Command::Lease),
         ["read", "--zone", zone, files @ ..] if !files.is_empty() => Some(Command::Read {
             zone: zone.to_string(),
@@ -69,6 +75,19 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Command::Ingest) => match ingest::Config::from_env() {
+            Ok(config) => match ingest::run(config, shutdown()).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    scannerpulse::log::error(format!("ingest cannot run: {error}"));
+                    ExitCode::FAILURE
+                }
+            },
+            Err(error) => {
+                eprintln!("ingest: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Some(Command::Lease) => lease_status().await,
         Some(Command::Read { zone, files }) => read(&zone, &files),
         Some(Command::Version) => {
@@ -82,6 +101,22 @@ async fn main() -> ExitCode {
         None => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Completes at Ctrl-C or SIGTERM, which systemd sends at a stop.
+async fn shutdown() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
         }
     }
 }
@@ -240,7 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn lease_takes_no_argument() {
+    fn ingest_and_lease_take_no_argument() {
+        assert_eq!(parse(&["ingest"]), Some(Command::Ingest));
+        assert_eq!(parse(&["ingest", "--now"]), None);
         assert_eq!(parse(&["lease"]), Some(Command::Lease));
         assert_eq!(parse(&["lease", "--quiet"]), None);
     }

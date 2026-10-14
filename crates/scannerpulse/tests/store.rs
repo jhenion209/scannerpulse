@@ -347,6 +347,26 @@ async fn without_the_lease_nothing_is_recorded(pool: PgPool) -> sqlx::Result<()>
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn waiting_and_rejected_files_are_counted(pool: PgPool) -> sqlx::Result<()> {
+    let (_, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    store::upsert_seen(
+        &pool,
+        source,
+        &[seen("a.mp3", 5), seen("b.mp3", 5), seen("c.mp3", 5)],
+    )
+    .await?;
+    store::reject(&pool, row_id(&pool, "a.mp3").await, "no frame").await?;
+    store::mark_done(
+        &pool,
+        row_id(&pool, "b.mp3").await,
+        (1, utc("2031-01-15T18:00:00Z")),
+    )
+    .await?;
+    assert_eq!(store::counts(&pool).await?, (1, 1));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn only_old_rows_of_filed_files_are_pruned(pool: PgPool) -> sqlx::Result<()> {
     let (_, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
     store::upsert_seen(

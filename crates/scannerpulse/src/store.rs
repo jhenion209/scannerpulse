@@ -172,6 +172,16 @@ pub async fn prune_done(db: impl PgExecutor<'_>, days: u32) -> sqlx::Result<u64>
     Ok(done.rows_affected())
 }
 
+/// The numbers of waiting and of rejected files.
+pub async fn counts(db: impl PgExecutor<'_>) -> sqlx::Result<(i64, i64)> {
+    sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE state = 'waiting'), count(*) FILTER (WHERE state = 'rejected') \
+         FROM ingest_files",
+    )
+    .fetch_one(db)
+    .await
+}
+
 /// The call recorded for an archive file, if any. `near` is the call's start
 /// as its file gives it; the search stays within a day of it, so that it
 /// reads one or two month partitions.

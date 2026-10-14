@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod filer;
 pub mod health;
+pub mod ingest;
 pub mod lease;
 pub mod localtime;
 pub mod log;
