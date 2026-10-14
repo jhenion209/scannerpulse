@@ -224,3 +224,21 @@ async fn after_the_pool_stops_answering_a_new_file_is_filed(pool: PgPool) -> sql
     daemon.abort();
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stop_ends_ingest_while_the_database_never_answers(pool: PgPool) -> sqlx::Result<()> {
+    let port = common::silent_listener();
+    let mut config = config(&pool);
+    config.database = (*pool.connect_options())
+        .clone()
+        .host("127.0.0.1")
+        .port(port);
+    let (stop, daemon) = start(config);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.send(()).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), daemon)
+        .await
+        .expect("ingest did not end within 3 s of the stop");
+    assert_eq!(result.unwrap(), Ok(()));
+    Ok(())
+}

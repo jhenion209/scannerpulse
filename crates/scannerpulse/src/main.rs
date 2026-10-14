@@ -76,13 +76,18 @@ async fn main() -> ExitCode {
             }
         },
         Some(Command::Ingest) => match ingest::Config::from_env() {
-            Ok(config) => match ingest::run(config, shutdown()).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    scannerpulse::log::error(format!("ingest cannot run: {error}"));
-                    ExitCode::FAILURE
-                }
-            },
+            Ok(config) => {
+                let code = match ingest::run(config, shutdown()).await {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        scannerpulse::log::error(format!("ingest cannot run: {error}"));
+                        1
+                    }
+                };
+                // Exit now: dropping the runtime would wait for every blocking
+                // thread, and a probe stuck on a hung mount never ends.
+                std::process::exit(code)
+            }
             Err(error) => {
                 eprintln!("ingest: {error}");
                 ExitCode::FAILURE

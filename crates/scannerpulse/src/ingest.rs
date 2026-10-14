@@ -40,6 +40,9 @@ pub const ROUND_LIMIT: Duration = Duration::from_secs(3);
 /// The default limit on every call through the pool.
 pub const DB_LIMIT: Duration = Duration::from_secs(30);
 
+/// How long a stop waits for the filer before it releases the lease anyway.
+pub const STOP_FILER_LIMIT: Duration = Duration::from_secs(20);
+
 /// Files per pass of the filer: a stop waits for one pass at most.
 const PASS_SIZE: i64 = 20;
 
@@ -143,9 +146,10 @@ struct Counts {
 }
 
 /// Runs ingest until `stop` completes. Err only for a setup error. At a stop
-/// the filer finishes its pass, then the lease is released, so that the other
-/// host takes it at its next round.
+/// the filer finishes its pass (for `STOP_FILER_LIMIT` at most), then the
+/// lease is released, so that the other host takes it at its next round.
 pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Result<(), String> {
+    tokio::pin!(stop);
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .acquire_timeout(RETRY)
@@ -162,15 +166,25 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         })
         .connect_lazy_with(config.database.clone());
     let setup = loop {
-        match setup(&pool, config.db_limit).await {
-            Ok(setup) => break setup,
-            Err(SetupError::Fatal(why)) => return Err(why),
-            Err(SetupError::Database(error)) => {
-                log::warn(format!(
-                    "the database cannot be read ({error}); trying again in 5 s"
-                ));
-                sleep(RETRY).await;
+        tokio::select! {
+            _ = &mut stop => {
+                log::info("stopped");
+                return Ok(());
             }
+            attempt = setup(&pool, config.db_limit) => match attempt {
+                Ok(setup) => break setup,
+                Err(SetupError::Fatal(why)) => return Err(why),
+                Err(SetupError::Database(error)) => log::warn(format!(
+                    "the database cannot be read ({error}); trying again in 5 s"
+                )),
+            },
+        }
+        tokio::select! {
+            _ = &mut stop => {
+                log::info("stopped");
+                return Ok(());
+            }
+            _ = sleep(RETRY) => {}
         }
     };
     let Setup {
@@ -208,24 +222,35 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let (release_tx, release_rx) = watch::channel(false);
+    // Health runs until the lease is released, so that the lease never renews
+    // on a stale "healthy".
     let tasks = [
-        tokio::spawn(health_loop(health, healthy.clone(), stop_rx.clone())),
-        tokio::spawn(watch_loop(
-            pool.clone(),
-            config.db_limit,
-            watcher,
-            settings.rescan,
-            config.stable_for,
-            stop_rx.clone(),
-        )),
-        tokio::spawn(summary_loop(
-            pool.clone(),
-            config.db_limit,
-            counts.clone(),
-            lease.clone(),
-            settings.done_rows_kept_days,
-            stop_rx.clone(),
-        )),
+        (
+            "health",
+            tokio::spawn(health_loop(health, healthy.clone(), release_rx.clone())),
+        ),
+        (
+            "watcher",
+            tokio::spawn(watch_loop(
+                pool.clone(),
+                config.db_limit,
+                watcher,
+                settings.rescan,
+                config.stable_for,
+                stop_rx.clone(),
+            )),
+        ),
+        (
+            "summary",
+            tokio::spawn(summary_loop(
+                pool.clone(),
+                config.db_limit,
+                counts.clone(),
+                lease.clone(),
+                settings.done_rows_kept_days,
+                stop_rx.clone(),
+            )),
+        ),
     ];
     let lease_task = tokio::spawn(lease_loop(
         config.database.clone(),
@@ -239,14 +264,29 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
     stop.await;
     log::info("stopping: the filer finishes its pass");
     let _ = stop_tx.send(true);
-    let _ = filer_task.await;
+    // A filer stuck on a hung mount must not keep the lease: once released,
+    // the fence is false, so a filer thread that wakes later writes nothing.
+    ended("filer", filer_task, STOP_FILER_LIMIT).await;
     let _ = release_tx.send(true);
-    let _ = lease_task.await;
-    for task in tasks {
-        let _ = task.await;
+    // One connect and one release.
+    ended(
+        "lease",
+        lease_task,
+        2 * ROUND_LIMIT + Duration::from_secs(1),
+    )
+    .await;
+    for (name, task) in tasks {
+        ended(name, task, Duration::from_secs(2)).await;
     }
     log::info("stopped");
     Ok(())
+}
+
+/// Waits for a task for `limit` at most, and names it when it did not end.
+async fn ended(name: &str, task: tokio::task::JoinHandle<()>, limit: Duration) {
+    if tokio::time::timeout(limit, task).await.is_err() {
+        log::warn(format!("the {name} task did not end within {limit:?}"));
+    }
 }
 
 /// Waits for `pause`; true when the stop came first.
