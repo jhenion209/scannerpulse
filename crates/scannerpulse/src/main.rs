@@ -1,7 +1,12 @@
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use chrono::SecondsFormat;
 use scannerpulse::MIGRATOR;
+use scannerpulse::localtime::TimeHow;
+use scannerpulse::reader::{self, FileCall, ReadError};
+use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
 
@@ -10,14 +15,18 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const USAGE: &str = "\
 usage: scannerpulse db-update [--quiet]
+       scannerpulse read --zone ZONE FILE...
        scannerpulse --version
        scannerpulse --help
 
-db-update   create or update the database schema (reads DATABASE_URL)";
+db-update   create or update the database schema (reads DATABASE_URL)
+read        print what ingest reads from each file, one JSON line per file;
+            ZONE is the time zone of the times in the file names";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     DbUpdate { quiet: bool },
+    Read { zone: String, files: Vec<String> },
     Version,
     Help,
 }
@@ -28,6 +37,10 @@ fn parse(args: &[&str]) -> Option<Command> {
     match args {
         ["db-update"] => Some(Command::DbUpdate { quiet: false }),
         ["db-update", "--quiet"] => Some(Command::DbUpdate { quiet: true }),
+        ["read", "--zone", zone, files @ ..] if !files.is_empty() => Some(Command::Read {
+            zone: zone.to_string(),
+            files: files.iter().map(|file| file.to_string()).collect(),
+        }),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -50,6 +63,7 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Command::Read { zone, files }) => read(&zone, &files),
         Some(Command::Version) => {
             println!("scannerpulse {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -103,6 +117,57 @@ async fn db_update(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Prints one JSON line per file. Exits 0 when every file was read.
+fn read(zone: &str, files: &[String]) -> ExitCode {
+    let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
+        eprintln!("read: {zone:?} is not a known time zone");
+        return ExitCode::from(2);
+    };
+    let mut all_read = true;
+    for file in files {
+        let line = match reader::read_path(Path::new(file), zone) {
+            Ok((call, _)) => call_json(file, &call),
+            Err(ReadError::Rejected(why)) => {
+                all_read = false;
+                json!({"file": file, "rejected": why})
+            }
+            Err(ReadError::Io(error)) => {
+                all_read = false;
+                json!({"file": file, "error": error.to_string()})
+            }
+        };
+        println!("{line}");
+    }
+    if all_read {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn call_json(file: &str, call: &FileCall) -> serde_json::Value {
+    let d = &call.described;
+    json!({
+        "file": file,
+        "started_at": call.started_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        "time_how": match call.time_how {
+            TimeHow::Plain => "plain",
+            TimeHow::ByMtime => "by_mtime",
+            TimeHow::EarlierDefault => "earlier_default",
+            TimeHow::Gap => "gap",
+        },
+        "duration_ms": call.duration_ms,
+        "file_mtime": call.file_mtime.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        "system": d.system,
+        "site": d.site,
+        "talkgroup": d.talkgroup.as_ref().map(|t| t.number),
+        "talkgroup_name": d.talkgroup.as_ref().map(|t| &t.name),
+        "title": d.title,
+        "radio_id": d.radio_id,
+        "radio_alias": d.radio_alias,
+    })
+}
+
 /// Versions already applied; empty when the database has never been updated.
 async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
@@ -136,6 +201,19 @@ mod tests {
     fn version_and_help_stand_alone() {
         assert_eq!(parse(&["--version"]), Some(Command::Version));
         assert_eq!(parse(&["--help"]), Some(Command::Help));
+    }
+
+    #[test]
+    fn read_takes_a_zone_and_one_file_or_more() {
+        assert_eq!(
+            parse(&["read", "--zone", "UTC", "a.mp3", "b.mp3"]),
+            Some(Command::Read {
+                zone: "UTC".to_string(),
+                files: vec!["a.mp3".to_string(), "b.mp3".to_string()],
+            })
+        );
+        assert_eq!(parse(&["read", "--zone", "UTC"]), None);
+        assert_eq!(parse(&["read", "a.mp3"]), None);
     }
 
     #[test]

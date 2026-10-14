@@ -18,6 +18,14 @@ pub fn frames(n: usize) -> Vec<u8> {
     frame().repeat(n)
 }
 
+/// A file: the tag, then `n` frames.
+pub fn tagged(tag: &id3::Tag, n: usize) -> Vec<u8> {
+    let mut data = Vec::new();
+    tag.write_to(&mut data, id3::Version::Id3v24).unwrap();
+    data.extend_from_slice(&frames(n));
+    data
+}
+
 /// An ID3v2.4 header for a tag body of `body` bytes, which the caller appends.
 pub fn id3v2_header(body: usize) -> Vec<u8> {
     let size = [

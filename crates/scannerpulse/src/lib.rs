@@ -2,6 +2,7 @@
 
 pub mod localtime;
 pub mod mp3;
+pub mod reader;
 pub mod settings;
 
 /// The schema, applied by `scannerpulse db-update`.
