@@ -436,3 +436,71 @@ async fn a_waiting_session_that_created_another_month_also_succeeds(
     assert_eq!(relations, 1);
     Ok(())
 }
+
+// A search lists its newest matches first. With the listing index the database reads
+// the newest month first and stops when the page is full; without it, it collects
+// every match of every month and sorts them.
+#[sqlx::test(migrations = "./migrations")]
+async fn newest_transcripts_are_read_through_an_index(pool: PgPool) -> sqlx::Result<()> {
+    for day in ["2031-01-15", "2031-02-15"] {
+        sqlx::query("SELECT ensure_month_partitions($1::date)")
+            .bind(day)
+            .execute(&pool)
+            .await?;
+    }
+
+    // Months created after the migration get the index too. This counts tables, not
+    // indexes, so 3 means the parent and both months each have it.
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT tablename) FROM pg_indexes \
+         WHERE schemaname = current_schema() \
+           AND tablename IN ('transcripts', 'transcripts_y2031m01', 'transcripts_y2031m02') \
+           AND indexdef LIKE '%(started_at DESC, call_id DESC)'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        tables, 3,
+        "the listing index must exist on transcripts and on each of its two month partitions"
+    );
+
+    // The index must give the order, so that no sort is needed. SET LOCAL reaches the
+    // EXPLAIN only on the same connection and inside the same transaction.
+    let mut tx = pool.begin().await?;
+    for setting in [
+        "SET LOCAL enable_seqscan = off",
+        "SET LOCAL enable_bitmapscan = off",
+        "SET LOCAL enable_sort = off",
+    ] {
+        sqlx::query(setting).execute(&mut *tx).await?;
+    }
+    // EXPLAIN answers with the type json: read it as text, without sqlx's type check.
+    let plan: String = sqlx::query(
+        "EXPLAIN (FORMAT JSON) \
+         SELECT call_id, started_at FROM transcripts \
+         WHERE search @@ to_tsquery('simple', 'unit') \
+         ORDER BY started_at DESC, call_id DESC LIMIT 100",
+    )
+    .fetch_one(&mut *tx)
+    .await?
+    .try_get_unchecked(0)?;
+    tx.rollback().await?;
+    assert!(
+        !plan.contains("\"Node Type\": \"Sort\""),
+        "the newest-first query needs a sort: the listing index is missing \
+         or does not give the order\n{plan}"
+    );
+    assert!(
+        !plan.contains("\"Node Type\": \"Incremental Sort\""),
+        "the newest-first query needs an incremental sort: the listing index is missing \
+         or gives only part of the order\n{plan}"
+    );
+    // The two checks above would also pass if a later PostgreSQL spelled its plan
+    // differently, so the plan must also show the index being read.
+    assert!(
+        plan.contains("\"Node Type\": \"Index Scan\""),
+        "the newest-first query does not read through an index: the plan's format changed, \
+         or the listing index is not used\n{plan}"
+    );
+    Ok(())
+}
