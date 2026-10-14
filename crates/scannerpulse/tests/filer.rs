@@ -10,6 +10,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use id3::TagLike;
 use scannerpulse::archive;
 use scannerpulse::filer::{self, Fence, Filer, Outcome};
+use scannerpulse::ingest::Minute;
+use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader;
 use scannerpulse::store::{self, Location, NewCall, Seen, Source};
 use sqlx::PgPool;
@@ -154,7 +156,7 @@ async fn a_file_is_filed_from_start_to_finish(pool: PgPool) -> sqlx::Result<()> 
     let data = bravo();
     let source = site.arrive(NAME, &data).await;
     let done = outcomes(site.filer().pass(10).await?);
-    let [Outcome::Filed(id)] = done[..] else {
+    let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
     };
     assert_eq!(fs::read(site.archived(&rel())).unwrap(), data);
@@ -173,7 +175,7 @@ async fn a_name_taken_by_another_call_gets_a_number(pool: PgPool) -> sqlx::Resul
     fs::write(site.archived(&rel()), b"another call").unwrap();
     site.arrive(NAME, &bravo()).await;
     let done = outcomes(site.filer().pass(10).await?);
-    assert!(matches!(done[..], [Outcome::Filed(_)]), "{done:?}");
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
     let numbered = archive::candidate(NAME, 1);
     assert_eq!(site.folder(), [NAME.to_string(), numbered.clone()]);
     assert_eq!(fs::read(site.archived(&rel())).unwrap(), b"another call");
@@ -190,7 +192,7 @@ async fn a_crash_after_the_copy_leaves_a_part_file_that_is_replaced(
     site.arrive(NAME, &data).await;
     archive::write_part(&site.archived(&rel()), &data, &archive::sha256(&data)).unwrap();
     let done = outcomes(site.filer().pass(10).await?);
-    assert!(matches!(done[..], [Outcome::Filed(_)]), "{done:?}");
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
     assert_eq!(site.folder(), [NAME]);
     assert_eq!(fs::read(site.archived(&rel())).unwrap(), data);
     Ok(())
@@ -207,7 +209,7 @@ async fn a_crash_after_the_rename_records_the_copy_without_copying_again(
     archive::write_part(&target, &data, &archive::sha256(&data)).unwrap();
     archive::finish_part(&target).unwrap();
     let done = outcomes(site.filer().pass(10).await?);
-    let [Outcome::Filed(id)] = done[..] else {
+    let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
     };
     assert_eq!(site.folder(), [NAME], "the file must not be filed twice");
@@ -359,7 +361,7 @@ async fn a_missing_file_found_in_the_archive_is_recorded_once(pool: PgPool) -> s
     fs::write(site.archived(&rel()), &data).unwrap();
     gone(&site, data.len(), "20 minutes").await;
     let done = outcomes(site.filer().pass(10).await?);
-    let [Outcome::Filed(id)] = done[..] else {
+    let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
     };
     assert_eq!(site.calls().await, [(id, rel())]);
@@ -422,7 +424,7 @@ async fn a_lease_lost_before_recording_leaves_the_copy_for_the_next_holder(
 
     common::hold_lease(&site.pool, HOLDER).await;
     let done = outcomes(site.filer().pass(10).await?);
-    assert!(matches!(done[..], [Outcome::Filed(_)]), "{done:?}");
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
     assert_eq!(site.folder(), [NAME]);
     assert!(!source.exists());
     Ok(())
@@ -474,7 +476,7 @@ async fn a_filed_file_seen_again_after_its_deletion_stays_filed(pool: PgPool) ->
     let source = site.arrive(NAME, &data).await;
     let mut filer = site.filer();
     let done = outcomes(filer.pass(10).await?);
-    let [Outcome::Filed(id)] = done[..] else {
+    let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
     };
     assert_eq!(site.state(NAME).await.0, "done");
@@ -493,5 +495,31 @@ async fn a_filed_file_seen_again_after_its_deletion_stays_filed(pool: PgPool) ->
             .fetch_one(&site.pool)
             .await?;
     assert_eq!(rejected, 0);
+    Ok(())
+}
+
+// 2031-03-09 02:30 does not exist in Chicago: the clocks go from 02:00 CST to 03:00 CDT.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_call_in_the_spring_gap_is_filed_shifted_and_counted(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    site.arrive(
+        "20310309_023000SYSB_South_Bravo__TO_215_FROM_4021.mp3",
+        &bravo(),
+    )
+    .await;
+    let done = outcomes(site.filer().pass(10).await?);
+    assert!(
+        matches!(done[..], [Outcome::Filed(_, TimeHow::Gap)]),
+        "{done:?}"
+    );
+    let mut minute = Minute::default();
+    for outcome in &done {
+        minute.add(outcome);
+    }
+    let line = minute.line("holder", "0 waiting, 0 rejected in all");
+    assert!(
+        line.contains("1 shifted (spring gap), 0 guessed (repeated hour)"),
+        "{line}"
+    );
     Ok(())
 }

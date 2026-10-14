@@ -22,6 +22,7 @@ use chrono_tz::Tz;
 use sqlx::PgPool;
 
 use crate::archive::{self, Place};
+use crate::localtime::TimeHow;
 use crate::reader::{self, FileCall, ReadError};
 use crate::store::{self, Location, MISSING, NewCall, RecordError, Source, Waiting, limited};
 
@@ -43,8 +44,8 @@ const DEFAULT_DB_LIMIT: Duration = Duration::from_secs(30);
 /// What happened to one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Filed, and recorded as this call.
-    Filed(i64),
+    /// Filed, and recorded as this call; how its start became an instant.
+    Filed(i64, TimeHow),
     /// Its archive copy had been recorded as this call already.
     AlreadyFiled(i64),
     /// It cannot be filed, for this reason; it stays where it is.
@@ -219,7 +220,8 @@ impl Filer {
         if self.fence.held() {
             self.delete_source(&path, &data, &call);
         }
-        Ok(Outcome::Filed(id))
+        note_time(&row.rel_path, &call);
+        Ok(Outcome::Filed(id, call.time_how))
     }
 
     /// Step 3. Err holds the outcome when the call was not recorded.
@@ -359,7 +361,10 @@ impl Filer {
             return Ok(Outcome::AlreadyFiled(found.0));
         }
         Ok(match self.record(row, &call, rel).await? {
-            Ok(id) => Outcome::Filed(id),
+            Ok(id) => {
+                note_time(&row.rel_path, &call);
+                Outcome::Filed(id, call.time_how)
+            }
             Err(outcome) => outcome,
         })
     }
@@ -379,6 +384,19 @@ impl Filer {
             )),
         }
     }
+}
+
+/// One line for a call whose start was shifted or guessed.
+fn note_time(rel_path: &str, call: &FileCall) {
+    let how = match call.time_how {
+        TimeHow::Gap => "lies in the spring gap; it is shifted forward to",
+        TimeHow::EarlierDefault => "falls in the repeated hour; the earlier instant is guessed,",
+        TimeHow::Plain | TimeHow::ByMtime => return,
+    };
+    crate::log::info(format!(
+        "{rel_path}: its local time {} {how} {}",
+        call.local_start, call.started_at
+    ));
 }
 
 /// Deletes the file when its size and modification time are still `size` and

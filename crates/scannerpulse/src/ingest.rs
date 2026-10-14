@@ -5,8 +5,8 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -18,6 +18,7 @@ use tokio::time::sleep;
 use crate::filer::{Filer, Outcome};
 use crate::health::{self, Health, HealthTimings};
 use crate::lease::{Lease, Timings};
+use crate::localtime::TimeHow;
 use crate::log;
 use crate::settings::{self, IngestSettings, SettingsError};
 use crate::store::{self, Location, Source, Waiting, limited};
@@ -138,11 +139,64 @@ async fn setup(pool: &PgPool, limit: Duration) -> Result<Setup, SetupError> {
     })
 }
 
-#[derive(Default)]
-struct Counts {
-    filed: AtomicU64,
-    found: AtomicU64,
-    rejected: AtomicU64,
+/// What the filer did in one summary period.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Minute {
+    pub filed: u64,
+    pub found: u64,
+    pub rejected: u64,
+    /// Filed calls whose local time lay in the spring gap.
+    pub shifted: u64,
+    /// Filed calls in the repeated hour whose instant was a guess.
+    pub guessed: u64,
+}
+
+impl Minute {
+    /// Counts one file's outcome.
+    pub fn add(&mut self, outcome: &Outcome) {
+        match outcome {
+            Outcome::Filed(_, how) => {
+                self.filed += 1;
+                match how {
+                    TimeHow::Gap => self.shifted += 1,
+                    TimeHow::EarlierDefault => self.guessed += 1,
+                    TimeHow::Plain | TimeHow::ByMtime => {}
+                }
+            }
+            Outcome::AlreadyFiled(_) => self.found += 1,
+            Outcome::Rejected(_) => self.rejected += 1,
+            Outcome::Later { .. } | Outcome::LeaseLost => {}
+        }
+    }
+
+    /// The summary line; `role` is holder or standby, `files` the counts of
+    /// the table.
+    pub fn line(&self, role: &str, files: &str) -> String {
+        let Minute {
+            filed,
+            found,
+            rejected,
+            shifted,
+            guessed,
+        } = self;
+        let times = if shifted + guessed > 0 {
+            format!(", {shifted} shifted (spring gap), {guessed} guessed (repeated hour)")
+        } else {
+            String::new()
+        };
+        format!(
+            "last minute ({role}): {filed} filed, {found} found filed, {rejected} rejected{times}; {files}"
+        )
+    }
+}
+
+type Counts = Mutex<Minute>;
+
+fn lock(counts: &Counts) -> std::sync::MutexGuard<'_, Minute> {
+    // Plain numbers: a panic elsewhere cannot leave them half written.
+    counts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Runs ingest until `stop` completes. Err only for a setup error. At a stop
@@ -428,19 +482,13 @@ async fn file_loop(
 }
 
 fn report(row: &Waiting, outcome: &Outcome, counts: &Counts) {
+    lock(counts).add(outcome);
     match outcome {
-        Outcome::Filed(id) => {
-            counts.filed.fetch_add(1, Ordering::Relaxed);
-            log::debug(format!("filed {} as call {id}", row.rel_path));
-        }
+        Outcome::Filed(id, _) => log::debug(format!("filed {} as call {id}", row.rel_path)),
         Outcome::AlreadyFiled(id) => {
-            counts.found.fetch_add(1, Ordering::Relaxed);
-            log::debug(format!("{} had been filed as call {id}", row.rel_path));
+            log::debug(format!("{} had been filed as call {id}", row.rel_path))
         }
-        Outcome::Rejected(why) => {
-            counts.rejected.fetch_add(1, Ordering::Relaxed);
-            log::info(format!("rejected {}: {why}", row.rel_path));
-        }
+        Outcome::Rejected(why) => log::info(format!("rejected {}: {why}", row.rel_path)),
         Outcome::Later { why, .. } => log::warn(format!("{}: {why}", row.rel_path)),
         Outcome::LeaseLost => log::info(format!(
             "the lease was lost while filing; {} stays waiting",
@@ -573,9 +621,7 @@ async fn summary_loop(
         if wait(&mut stop, SUMMARY_EVERY).await {
             break;
         }
-        let filed = counts.filed.swap(0, Ordering::Relaxed);
-        let found = counts.found.swap(0, Ordering::Relaxed);
-        let rejected = counts.rejected.swap(0, Ordering::Relaxed);
+        let minute = std::mem::take(&mut *lock(&counts));
         let files = match limited(db_limit, store::counts(&pool)).await {
             Ok((waiting, rejected_all)) => {
                 format!("{waiting} waiting, {rejected_all} rejected in all")
@@ -583,9 +629,7 @@ async fn summary_loop(
             Err(error) => format!("the counts cannot be read: {error}"),
         };
         let role = if lease.held() { "holder" } else { "standby" };
-        log::info(format!(
-            "last minute ({role}): {filed} filed, {found} found filed, {rejected} rejected; {files}"
-        ));
+        log::info(minute.line(role, &files));
         if lease.held() && pruned.is_none_or(|at| at.elapsed() >= PRUNE_EVERY) {
             match limited(db_limit, store::prune_done(&pool, kept_days)).await {
                 Ok(n) => log::debug(format!("pruned {n} rows of filed files")),
