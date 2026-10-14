@@ -1,10 +1,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+use scannerpulse::MIGRATOR;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// How long `db-update` waits for the database server to accept the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

@@ -504,3 +504,69 @@ async fn newest_transcripts_are_read_through_an_index(pool: PgPool) -> sqlx::Res
     );
     Ok(())
 }
+
+// Migration 0003: ingest.
+
+const INSERT_INGEST_FILE: &str = "INSERT INTO ingest_files (source_id, rel_path, first_seen, seen_at, state) \
+     VALUES ($1, 'a.mp3', now(), now(), $2)";
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_file_has_one_ingest_row_per_source(pool: PgPool) -> sqlx::Result<()> {
+    let (_, _, source) = seed(&pool).await?;
+    sqlx::query(INSERT_INGEST_FILE)
+        .bind(source)
+        .bind("waiting")
+        .execute(&pool)
+        .await?;
+    let err = sqlx::query(INSERT_INGEST_FILE)
+        .bind(source)
+        .bind("waiting")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("ingest_files_source_id_rel_path_key"),
+        "{err}"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_ingest_row_is_waiting_done_or_rejected(pool: PgPool) -> sqlx::Result<()> {
+    let (_, _, source) = seed(&pool).await?;
+    let err = sqlx::query(INSERT_INGEST_FILE)
+        .bind(source)
+        .bind("filed")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("ingest_files_state"), "{err}");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_queued_call_leaves_the_queue_with_its_call(pool: PgPool) -> sqlx::Result<()> {
+    let ids = seed(&pool).await?;
+    sqlx::query("SELECT ensure_month_partitions('2031-01-15')")
+        .execute(&pool)
+        .await?;
+    let call = add_call(&pool, ids, "2031-01-15 12:00:00+00", "2031-01-15/a.mp3").await?;
+    let id: i64 = call.get("id");
+    sqlx::query(
+        "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+         VALUES ($1, '2031-01-15 12:00:00+00', now(), now(), 'queued')",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM calls WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM transcription_queue")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(left, 0, "the queue row must go when its call is deleted");
+    Ok(())
+}
