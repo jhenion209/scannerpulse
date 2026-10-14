@@ -3,7 +3,7 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -216,11 +216,10 @@ async fn a_crash_after_the_rename_records_the_copy_without_copying_again(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_crash_after_recording_deletes_the_source_on_the_next_pass(
-    pool: PgPool,
-) -> sqlx::Result<()> {
-    let site = Site::new(pool).await;
+/// Steps 1 to 3 done by hand, as a crash after step 3 leaves them: the file
+/// is in the archive and recorded, and still in its source, where the watcher
+/// has seen it again. Returns the source path and the call's id.
+async fn filed_but_left_in_source(site: &Site) -> sqlx::Result<(PathBuf, i64)> {
     let data = bravo();
     let source = site.arrive(NAME, &data).await;
     let target = site.archived(&rel());
@@ -240,14 +239,60 @@ async fn a_crash_after_recording_deletes_the_source_on_the_next_pass(
     };
     let mut conn = site.pool.acquire().await?;
     let (id, _) = store::record(&mut conn, HOLDER, row, &new).await.unwrap();
-
-    // The watcher still sees the file, so it waits again.
     site.seen(NAME).await;
+    Ok((source, id))
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_crash_after_recording_deletes_the_source_on_the_next_pass(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    let (source, id) = filed_but_left_in_source(&site).await?;
     let done = outcomes(site.filer().pass(10).await?);
     assert_eq!(done, [Outcome::AlreadyFiled(id)]);
     assert!(!source.exists());
-    assert_eq!(site.calls().await, [(id, rel)]);
+    assert_eq!(site.calls().await, [(id, rel())]);
     assert_eq!(site.state(NAME).await.0, "done");
+    Ok(())
+}
+
+/// Says "held" this many times, then never again: the lease is lost part way.
+struct LosingFence(AtomicUsize);
+
+impl Fence for LosingFence {
+    fn held(&self) -> bool {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
+    fn holder(&self) -> &str {
+        HOLDER
+    }
+}
+
+// The repair checks the lease twice before it marks the file done; when the
+// lease is lost after that, the source must stay where it is.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_lease_lost_during_the_repair_keeps_the_source(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    let (source, id) = filed_but_left_in_source(&site).await?;
+    let mut filer = Filer::new(
+        site.pool.clone(),
+        Arc::new(LosingFence(AtomicUsize::new(2))),
+        site.location.clone(),
+        vec![site.source_row.clone()],
+        ZONE,
+        Duration::from_secs(900),
+    );
+    let done = outcomes(filer.pass(10).await?);
+    assert_eq!(done, [Outcome::AlreadyFiled(id)]);
+    assert!(
+        source.exists(),
+        "without the lease the source must not be deleted"
+    );
     Ok(())
 }
 

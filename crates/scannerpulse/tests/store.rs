@@ -125,6 +125,19 @@ async fn a_rejected_file_waits_again_only_when_it_changes(pool: PgPool) -> sqlx:
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_file_rejected_as_missing_waits_again_when_it_comes_back(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (_, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
+    store::reject(&pool, row_id(&pool, "a.mp3").await, "missing").await?;
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
+    let (state, reason, ..) = row(&pool, "a.mp3").await;
+    assert_eq!((state.as_str(), reason), ("waiting", None));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_filed_file_still_in_the_source_waits_again(pool: PgPool) -> sqlx::Result<()> {
     let (_, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
     store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;

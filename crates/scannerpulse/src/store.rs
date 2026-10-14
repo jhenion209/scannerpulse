@@ -69,7 +69,8 @@ pub struct Seen {
 
 /// Records what the watcher sees in a source; each path at most once. A new
 /// file becomes a waiting row. A known file refreshes `seen_at`. A rejected
-/// file stays rejected unless its size or modification time changed. A filed
+/// file stays rejected unless its size or modification time changed, or it was
+/// rejected as missing: a missing file that comes back waits again. A filed
 /// file that is still in the source waits again, so that the filer finds its
 /// archive copy and deletes it.
 pub async fn upsert_seen(
@@ -86,11 +87,11 @@ pub async fn upsert_seen(
          FROM unnest($2::text[], $3::bigint[], $4::timestamptz[]) AS u (rel_path, size, file_mtime) \
          ON CONFLICT (source_id, rel_path) DO UPDATE SET \
              seen_at = now(), size = EXCLUDED.size, file_mtime = EXCLUDED.file_mtime, \
-             state = CASE WHEN f.state = 'rejected' \
+             state = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE 'missing%' \
                            AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                            AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
                           THEN 'rejected' ELSE 'waiting' END, \
-             reason = CASE WHEN f.state = 'rejected' \
+             reason = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE 'missing%' \
                             AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                             AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
                            THEN f.reason END",

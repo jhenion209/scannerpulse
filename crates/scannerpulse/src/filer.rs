@@ -171,7 +171,9 @@ impl Filer {
                         return Ok(Outcome::LeaseLost);
                     }
                     store::mark_done(&self.pool, row.id, found).await?;
-                    self.delete_source(&path, &data, &call);
+                    if self.fence.held() {
+                        self.delete_source(&path, &data, &call);
+                    }
                     return Ok(Outcome::AlreadyFiled(found.0));
                 }
                 rel
