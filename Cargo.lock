@@ -1149,6 +1149,7 @@ dependencies = [
  "id3",
  "regex",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",

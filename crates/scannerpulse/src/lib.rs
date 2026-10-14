@@ -1,5 +1,6 @@
 //! ScannerPulse records, archives and plays back trunked radio calls.
 
+pub mod archive;
 pub mod localtime;
 pub mod mp3;
 pub mod reader;
