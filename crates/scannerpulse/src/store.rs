@@ -3,7 +3,10 @@
 //! the recording of a call.
 
 use std::fmt;
+use std::future::Future;
+use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnection;
@@ -18,6 +21,25 @@ pub const PROCESSING_LEASE: &str = "processing";
 /// inside it would otherwise keep its lock on the lease row and block every
 /// takeover.
 pub const FENCE_IDLE_TIMEOUT: &str = "5s";
+
+/// Runs one database call under `limit`. A call that takes longer is a
+/// database error, so the caller's usual pause and retry apply.
+pub async fn limited<T>(
+    limit: Duration,
+    call: impl Future<Output = sqlx::Result<T>>,
+) -> sqlx::Result<T> {
+    tokio::time::timeout(limit, call)
+        .await
+        .unwrap_or_else(|_| Err(timed_out(limit)))
+}
+
+/// The error of a database call that did not end within `limit`.
+pub fn timed_out(limit: Duration) -> sqlx::Error {
+    sqlx::Error::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("the database did not answer within {limit:?}"),
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {

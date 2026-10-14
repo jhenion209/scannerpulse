@@ -23,7 +23,7 @@ use sqlx::PgPool;
 
 use crate::archive::{self, Place};
 use crate::reader::{self, FileCall, ReadError};
-use crate::store::{self, Location, NewCall, RecordError, Source, Waiting};
+use crate::store::{self, Location, NewCall, RecordError, Source, Waiting, limited};
 
 /// Whether this host may file now, and under which name it holds the lease.
 /// The lease answers `held` from its local deadline, without a database call.
@@ -37,6 +37,8 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// How often the archive is searched for a file that is missing from its source.
 pub const MISSING_SEARCH_EVERY: Duration = Duration::from_secs(300);
+
+const DEFAULT_DB_LIMIT: Duration = Duration::from_secs(30);
 
 /// What happened to one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,8 @@ pub struct Filer {
     sources: HashMap<i16, Source>,
     zone: Tz,
     missing_grace: Duration,
+    /// The limit on each database call.
+    db_limit: Duration,
     /// Files waiting for a retry, by row id, and when they may be tried.
     retry_at: HashMap<i64, Instant>,
 }
@@ -87,8 +91,16 @@ impl Filer {
             sources: sources.into_iter().map(|s| (s.id, s)).collect(),
             zone,
             missing_grace,
+            db_limit: DEFAULT_DB_LIMIT,
             retry_at: HashMap::new(),
         }
+    }
+
+    /// Sets the limit on each database call (default 30 s); a call that takes
+    /// longer is a database error.
+    pub fn with_db_limit(mut self, limit: Duration) -> Filer {
+        self.db_limit = limit;
+        self
     }
 
     /// Files up to `limit` waiting files, oldest first, and leaves out the
@@ -98,7 +110,7 @@ impl Filer {
         let now = Instant::now();
         self.retry_at.retain(|_, at| *at > now);
         let skip: Vec<i64> = self.retry_at.keys().copied().collect();
-        let rows = store::waiting(&self.pool, limit, &skip).await?;
+        let rows = limited(self.db_limit, store::waiting(&self.pool, limit, &skip)).await?;
         let mut done = Vec::with_capacity(rows.len());
         for row in rows {
             let outcome = self.file_one(&row).await?;
@@ -164,13 +176,16 @@ impl Filer {
         let rel = match place {
             // A crash after step 2 or 3 left the file in the archive.
             Place::Copy(rel) => {
-                if let Some(found) =
-                    store::call_at(&self.pool, self.location.id, &rel, call.started_at).await?
+                if let Some(found) = limited(
+                    self.db_limit,
+                    store::call_at(&self.pool, self.location.id, &rel, call.started_at),
+                )
+                .await?
                 {
                     if !self.fence.held() {
                         return Ok(Outcome::LeaseLost);
                     }
-                    store::mark_done(&self.pool, row.id, found).await?;
+                    limited(self.db_limit, store::mark_done(&self.pool, row.id, found)).await?;
                     if self.fence.held() {
                         self.delete_source(&path, &data, &call);
                     }
@@ -214,7 +229,12 @@ impl Filer {
         call: &FileCall,
         rel: &str,
     ) -> sqlx::Result<Result<i64, Outcome>> {
-        if let Err(error) = store::ensure_partition(&self.pool, call.started_at).await {
+        if let Err(error) = limited(
+            self.db_limit,
+            store::ensure_partition(&self.pool, call.started_at),
+        )
+        .await
+        {
             // lock_not_available: another session held the tables for more than 10 s.
             if has_code(&error, "55P03") {
                 return Ok(Err(later(format!(
@@ -226,14 +246,19 @@ impl Filer {
         if !self.fence.held() {
             return Ok(Err(Outcome::LeaseLost));
         }
-        let mut conn = self.pool.acquire().await?;
         let new = NewCall {
             call,
             source_id: row.source_id,
             location_id: self.location.id,
             rel_path: rel,
         };
-        match store::record(&mut conn, self.fence.holder(), row.id, &new).await {
+        let recorded = tokio::time::timeout(self.db_limit, async {
+            let mut conn = self.pool.acquire().await?;
+            store::record(&mut conn, self.fence.holder(), row.id, &new).await
+        })
+        .await
+        .unwrap_or_else(|_| Err(RecordError::Database(store::timed_out(self.db_limit))));
+        match recorded {
             Ok((id, _)) => Ok(Ok(id)),
             Err(RecordError::LeaseLost) => Ok(Err(Outcome::LeaseLost)),
             // unique_violation: a call has the path already; the next pass finds it.
@@ -248,7 +273,7 @@ impl Filer {
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost);
         }
-        store::reject(&self.pool, row.id, &why).await?;
+        limited(self.db_limit, store::reject(&self.pool, row.id, &why)).await?;
         Ok(Outcome::Rejected(why))
     }
 
@@ -307,13 +332,16 @@ impl Filer {
                 });
             }
         };
-        if let Some(found) =
-            store::call_at(&self.pool, self.location.id, rel, call.started_at).await?
+        if let Some(found) = limited(
+            self.db_limit,
+            store::call_at(&self.pool, self.location.id, rel, call.started_at),
+        )
+        .await?
         {
             if !self.fence.held() {
                 return Ok(Outcome::LeaseLost);
             }
-            store::mark_done(&self.pool, row.id, found).await?;
+            limited(self.db_limit, store::mark_done(&self.pool, row.id, found)).await?;
             return Ok(Outcome::AlreadyFiled(found.0));
         }
         Ok(match self.record(row, &call, rel).await? {
