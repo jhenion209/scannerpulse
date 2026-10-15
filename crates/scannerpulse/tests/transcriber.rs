@@ -237,3 +237,34 @@ async fn a_call_the_servers_keep_failing_on_is_deferred(pool: PgPool) -> sqlx::R
     assert_eq!(t.fill().await?, 0);
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_failing_write_is_not_sent_again_for_5_s(pool: PgPool) -> sqlx::Result<()> {
+    let server = FakeAsr::start(vec![Answer::Text("Engine 5")]);
+    let (_root, _fence, mut t, _calls) = site(&pool, 1, &server.url, 1).await;
+    sqlx::query(
+        "CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'refused for the test'; END $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER refuse BEFORE INSERT ON transcripts \
+         FOR EACH ROW EXECUTE FUNCTION refuse()",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(t.fill().await?, 1);
+    let done = tokio::time::timeout(Duration::from_secs(10), t.next_done())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(t.settle(done).await.is_err());
+    assert_eq!(t.fill().await?, 0, "held");
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    sqlx::query("DROP TRIGGER refuse ON transcripts")
+        .execute(&pool)
+        .await?;
+    assert_eq!(t.fill().await?, 1);
+    Ok(())
+}

@@ -10,6 +10,12 @@ use reqwest::multipart::{Form, Part};
 /// off sends nothing back, so this keeps the wait short.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The largest answer read from a server.
+pub const MAX_ANSWER_BYTES: usize = 1 << 20;
+
+/// The longest text kept from an answer, cut at a character boundary.
+pub const MAX_TEXT_BYTES: usize = 64 << 10;
+
 /// What one request asks for.
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
@@ -94,15 +100,22 @@ impl Client {
         if let Some(key) = &self.api_key {
             post = post.bearer_auth(key);
         }
-        let answer = post
+        let mut answer = post
             .send()
             .await
             .map_err(|error| AsrError::Server(describe(&error)))?;
         let status = answer.status();
-        let body = answer
-            .bytes()
+        let mut body = Vec::new();
+        while let Some(chunk) = answer
+            .chunk()
             .await
-            .map_err(|error| AsrError::Server(describe(&error)))?;
+            .map_err(|error| AsrError::Server(describe(&error)))?
+        {
+            if body.len() + chunk.len() > MAX_ANSWER_BYTES {
+                return Err(AsrError::Server("an answer larger than 1 MiB".to_string()));
+            }
+            body.extend_from_slice(&chunk);
+        }
         if status.is_client_error() && !servers_fault(status) {
             return Err(AsrError::Call(format!("{status}: {}", excerpt(&body))));
         }
@@ -120,8 +133,24 @@ impl Client {
             .ok_or_else(|| {
                 AsrError::Server(format!("an answer without text: {}", excerpt(&body)))
             })?;
+        let mut text = clean(&text);
+        if text.len() > MAX_TEXT_BYTES {
+            let mut at = MAX_TEXT_BYTES;
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            text.truncate(at);
+        }
         Ok(text.trim().to_string())
     }
+}
+
+/// `text` without NUL and the other control characters but `\n` and `\t`:
+/// a server's answer is not trusted.
+fn clean(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
 }
 
 /// A 4xx that says the server or its setup is wrong, not the call: a refused
@@ -143,7 +172,7 @@ fn describe(error: &reqwest::Error) -> String {
 
 /// The start of an answer's body, for an error message.
 fn excerpt(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
+    let text = clean(&String::from_utf8_lossy(body));
     let text = text.trim();
     match text.char_indices().nth(200) {
         Some((at, _)) => format!("{}...", &text[..at]),

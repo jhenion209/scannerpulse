@@ -28,6 +28,9 @@ use crate::store::{self, RecordError};
 
 const DEFAULT_DB_LIMIT: Duration = Duration::from_secs(30);
 
+/// How long a call whose result could not be written is kept out of `fill`.
+pub const RETRY_HOLD: Duration = Duration::from_secs(5);
+
 /// What became of one queued call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -69,6 +72,8 @@ pub struct Transcriber {
     in_flight: HashSet<i64>,
     /// Server faults per call, since its last other outcome.
     faults: HashMap<i64, u16>,
+    /// Calls whose result could not be written, held out until then.
+    held: HashMap<i64, Instant>,
     db_limit: Duration,
     servers_changed: bool,
 }
@@ -84,6 +89,7 @@ impl Transcriber {
             jobs: JoinSet::new(),
             in_flight: HashSet::new(),
             faults: HashMap::new(),
+            held: HashMap::new(),
             db_limit: DEFAULT_DB_LIMIT,
             servers_changed: false,
         }
@@ -144,7 +150,13 @@ impl Transcriber {
         if free == 0 {
             return Ok(0);
         }
-        let skip: Vec<i64> = self.in_flight.iter().copied().collect();
+        self.held.retain(|_, until| now < *until);
+        let skip: Vec<i64> = self
+            .in_flight
+            .iter()
+            .chain(self.held.keys())
+            .copied()
+            .collect();
         let due = store::limited(self.db_limit, queue::due(&self.pool, free.into(), &skip)).await?;
         let mut started = 0;
         for queued in due {
@@ -180,8 +192,18 @@ impl Transcriber {
         }
     }
 
-    /// Writes the result of a request that has ended.
+    /// Writes the result of a request that has ended. After a database error
+    /// the call is held out of `fill` for `RETRY_HOLD`.
     pub async fn settle(&mut self, done: Done) -> sqlx::Result<Outcome> {
+        let call = done.queued.call_id;
+        let settled = self.write(done).await;
+        if settled.is_err() {
+            self.held.insert(call, Instant::now() + RETRY_HOLD);
+        }
+        settled
+    }
+
+    async fn write(&mut self, done: Done) -> sqlx::Result<Outcome> {
         let Done {
             queued,
             server,

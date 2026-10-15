@@ -135,3 +135,24 @@ async fn an_auth_path_or_rate_limit_refusal_is_the_server_s_fault() {
         .await;
     assert!(matches!(result, Err(AsrError::Call(_))), "{result:?}");
 }
+
+#[tokio::test]
+async fn a_nul_in_the_text_or_in_an_error_body_is_taken_out() {
+    let server = FakeAsr::start(vec![
+        Answer::Raw(r#"{"text": "Engine\u0000 5"}"#),
+        Answer::Status(400, "bad\0 audio"),
+    ]);
+    let client = Client::new(None);
+    let ask = request(&server.url, Duration::from_secs(5));
+    assert_eq!(
+        client.transcribe(&ask, "c.mp3", vec![1]).await,
+        Ok("Engine 5".to_string())
+    );
+    match client.transcribe(&ask, "c.mp3", vec![1]).await {
+        Err(AsrError::Call(why)) => {
+            assert!(!why.contains('\0'), "{why:?}");
+            assert!(why.contains("bad audio"), "{why:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
