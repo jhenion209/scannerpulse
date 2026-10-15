@@ -253,3 +253,35 @@ async fn the_transcription_settings_are_read_from_the_table(pool: PgPool) -> sql
     assert_eq!(t.servers[0].url, "http://asr-1/v1/audio/transcriptions");
     Ok(())
 }
+
+#[test]
+fn the_improvement_module_and_the_public_list_are_off_unless_turned_on() {
+    let off = settings::improvement_from_values(&values(&[])).unwrap();
+    assert_eq!(off, settings::Improvement::default());
+    let on = settings::improvement_from_values(&values(&[
+        ("improvement_module.enabled", json!(true)),
+        ("labeler_list.public", json!(true)),
+    ]))
+    .unwrap();
+    assert!(on.enabled && on.labeler_list_public);
+    let bad =
+        settings::improvement_from_values(&values(&[("improvement_module.enabled", json!("yes"))]));
+    assert!(matches!(
+        bad,
+        Err(SettingsError::Invalid {
+            key: "improvement_module.enabled",
+            ..
+        })
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_improvement_switches_are_read_from_the_table(pool: PgPool) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('improvement_module.enabled', 'true')")
+        .execute(&pool)
+        .await?;
+    let read = settings::load_improvement(&pool).await.unwrap();
+    assert!(read.enabled);
+    assert!(!read.labeler_list_public);
+    Ok(())
+}

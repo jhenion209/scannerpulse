@@ -172,16 +172,7 @@ pub async fn load_transcription(
 pub fn transcription_from_values(
     values: &HashMap<String, Value>,
 ) -> Result<Option<Transcription>, SettingsError> {
-    let enabled = match values.get("transcription.enabled") {
-        None => false,
-        Some(value) => value.as_bool().ok_or_else(|| {
-            invalid(
-                "transcription.enabled",
-                format!("{value} is not true or false"),
-            )
-        })?,
-    };
-    if !enabled {
+    if !flag(values, "transcription.enabled")? {
         return Ok(None);
     }
     let servers = servers(values)?;
@@ -314,4 +305,47 @@ fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError
         });
     }
     Ok(servers)
+}
+
+/// The keys of the transcription improvement module.
+pub const IMPROVEMENT_KEYS: [&str; 2] = ["improvement_module.enabled", "labeler_list.public"];
+
+/// The improvement module's switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Improvement {
+    /// Turns on the evaluation commands.
+    pub enabled: bool,
+    /// Whether the labelers' list is shown to visitors, not only to admins.
+    pub labeler_list_public: bool,
+}
+
+/// Reads the improvement module's switches; both are off when not set.
+pub async fn load_improvement(db: impl sqlx::PgExecutor<'_>) -> Result<Improvement, SettingsError> {
+    let rows: Vec<(String, Value)> =
+        sqlx::query_as("SELECT key, value FROM settings WHERE key = ANY($1)")
+            .bind(&IMPROVEMENT_KEYS[..])
+            .fetch_all(db)
+            .await
+            .map_err(SettingsError::Database)?;
+    improvement_from_values(&rows.into_iter().collect())
+}
+
+/// The improvement module's switches from their stored values.
+pub fn improvement_from_values(
+    values: &HashMap<String, Value>,
+) -> Result<Improvement, SettingsError> {
+    Ok(Improvement {
+        enabled: flag(values, "improvement_module.enabled")?,
+        labeler_list_public: flag(values, "labeler_list.public")?,
+    })
+}
+
+/// A true-or-false setting; false when it is not set.
+fn flag(values: &HashMap<String, Value>, key: &'static str) -> Result<bool, SettingsError> {
+    match values.get(key) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| invalid(key, format!("{value} is not true or false"))),
+    }
 }
