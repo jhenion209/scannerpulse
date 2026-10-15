@@ -127,6 +127,24 @@ async fn a_draw_shares_the_calls_among_talkgroups_and_months(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_talkgroup_listed_twice_counts_once(pool: PgPool) {
+    let feb = Utc.with_ymd_and_hms(2031, 2, 10, 9, 0, 0).unwrap();
+    for n in 0..6 {
+        call(&pool, 127, feb + Duration::minutes(n), 2000, "text").await;
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    let once = evaluation::draw(&mut conn, &ask("once", &[127], 4), now(), ZONE)
+        .await
+        .unwrap();
+    let twice = evaluation::draw(&mut conn, &ask("twice", &[127, 127], 4), now(), ZONE)
+        .await
+        .unwrap();
+    assert_eq!(twice.talkgroups.len(), 1);
+    assert_eq!(twice.talkgroups[0].drawn, once.talkgroups[0].drawn);
+    assert_eq!(drawn(&pool, "twice").await, drawn(&pool, "once").await);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_same_seed_draws_the_same_calls(pool: PgPool) {
     let at = Utc.with_ymd_and_hms(2031, 3, 1, 0, 0, 0).unwrap();
     for i in 0..40 {

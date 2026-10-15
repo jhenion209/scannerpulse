@@ -107,8 +107,15 @@ pub async fn draw(
 ) -> Result<Drawn, EvalError> {
     let from = now - chrono::Duration::days(draw.days.into());
     let mut tx = conn.begin().await?;
+    // A talkgroup listed again counts once.
+    let mut listed: Vec<&(String, i64)> = Vec::new();
+    for talkgroup in &draw.talkgroups {
+        if !listed.contains(&talkgroup) {
+            listed.push(talkgroup);
+        }
+    }
     let mut found = Vec::new();
-    for (system, number) in &draw.talkgroups {
+    for (system, number) in listed.iter().copied() {
         let row: Option<(i32, bool)> = sqlx::query_as(
             "SELECT t.id, t.transcribe FROM talkgroups t JOIN systems s ON s.id = t.system_id \
              WHERE s.name = $1 AND t.number = $2",
@@ -165,7 +172,7 @@ pub async fn draw(
         .rows_affected() as usize;
     let mut talkgroups = Vec::new();
     for (((id, transcribe, months), quota), (system, number)) in
-        found.iter().zip(&quotas).zip(&draw.talkgroups)
+        found.iter().zip(&quotas).zip(listed.iter().copied())
     {
         let sizes: Vec<usize> = months.iter().map(|(_, n)| *n as usize).collect();
         let mut drawn = 0;
