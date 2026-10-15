@@ -51,6 +51,21 @@ pub const SETTINGS_EVERY: Duration = Duration::from_secs(60);
 /// How long a stop waits for the filer before it releases the lease anyway.
 pub const STOP_FILER_LIMIT: Duration = Duration::from_secs(20);
 
+/// How often each host reads the maintenance switch.
+pub const MAINTENANCE_EVERY: Duration = Duration::from_secs(2);
+
+/// The notice that asks every host's watcher to list its sources now.
+pub const RESCAN_CHANNEL: &str = "scannerpulse_rescan";
+
+/// Asks the watcher of every running ingest to list its sources at once.
+pub async fn request_rescan(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<()> {
+    sqlx::query("SELECT pg_notify($1, '')")
+        .bind(RESCAN_CHANNEL)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Files per pass of the filer: a stop waits for one pass at most.
 const PASS_SIZE: i64 = 20;
 
@@ -369,12 +384,29 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let (release_tx, release_rx) = watch::channel(false);
+    // While the maintenance switch is on, filing, transcription and jobs
+    // pause; the lease is kept.
+    let paused = Arc::new(AtomicBool::new(false));
+    let (rescan_tx, rescans) = mpsc::unbounded_channel::<()>();
     // Health runs until the lease is released, so that the lease never renews
     // on a stale "healthy".
     let tasks = [
         (
             "health",
             tokio::spawn(health_loop(health, healthy.clone(), release_rx.clone())),
+        ),
+        (
+            "maintenance",
+            tokio::spawn(maintenance_loop(
+                pool.clone(),
+                config.db_limit,
+                paused.clone(),
+                stop_rx.clone(),
+            )),
+        ),
+        (
+            "rescans",
+            tokio::spawn(rescan_loop(pool.clone(), rescan_tx, stop_rx.clone())),
         ),
         (
             "watcher",
@@ -384,6 +416,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
                 watcher,
                 settings.rescan,
                 config.stable_for,
+                rescans,
                 stop_rx.clone(),
             )),
         ),
@@ -408,6 +441,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
                 crate::jobs::Context::new(config.api_key.clone()),
                 lease.clone(),
                 healthy.clone(),
+                paused.clone(),
                 stop_rx.clone(),
             )),
         ),
@@ -420,6 +454,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
                 rule,
                 lease.clone(),
                 healthy.clone(),
+                paused.clone(),
                 heard,
                 stop_rx.clone(),
             )),
@@ -432,7 +467,9 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         busy.clone(),
         release_rx,
     ));
-    let filer_task = tokio::spawn(file_loop(filer, lease, healthy, busy, counts, stop_rx));
+    let filer_task = tokio::spawn(file_loop(
+        filer, lease, healthy, paused, busy, counts, stop_rx,
+    ));
 
     stop.await;
     log::info("stopping: the filer finishes its pass");
@@ -563,6 +600,7 @@ async fn file_loop(
     mut filer: Filer,
     lease: Arc<Lease>,
     healthy: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     counts: Arc<Counts>,
     mut stop: watch::Receiver<bool>,
@@ -571,7 +609,7 @@ async fn file_loop(
         if *stop.borrow() {
             break;
         }
-        if lease.should_work() && healthy.load(Ordering::SeqCst) {
+        if lease.should_work() && healthy.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
             busy.store(true, Ordering::SeqCst);
             let result = filer.pass(PASS_SIZE).await;
             busy.store(false, Ordering::SeqCst);
@@ -603,6 +641,7 @@ async fn file_loop(
 /// The job runner: while this host holds the lease, steps the job at the head
 /// of the line, one step after another; a stop asked for takes effect
 /// between steps, and a job left running by another host resumes here.
+#[allow(clippy::too_many_arguments)]
 async fn job_loop(
     pool: PgPool,
     db_limit: Duration,
@@ -610,13 +649,14 @@ async fn job_loop(
     context: crate::jobs::Context,
     lease: Arc<Lease>,
     healthy: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     mut stop: watch::Receiver<bool>,
 ) {
     loop {
         if *stop.borrow() {
             break;
         }
-        if lease.should_work() && healthy.load(Ordering::SeqCst) {
+        if lease.should_work() && healthy.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
             // The step's database work plus one candidate request, which the
             // request limit caps: a slow server ends its own step, and the
             // job line goes on.
@@ -672,6 +712,7 @@ async fn watch_loop(
     mut watcher: Watcher,
     rescan_every: Duration,
     stable_for: Duration,
+    mut rescans: mpsc::UnboundedReceiver<()>,
     mut stop: watch::Receiver<bool>,
 ) {
     let (events_tx, mut events) = mpsc::unbounded_channel::<PathBuf>();
@@ -683,6 +724,11 @@ async fn watch_loop(
         let now = Instant::now();
         while let Ok(path) = events.try_recv() {
             watcher.touch(&path, now);
+        }
+        // An admin asked for a rescan.
+        if rescans.try_recv().is_ok() {
+            while rescans.try_recv().is_ok() {}
+            next_rescan = now;
         }
         let batches = if now >= next_rescan {
             next_rescan = now + rescan_every;
@@ -705,6 +751,71 @@ async fn watch_loop(
             }
         }
         if wait(&mut stop, tick).await {
+            break;
+        }
+    }
+}
+
+/// Reads the maintenance switch every `MAINTENANCE_EVERY`; a value that
+/// cannot be read leaves the last one.
+async fn maintenance_loop(
+    pool: PgPool,
+    db_limit: Duration,
+    paused: Arc<AtomicBool>,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        let read = limited(db_limit, async {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT value FROM settings WHERE key = 'maintenance.enabled'",
+            )
+            .fetch_optional(&pool)
+            .await
+        })
+        .await;
+        if let Ok(value) = read {
+            let on = value.and_then(|v| v.as_bool()).unwrap_or(false);
+            if paused.swap(on, Ordering::SeqCst) != on {
+                log::info(if on {
+                    "maintenance is on: filing, transcription and jobs pause; the lease is kept"
+                } else {
+                    "maintenance is off: filing, transcription and jobs go on"
+                });
+            }
+        }
+        if wait(&mut stop, MAINTENANCE_EVERY).await {
+            break;
+        }
+    }
+}
+
+/// Hears the requests for a rescan and passes them to the watcher; a lost
+/// connection is opened again after a pause.
+async fn rescan_loop(
+    pool: PgPool,
+    rescans: mpsc::UnboundedSender<()>,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        let heard = async {
+            let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+            listener.listen(RESCAN_CHANNEL).await?;
+            loop {
+                listener.recv().await?;
+                let _ = rescans.send(());
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), sqlx::Error>(())
+        };
+        tokio::select! {
+            result = heard => {
+                if let Err(error) = result {
+                    log::warn(format!("rescan requests cannot be heard ({error}); trying again in 5 s"));
+                }
+            }
+            _ = stop.changed() => break,
+        }
+        if wait(&mut stop, RETRY).await {
             break;
         }
     }
@@ -832,6 +943,7 @@ async fn transcribe_loop(
     rule: Arc<AtomicI32>,
     lease: Arc<Lease>,
     healthy: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     heard: Arc<Mutex<Heard>>,
     mut stop: watch::Receiver<bool>,
 ) {
@@ -897,7 +1009,8 @@ async fn transcribe_loop(
                 }
             }
         }
-        if lease.should_work() && healthy.load(Ordering::SeqCst) {
+        // Requests under way finish; no new one starts during maintenance.
+        if lease.should_work() && healthy.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
             if let Err(error) = transcriber.fill().await {
                 log::warn(format!(
                     "transcription paused: the database failed ({error}); trying again in 5 s"

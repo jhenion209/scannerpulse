@@ -158,3 +158,33 @@ async fn a_job_that_cannot_run_is_refused(pool: PgPool) {
     .await;
     assert_eq!(asr.status, 400, "the improvement module is off");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_asks_for_a_rescan(pool: PgPool) {
+    let app = app(&pool);
+    assert_eq!(
+        send(&app, "POST", "/api/admin/rescan", &[], None)
+            .await
+            .status,
+        401
+    );
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .unwrap();
+    listener
+        .listen(scannerpulse::ingest::RESCAN_CHANNEL)
+        .await
+        .unwrap();
+    let change = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    assert_eq!(
+        send(&app, "POST", "/api/admin/rescan", &change, None)
+            .await
+            .status,
+        202
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
+        .await
+        .expect("the notice within 5 s")
+        .unwrap();
+}

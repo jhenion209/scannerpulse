@@ -153,6 +153,11 @@ listen.
   talkgroup's, or the backlog of every talkgroup whose transcription is on),
   and `jobs asr-run --set NAME --server URL --model MODEL [--prompt-file
   FILE]` is `asr run` as a job.
+- While the setting `maintenance.enabled` is true, ingest's filing,
+  transcription and jobs pause on every host (requests under way finish) and
+  the lease is kept, so the archive or a source can be serviced; the public
+  edit answers 503. `rescan` (or `POST /api/admin/rescan`) asks every
+  running ingest to list its sources at once.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 

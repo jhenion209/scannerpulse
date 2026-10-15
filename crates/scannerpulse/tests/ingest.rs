@@ -358,3 +358,59 @@ async fn a_standby_does_not_overwrite_the_holder_s_server_state(pool: PgPool) ->
         .unwrap();
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn maintenance_pauses_filing_and_keeps_the_lease(pool: PgPool) -> sqlx::Result<()> {
+    let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::seed_places(&pool, root.path(), source.path()).await;
+    set_zone(&pool).await;
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('maintenance.enabled', 'true')")
+        .execute(&pool)
+        .await?;
+    let (stop, daemon) = start(config(&pool));
+    until_held(&pool).await?;
+    fs::write(source.path().join(NAME), charlie()).unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let filed: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(filed, 0, "nothing is filed during maintenance");
+    assert!(source.path().join(NAME).exists());
+    assert!(lease::status(&pool).await?.valid(), "the lease is kept");
+    sqlx::query("UPDATE settings SET value = 'false' WHERE key = 'maintenance.enabled'")
+        .execute(&pool)
+        .await?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let filed: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
+            .fetch_one(&pool)
+            .await?;
+        if filed == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "filing did not resume within 20 s"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("ingest did not stop within 10 s")
+        .unwrap()
+        .unwrap();
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_rescan_request_is_a_notice_every_host_hears(pool: PgPool) -> sqlx::Result<()> {
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+    listener.listen(ingest::RESCAN_CHANNEL).await?;
+    ingest::request_rescan(&pool).await?;
+    let note = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("the notice within 5 s")?;
+    assert_eq!(note.channel(), ingest::RESCAN_CHANNEL);
+    Ok(())
+}

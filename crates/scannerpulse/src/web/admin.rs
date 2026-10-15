@@ -118,6 +118,13 @@ impl From<crate::settings::SettingsError> for ApiError {
     }
 }
 
+/// `POST /api/admin/rescan`: every running ingest lists its sources at once.
+pub async fn rescan(admin: Admin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    crate::ingest::request_rescan(&state.pool).await?;
+    record(&admin, "asked for a rescan of the sources".into());
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// Every stored setting, with the time it was changed.
 pub async fn settings_list(
     _: Admin,

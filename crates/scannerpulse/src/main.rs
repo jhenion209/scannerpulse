@@ -41,6 +41,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse favorites set NAME SYSTEM/NUMBER...
        scannerpulse favorites remove NAME
        scannerpulse viewers
+       scannerpulse rescan
        scannerpulse jobs list
        scannerpulse jobs show|stop ID
        scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
@@ -93,6 +94,7 @@ settings    list, set or remove the administrator's settings; a value is JSON
             is checked as the parts that read it check it
 favorites   list, set or remove the named favorite lists of talkgroups
 viewers     list the open pages of every web host
+rescan      ask every running ingest to list its sources now
 jobs        the long jobs, which the host holding the lease runs one at a time:
   list      the newest 50
   show      one job and its progress
@@ -127,6 +129,7 @@ enum Command {
     Favorites(Favorites),
     Viewers,
     Jobs(Jobs),
+    Rescan,
     Version,
     Help,
 }
@@ -386,6 +389,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["favorites", rest @ ..] => parse_favorites(rest).map(Command::Favorites),
         ["viewers"] => Some(Command::Viewers),
         ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
+        ["rescan"] => Some(Command::Rescan),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -485,6 +489,22 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("jobs: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Rescan) => match connect().await {
+            Ok(mut conn) => match ingest::request_rescan(&mut conn).await {
+                Ok(()) => {
+                    println!("every running ingest lists its sources now");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("rescan: {error}");
+                    ExitCode::FAILURE
+                }
+            },
+            Err(error) => {
+                eprintln!("rescan: {error}");
                 ExitCode::FAILURE
             }
         },
