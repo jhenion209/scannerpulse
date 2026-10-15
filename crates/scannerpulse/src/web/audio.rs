@@ -96,7 +96,7 @@ pub async fn export(
         .collect();
     let (joined, missing) = tokio::task::spawn_blocking(move || join(&files))
         .await
-        .map_err(|_| ApiError::BadRequest("the export failed".into()))?;
+        .map_err(|error| ApiError::Internal(format!("the audio export failed: {error}")))?;
     let mut response = Response::new(Body::from(joined));
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/mpeg"));

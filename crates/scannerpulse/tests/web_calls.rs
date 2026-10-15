@@ -176,6 +176,9 @@ async fn a_bad_parameter_is_refused_with_its_reason(pool: PgPool) {
         "/api/calls?after=garbage",
         "/api/calls?talkgroups=1,x",
         "/api/calls?from=yesterday",
+        "/api/calls?size=abc",
+        "/api/calls?smart=1",
+        "/api/calls?system=x",
     ] {
         let (status, answer) = get(&pool, uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");

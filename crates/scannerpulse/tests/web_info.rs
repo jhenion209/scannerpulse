@@ -34,10 +34,9 @@ async fn a_call_shows_its_details_and_whether_a_person_labeled_it(pool: PgPool) 
         get(&pool, "/api/calls/999999").await.0,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        get(&pool, "/api/calls/abc").await.0,
-        StatusCode::BAD_REQUEST
-    );
+    let (status, answer) = get(&pool, "/api/calls/abc").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(answer["error"], "bad request");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -135,5 +134,21 @@ async fn the_labelers_list_is_shown_only_when_it_is_public(pool: PgPool) {
     assert_eq!(
         get(&pool, "/api/labels/todo?set=nope").await.0,
         StatusCode::NOT_FOUND
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_bad_setting_is_an_internal_fault_that_names_nothing(pool: PgPool) {
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('improvement_module.enabled', '\"yes\"')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, answer) = get(&pool, "/api/labels/todo?set=s1").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        answer,
+        serde_json::json!({"error": "internal", "detail": "something went wrong on the server"})
     );
 }

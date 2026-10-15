@@ -167,7 +167,7 @@ pub async fn labels_todo(
         .await
         .map_err(|error| match error {
             crate::settings::SettingsError::Database(error) => ApiError::Database(error),
-            other => ApiError::BadRequest(other.to_string()),
+            other => ApiError::Internal(other.to_string()),
         })?;
     if !improvement.enabled || !improvement.labeler_list_public {
         return Err(ApiError::Forbidden(

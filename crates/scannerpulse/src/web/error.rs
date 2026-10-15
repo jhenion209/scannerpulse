@@ -17,6 +17,9 @@ pub enum ApiError {
     Limit(StatusCode, String),
     /// The database failed or is gone (503).
     Database(sqlx::Error),
+    /// A fault of the server itself (500): the text is logged, the visitor
+    /// gets none of it.
+    Internal(String),
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -32,6 +35,14 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found", String::new()),
             ApiError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail),
             ApiError::Limit(status, detail) => (status, "limit", detail),
+            ApiError::Internal(error) => {
+                crate::log::error(format!("internal: {error}"));
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "something went wrong on the server".to_string(),
+                )
+            }
             ApiError::Database(error) => {
                 if is_timeout(&error) {
                     (

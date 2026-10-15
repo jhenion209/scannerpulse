@@ -45,14 +45,36 @@ async fn healthz_fails_when_the_database_cannot_be_reached(pool: PgPool) {
     let nowhere = PgConnectOptions::new().host("127.0.0.1").port(port);
     let (status, body) = get(app(&pool, nowhere), "/healthz").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body, "the database does not answer");
+    assert_eq!(
+        body,
+        r#"{"detail":"the database does not answer","error":"service unavailable"}"#
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
 async fn an_unknown_path_is_not_found(pool: PgPool) {
     let options = (*pool.connect_options()).clone();
-    let (status, _) = get(app(&pool, options), "/nonexistent").await;
+    let (status, body) = get(app(&pool, options), "/nonexistent").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, r#"{"detail":"","error":"not found"}"#);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_wrong_method_is_refused_in_json_with_the_methods_allowed(pool: PgPool) {
+    let options = (*pool.connect_options()).clone();
+    let response = app(&pool, options)
+        .oneshot(
+            Request::get("/api/export/audio")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.headers()["allow"], "POST");
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], br#"{"detail":"","error":"method not allowed"}"#);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -79,6 +101,10 @@ async fn the_frontends_files_are_served_and_its_page_answers_its_own_paths(pool:
     let (status, body) = get(app.clone(), "/api/nonexistent").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("\"error\":\"not found\""), "{body}");
+    // A known API path with a wrong method is not the frontend's page.
+    let (status, body) = get(app.clone(), "/api/export/audio").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(body.contains("\"error\":\"method not allowed\""), "{body}");
     // A path that climbs out of the folder never reads outside it.
     let (_, body) = get(app, "/../../../../etc/passwd").await;
     assert!(!body.contains("root:"), "{body}");

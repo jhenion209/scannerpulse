@@ -57,7 +57,7 @@ pub async fn export(
         )
     })
     .await
-    .map_err(|_| ApiError::BadRequest("the export failed".into()))?
+    .map_err(|error| ApiError::Internal(format!("the Excel export failed: {error}")))?
     .map_err(|message| ApiError::Limit(StatusCode::PAYLOAD_TOO_LARGE, message))?;
     let mut response = Response::new(Body::from(data));
     let headers = response.headers_mut();

@@ -94,6 +94,16 @@ async fn a_call_is_served_whole_or_by_range(pool: PgPool) {
     assert_eq!(send(&pool, gone).await.0, StatusCode::NOT_FOUND);
     let none = Request::get("/audio/999999").body(Body::empty()).unwrap();
     assert_eq!(send(&pool, none).await.0, StatusCode::NOT_FOUND);
+    // A range past the end is refused in JSON, with the file's length.
+    let past = Request::get(format!("/audio/{}", ids[0]))
+        .header("range", "bytes=999999-")
+        .body(Body::empty())
+        .unwrap();
+    let (status, headers, body) = send(&pool, past).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(headers["content-range"], format!("bytes */{}", file.len()));
+    let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(answer["error"], "range not satisfiable");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -144,4 +154,18 @@ async fn an_export_too_large_or_empty_is_refused(pool: PgPool) {
     let (status, _, body) = send(&pool, post(serde_json::json!({"ids": many}))).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert!(String::from_utf8_lossy(&body).contains("201 calls"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_body_that_is_not_json_is_refused_in_json(pool: PgPool) {
+    let bad = Request::post("/api/export/audio")
+        .header("content-type", "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let (status, headers, body) = send(&pool, bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(headers["content-type"], "application/json");
+    let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(answer["error"], "bad request");
+    assert!(!answer["detail"].as_str().unwrap().is_empty());
 }

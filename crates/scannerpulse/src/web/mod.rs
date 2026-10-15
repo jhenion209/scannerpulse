@@ -15,9 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
@@ -118,13 +119,45 @@ pub fn router(state: AppState) -> Router {
         .with_state(state);
     // Every other path is the frontend's: a file it built, or its page,
     // which reads the path itself.
-    match files {
+    let routes = match files {
         Some(dir) => routes.fallback_service(
             tower_http::services::ServeDir::new(&dir)
                 .fallback(tower_http::services::ServeFile::new(dir.join("index.html"))),
         ),
         None => routes,
+    };
+    // Last, so that it also sees the answers no handler wrote: a refused
+    // parameter, a wrong method, an unknown path, a range past the end.
+    routes.layer(axum::middleware::map_response(json_errors))
+}
+
+/// The most of a plain error's text that is kept as its detail.
+const ERROR_TEXT: usize = 1024;
+
+/// Every error the API gives is `{"error", "detail"}`: an answer of 400 or
+/// more that is not JSON becomes one, with its status and headers kept.
+async fn json_errors(response: Response) -> Response {
+    let json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|t| t.as_bytes().starts_with(b"application/json"));
+    let status = response.status();
+    if status.as_u16() < 400 || json {
+        return response;
     }
+    let (mut parts, body) = response.into_parts();
+    let detail = match axum::body::to_bytes(body, ERROR_TEXT).await {
+        Ok(text) => String::from_utf8_lossy(&text).into_owned(),
+        Err(_) => String::new(),
+    };
+    let error = status.canonical_reason().unwrap_or("error").to_lowercase();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let body = serde_json::json!({ "error": error, "detail": detail }).to_string();
+    Response::from_parts(parts, Body::from(body))
 }
 
 async fn no_route() -> ApiError {

@@ -449,8 +449,13 @@ pub async fn get(pool: &PgPool, uri: &str) -> (axum::http::StatusCode, serde_jso
         .unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    (
-        status,
-        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
-    )
+    let answer = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    if status.as_u16() >= 400 {
+        assert!(
+            answer["error"].is_string() && answer["detail"].is_string(),
+            "{uri}: an error is {{error, detail}}, not {:?}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    (status, answer)
 }
