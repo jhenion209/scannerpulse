@@ -86,6 +86,12 @@ pub async fn write(
     model: &str,
 ) -> Result<Written, RecordError> {
     let mut tx = store::fenced(conn, holder).await?;
+    // A person's save takes this lock first, so the two are taken in turn.
+    sqlx::query("SELECT 1 FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE")
+        .bind(call.0)
+        .bind(call.1)
+        .execute(&mut *tx)
+        .await?;
     let origin: Option<String> = sqlx::query_scalar(
         "SELECT origin FROM transcripts WHERE call_id = $1 AND started_at = $2 FOR UPDATE",
     )
@@ -106,11 +112,12 @@ pub async fn write(
         .await?;
         Written::NoSpeech
     } else {
-        sqlx::query(
+        let done = sqlx::query(
             "INSERT INTO transcripts (call_id, started_at, text, origin, model, updated_at) \
              VALUES ($1, $2, $3, 'machine', $4, now()) \
              ON CONFLICT (call_id, started_at) DO UPDATE \
-             SET text = EXCLUDED.text, model = EXCLUDED.model, updated_at = now()",
+             SET text = EXCLUDED.text, model = EXCLUDED.model, updated_at = now() \
+             WHERE transcripts.origin = 'machine'",
         )
         .bind(call.0)
         .bind(call.1)
@@ -118,7 +125,11 @@ pub async fn write(
         .bind(model)
         .execute(&mut *tx)
         .await?;
-        Written::Text
+        if done.rows_affected() == 0 {
+            Written::KeptHuman
+        } else {
+            Written::Text
+        }
     };
     if written != Written::KeptHuman {
         let state = if written == Written::Text {

@@ -339,3 +339,42 @@ async fn the_servers_state_is_kept_for_the_admin_page(pool: PgPool) -> sqlx::Res
     assert_eq!(urls, ["http://b"]);
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_person_s_save_in_progress_is_waited_for_and_kept(pool: PgPool) -> sqlx::Result<()> {
+    common::hold_lease(&pool, HOLDER).await;
+    let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;
+    let mut person = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE")
+        .bind(call.0)
+        .bind(call.1)
+        .execute(&mut *person)
+        .await?;
+    sqlx::query(
+        "INSERT INTO transcripts (call_id, started_at, text, origin) VALUES ($1, $2, 'Engine 5 on scene.', 'human')",
+    )
+    .bind(call.0)
+    .bind(call.1)
+    .execute(&mut *person)
+    .await?;
+    let writer = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let mut conn = pool.acquire().await.unwrap();
+            queue::write(&mut conn, HOLDER, call, "machine text", "model-x").await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    person.commit().await?;
+    let written = tokio::time::timeout(Duration::from_secs(10), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(written.unwrap(), Written::KeptHuman);
+    let text: String = sqlx::query_scalar("SELECT text FROM transcripts")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(text, "Engine 5 on scene.");
+    assert_eq!(row(&pool, call).await, None);
+    Ok(())
+}
