@@ -188,6 +188,14 @@ pub fn transcription_from_values(
     let model = text(values, "transcription.model")?
         .ok_or(SettingsError::Missing("transcription.model"))?;
     let language = text(values, "transcription.language")?;
+    if let Some(code) = &language {
+        if !(2..=3).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_lowercase()) {
+            return Err(invalid(
+                "transcription.language",
+                format!("{code} is not a code of 2 or 3 lowercase letters"),
+            ));
+        }
+    }
     let min_duration_ms = match values.get("transcription.min_duration_ms") {
         None => return Err(SettingsError::Missing("transcription.min_duration_ms")),
         Some(value) => value
@@ -280,18 +288,20 @@ fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError
             .get("url")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+            .filter(|url| {
+                reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+            })
             .ok_or_else(|| invalid(KEY, format!("{entry} has no http:// or https:// url")))?;
         let weight = match entry.get("weight") {
             None => 1,
             Some(weight) => weight
                 .as_u64()
                 .and_then(|n| u32::try_from(n).ok())
-                .filter(|n| *n > 0)
+                .filter(|n| (1..=64).contains(n))
                 .ok_or_else(|| {
                     invalid(
                         KEY,
-                        format!("{entry} has a weight that is not a whole number from 1 up"),
+                        format!("{entry} has a weight that is not a whole number from 1 to 64"),
                     )
                 })?,
         };

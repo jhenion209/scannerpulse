@@ -176,6 +176,8 @@ fn a_bad_server_list_is_refused() {
         json!([{"url": "asr-1:8000"}]),
         json!([{"url": "http://asr-1", "weight": 0}]),
         json!([{"url": "http://asr-1"}, {"url": "http://asr-1"}]),
+        json!([{"url": "http:// host"}]),
+        json!([{"url": "http://asr-1", "weight": 65}]),
     ] {
         let values = on(&[("transcription.servers", servers.clone())]);
         assert!(
@@ -188,6 +190,30 @@ fn a_bad_server_list_is_refused() {
             ),
             "{servers}"
         );
+    }
+}
+
+#[test]
+fn a_bad_language_is_refused() {
+    for bad in ["english", "EN"] {
+        let values = on(&[("transcription.language", json!(bad))]);
+        assert!(
+            matches!(
+                settings::transcription_from_values(&values),
+                Err(SettingsError::Invalid {
+                    key: "transcription.language",
+                    ..
+                })
+            ),
+            "{bad}"
+        );
+    }
+    for good in ["en", "eng"] {
+        let values = on(&[("transcription.language", json!(good))]);
+        let t = settings::transcription_from_values(&values)
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.language.as_deref(), Some(good));
     }
 }
 
