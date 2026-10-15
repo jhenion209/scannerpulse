@@ -141,12 +141,19 @@ pub struct LiveParams {
     pub since: Option<i64>,
 }
 
+/// The largest message or frame, in bytes, a page may send.
+const INCOMING: usize = 4096;
+
 pub async fn socket(
     State(state): State<AppState>,
     Query(params): Query<LiveParams>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |ws| serve(state, params, ws))
+    // A page sends nothing the feed reads: what a client sends is kept small.
+    upgrade
+        .max_message_size(INCOMING)
+        .max_frame_size(INCOMING)
+        .on_upgrade(move |ws| serve(state, params, ws))
 }
 
 async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {

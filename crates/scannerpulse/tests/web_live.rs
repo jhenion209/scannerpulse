@@ -158,3 +158,27 @@ async fn a_page_that_connects_during_shutdown_is_closed_at_once() {
         "no event is sent after shutdown"
     );
 }
+
+#[tokio::test]
+async fn a_page_that_sends_a_large_message_is_dropped() {
+    // The page never needs to send anything, so the socket's incoming
+    // messages are kept small; no database is needed.
+    let pool = PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap();
+    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, web::router(state)).await.unwrap() });
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/api/live"))
+        .await
+        .unwrap();
+    futures_util::SinkExt::send(&mut ws, Message::Text("x".repeat(8192).into()))
+        .await
+        .unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("the socket closes within 5 s");
+    assert!(
+        !matches!(end, Some(Ok(Message::Text(_)))),
+        "no event is sent to it"
+    );
+}
