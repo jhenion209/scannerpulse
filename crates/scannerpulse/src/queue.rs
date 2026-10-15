@@ -159,17 +159,18 @@ pub async fn write(
 
 /// Counts a failure against a queued call, in one fenced transaction: it is
 /// tried again after `retry_after`, or marked failed with `error`. True when
-/// it failed for good.
+/// it failed for good; `None` when no row changed, because a correction took
+/// the call out of the queue.
 pub async fn count_failure(
     conn: &mut PgConnection,
     holder: &str,
     queued: &Queued,
     error: &str,
-) -> Result<bool, RecordError> {
+) -> Result<Option<bool>, RecordError> {
     let failures = queued.attempts.saturating_add(1);
     let wait = retry_after(failures);
     let mut tx = store::fenced(conn, holder).await?;
-    sqlx::query(
+    let done = sqlx::query(
         "UPDATE transcription_queue SET attempts = $3, last_error = $4, \
              next_try_at = CASE WHEN $5::float8 IS NULL THEN next_try_at \
                                 ELSE now() + make_interval(secs => $5::float8) END, \
@@ -184,7 +185,7 @@ pub async fn count_failure(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(wait.is_none())
+    Ok((done.rows_affected() > 0).then_some(wait.is_none()))
 }
 
 /// Moves a queued call's next try along `RETRY_AFTER` after the servers

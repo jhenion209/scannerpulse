@@ -51,6 +51,9 @@ pub enum Outcome {
     },
     /// The lease was lost before the result could be written.
     LeaseLost(i64),
+    /// The call left the queue while its request was in flight (a person's
+    /// correction): nothing is counted.
+    Gone(i64),
 }
 
 /// A request that has ended, waiting to be written.
@@ -285,8 +288,9 @@ impl Transcriber {
         let holder = self.fence.holder().to_string();
         let count = queue::count_failure(&mut conn, &holder, &queued, &error);
         match tokio::time::timeout(self.db_limit, count).await {
-            Ok(Ok(true)) => Ok(Outcome::Failed { call, error }),
-            Ok(Ok(false)) => Ok(Outcome::Retry { call, error }),
+            Ok(Ok(Some(true))) => Ok(Outcome::Failed { call, error }),
+            Ok(Ok(Some(false))) => Ok(Outcome::Retry { call, error }),
+            Ok(Ok(None)) => Ok(Outcome::Gone(call)),
             Ok(Err(RecordError::LeaseLost)) => Ok(Outcome::LeaseLost(call)),
             Ok(Err(RecordError::Database(error))) => Err(error),
             Err(_) => Err(store::timed_out(self.db_limit)),

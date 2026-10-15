@@ -222,6 +222,19 @@ async fn without_the_lease_nothing_is_written(pool: PgPool) -> sqlx::Result<()> 
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_failure_for_a_call_that_is_gone_is_not_counted(pool: PgPool) -> sqlx::Result<()> {
+    common::hold_lease(&pool, HOLDER).await;
+    let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;
+    sqlx::query("DELETE FROM transcription_queue")
+        .execute(&pool)
+        .await?;
+    let mut conn = pool.acquire().await?;
+    let counted = queue::count_failure(&mut conn, HOLDER, &as_queued(call, 0), "400").await;
+    assert_eq!(counted.unwrap(), None);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn failures_wait_longer_each_time_and_the_fifth_is_for_good(
     pool: PgPool,
 ) -> sqlx::Result<()> {
@@ -236,7 +249,7 @@ async fn failures_wait_longer_each_time_and_the_fifth_is_for_good(
             "400: bad audio",
         )
         .await;
-        assert!(!failed.unwrap());
+        assert_eq!(failed.unwrap(), Some(false));
         let (counted, state, left, error) = row(&pool, call).await.unwrap();
         assert_eq!(
             (counted, state.as_str(), error.as_deref()),
@@ -250,7 +263,7 @@ async fn failures_wait_longer_each_time_and_the_fifth_is_for_good(
     );
     let failed =
         queue::count_failure(&mut conn, HOLDER, &as_queued(call, 4), "400: bad audio").await;
-    assert!(failed.unwrap());
+    assert_eq!(failed.unwrap(), Some(true));
     assert_eq!(
         row(&pool, call).await.map(|r| (r.0, r.1)),
         Some((5, "failed".to_string()))
