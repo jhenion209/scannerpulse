@@ -54,3 +54,32 @@ async fn an_unknown_path_is_not_found(pool: PgPool) {
     let (status, _) = get(app(&pool, options), "/nonexistent").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_frontends_files_are_served_and_its_page_answers_its_own_paths(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), "<p>page</p>").unwrap();
+    std::fs::create_dir(dir.path().join("assets")).unwrap();
+    std::fs::write(dir.path().join("assets/app.js"), "let x = 1;").unwrap();
+    let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.static_dir = Some(dir.path().to_path_buf());
+    let app = web::router(state);
+    assert_eq!(
+        get(app.clone(), "/assets/app.js").await,
+        (StatusCode::OK, "let x = 1;".into())
+    );
+    assert_eq!(
+        get(app.clone(), "/").await,
+        (StatusCode::OK, "<p>page</p>".into())
+    );
+    assert_eq!(
+        get(app.clone(), "/calls/123").await,
+        (StatusCode::OK, "<p>page</p>".into())
+    );
+    let (status, body) = get(app.clone(), "/api/nonexistent").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.contains("\"error\":\"not found\""), "{body}");
+    // A path that climbs out of the folder never reads outside it.
+    let (_, body) = get(app, "/../../../../etc/passwd").await;
+    assert!(!body.contains("root:"), "{body}");
+}

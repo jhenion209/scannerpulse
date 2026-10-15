@@ -71,6 +71,8 @@ pub struct AppState {
     pub database: PgConnectOptions,
     /// The exact counts that may run at once on this host.
     pub exact_counts: Arc<tokio::sync::Semaphore>,
+    /// The frontend's built files; `None` serves none.
+    pub static_dir: Option<PathBuf>,
     /// The host's live feed: every open page listens to it.
     pub live: live::Feed,
     /// Becomes `true` when the host stops; every open live page then closes.
@@ -91,13 +93,15 @@ impl AppState {
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
             live: live::feed(),
             shutdown: tokio::sync::watch::channel(false).0,
+            static_dir: None,
         }
     }
 }
 
 /// The routes, without the listener: the tests call it directly.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let files = state.static_dir.clone();
+    let routes = Router::new()
         .route("/health", get(health))
         .route("/healthz", get(healthz))
         .route("/api/calls", get(calls::list))
@@ -110,7 +114,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/export/audio", post(audio::export))
         .route("/api/export/xlsx", get(sheet::export))
         .route("/api/live", get(live::socket))
-        .with_state(state)
+        .route("/api/{*rest}", axum::routing::any(no_route))
+        .with_state(state);
+    // Every other path is the frontend's: a file it built, or its page,
+    // which reads the path itself.
+    match files {
+        Some(dir) => routes.fallback_service(
+            tower_http::services::ServeDir::new(&dir)
+                .fallback(tower_http::services::ServeFile::new(dir.join("index.html"))),
+        ),
+        None => routes,
+    }
+}
+
+async fn no_route() -> ApiError {
+    ApiError::NotFound
 }
 
 /// Serves until `shutdown` completes.
@@ -122,7 +140,8 @@ pub async fn run(
         .max_connections(20)
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy_with(config.database.clone());
-    let state = AppState::new(pool, config.database);
+    let mut state = AppState::new(pool, config.database);
+    state.static_dir = config.static_dir;
     live::spawn(state.pool.clone(), state.live.clone());
     let stop_live = state.shutdown.clone();
     let listener = tokio::net::TcpListener::bind(config.listen)

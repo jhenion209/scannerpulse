@@ -60,6 +60,27 @@ listen.
     without saving any transcript, and keeps its word error rate and seconds
     per call beside production's. It stops when the server fails three calls
     in a row.
+- `web` serves the web interface and its API. It reads `DATABASE_URL`,
+  `SCANNERPULSE_WEB_LISTEN` (default `127.0.0.1:8080`) and
+  `SCANNERPULSE_WEB_STATIC` (the frontend's built files). It never writes to
+  the archive and needs no lease, so several hosts can serve the same site
+  behind a load balancer. Its routes:
+  - `/api/calls`: the list and the archive search: filters (`talkgroups`,
+    `system`, `from`, `until`, and `q`, the search box: words, `"a phrase"`,
+    `OR`, `-word` or `NOT word`, `prefix*`), `order` (`newest` or `oldest`),
+    `size` (10, 25, 50, 100, 250 or 500), `after` (the `next` cursor of the
+    previous page), `smart=true` (SmartSort) and `exact=true`; a count stops
+    at 10,000 unless it is exact, and a search with text has 30 seconds;
+  - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, `/api/status`, and
+    `/api/labels/todo?set=NAME` when the labelers' list is public;
+  - `/audio/<id>`: a call's file, with byte ranges;
+  - `POST /api/export/audio`: up to 200 calls, by `ids` or by the filters,
+    joined into one mp3; `/api/export/xlsx`: a search's matches, newest
+    first, at most 100,000 rows, as an Excel file; two exports at a time;
+  - `/api/live`: a websocket of new calls and transcripts (`talkgroups`, and
+    `since`, the last call a reconnecting page saw);
+  - `/healthz` (the database answers within 4 seconds and is the primary)
+    and `/health` (the process is up), for a load balancer.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
