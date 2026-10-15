@@ -1,6 +1,7 @@
 //! ScannerPulse records, archives and plays back trunked radio calls.
 
 pub mod archive;
+pub mod asr;
 pub mod filer;
 pub mod health;
 pub mod ingest;

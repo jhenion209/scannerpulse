@@ -161,3 +161,107 @@ pub fn silent_listener() -> u16 {
     });
     port
 }
+
+/// What the fake transcription server answers on one connection.
+#[derive(Debug, Clone)]
+pub enum Answer {
+    /// 200 with `{"text": ...}`.
+    Text(&'static str),
+    /// This status, with this body.
+    Status(u16, &'static str),
+    /// 200 with this body as it is.
+    Raw(&'static str),
+    /// Reads the request and never answers.
+    Silent,
+}
+
+/// A fake OpenAI-compatible transcription server. Each connection gets the
+/// next answer of the script, and the last answer repeats. It keeps every
+/// request it read.
+pub struct FakeAsr {
+    pub url: String,
+    requests: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl FakeAsr {
+    pub fn start(script: Vec<Answer>) -> FakeAsr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = requests.clone();
+        thread::spawn(move || {
+            for (n, stream) in listener.incoming().enumerate() {
+                let Ok(stream) = stream else { continue };
+                let answer = script[n.min(script.len() - 1)].clone();
+                let kept = kept.clone();
+                thread::spawn(move || answer_one(stream, &answer, &kept));
+            }
+        });
+        FakeAsr {
+            url: format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+            requests,
+        }
+    }
+
+    /// The requests read so far, head and body.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| String::from_utf8_lossy(r).into_owned())
+            .collect()
+    }
+}
+
+fn answer_one(mut stream: TcpStream, answer: &Answer, kept: &std::sync::Mutex<Vec<Vec<u8>>>) {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 8192];
+    let body_starts = loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        request.extend_from_slice(&buf[..n]);
+        if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&request[..body_starts]).to_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
+    while request.len() < body_starts + length {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+        }
+    }
+    kept.lock().unwrap().push(request);
+    let (status, body) = match answer {
+        Answer::Text(text) => (200, serde_json::json!({ "text": text }).to_string()),
+        Answer::Status(status, body) => (*status, body.to_string()),
+        Answer::Raw(body) => (200, body.to_string()),
+        Answer::Silent => {
+            thread::sleep(std::time::Duration::from_secs(60));
+            return;
+        }
+    };
+    let reply = format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(reply.as_bytes());
+}
+
+/// A transcription URL where nothing listens.
+pub fn refused_url() -> String {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    format!("http://127.0.0.1:{port}/v1/audio/transcriptions")
+}
