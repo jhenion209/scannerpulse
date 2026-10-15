@@ -2,10 +2,12 @@
 //! archive and never writes to the archive, so any number of hosts can run it
 //! side by side behind a load balancer.
 
+mod calls;
 mod error;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -60,6 +62,18 @@ pub struct AppState {
     /// `/healthz` opens its own connection with these, so a pool kept busy by
     /// slow requests does not make a healthy host look down.
     pub database: PgConnectOptions,
+    /// The exact counts that may run at once on this host.
+    pub exact_counts: Arc<tokio::sync::Semaphore>,
+}
+
+impl AppState {
+    pub fn new(pool: PgPool, database: PgConnectOptions) -> AppState {
+        AppState {
+            pool,
+            database,
+            exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
+        }
+    }
 }
 
 /// The routes, without the listener: the tests call it directly.
@@ -67,6 +81,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/healthz", get(healthz))
+        .route("/api/calls", get(calls::list))
         .with_state(state)
 }
 
@@ -79,10 +94,7 @@ pub async fn run(
         .max_connections(20)
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy_with(config.database.clone());
-    let state = AppState {
-        pool,
-        database: config.database,
-    };
+    let state = AppState::new(pool, config.database);
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("cannot listen on {}: {error}", config.listen))?;

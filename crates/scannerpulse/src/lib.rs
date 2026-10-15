@@ -9,6 +9,7 @@ pub mod filer;
 pub mod health;
 pub mod ingest;
 pub mod lease;
+pub mod listing;
 pub mod localtime;
 pub mod log;
 pub mod mp3;

@@ -9,10 +9,7 @@ use sqlx::postgres::PgConnectOptions;
 use tower::ServiceExt;
 
 fn app(pool: &PgPool, database: PgConnectOptions) -> axum::Router {
-    web::router(AppState {
-        pool: pool.clone(),
-        database,
-    })
+    web::router(AppState::new(pool.clone(), database))
 }
 
 async fn get(app: axum::Router, uri: &str) -> (StatusCode, String) {

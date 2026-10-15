@@ -1,0 +1,271 @@
+mod common;
+
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use chrono::{DateTime, TimeZone, Utc};
+use http_body_util::BodyExt;
+use scannerpulse::listing::{self, Filter};
+use scannerpulse::web::{self, AppState};
+use serde_json::Value;
+use sqlx::PgPool;
+use tower::ServiceExt;
+
+fn at(minute: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap()
+}
+
+/// A talkgroup of `system`; returns its id.
+async fn talkgroup(pool: &PgPool, system: &str, number: i64) -> i32 {
+    let system: i32 = sqlx::query_scalar(
+        "INSERT INTO systems (name) VALUES ($1) \
+         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .bind(system)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO talkgroups (system_id, number, name) VALUES ($1, $2, 'Group ' || $2) \
+         ON CONFLICT (system_id, number) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .bind(system)
+    .bind(number)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// A call of `talkgroup` at `at`, with a machine transcript when `text` is set.
+async fn call(pool: &PgPool, talkgroup: i32, at: DateTime<Utc>, text: Option<&str>) -> i64 {
+    let places: (i16, i16) = match sqlx::query_as(
+        "SELECT (SELECT id FROM locations LIMIT 1), (SELECT id FROM sources LIMIT 1) \
+         WHERE EXISTS (SELECT 1 FROM locations)",
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    {
+        Some(found) => found,
+        None => {
+            common::seed_places(
+                pool,
+                std::path::Path::new("/nonexistent/archive"),
+                std::path::Path::new("/nonexistent/in"),
+            )
+            .await
+        }
+    };
+    scannerpulse::store::ensure_partition(pool, at)
+        .await
+        .unwrap();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+         VALUES ($1, 2000, $2, $3, $4, gen_random_uuid()::text || '.mp3') RETURNING id",
+    )
+    .bind(at)
+    .bind(talkgroup)
+    .bind(places.1)
+    .bind(places.0)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    if let Some(text) = text {
+        sqlx::query(
+            "INSERT INTO transcripts (call_id, started_at, text, origin) VALUES ($1, $2, $3, 'machine')",
+        )
+        .bind(id)
+        .bind(at)
+        .bind(text)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    id
+}
+
+async fn get(pool: &PgPool, uri: &str) -> (StatusCode, Value) {
+    let app = web::router(AppState::new(
+        pool.clone(),
+        (*pool.connect_options()).clone(),
+    ));
+    let response = app
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+fn ids(answer: &Value) -> Vec<i64> {
+    answer["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_i64().unwrap())
+        .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn pages_follow_each_other_without_a_gap_or_a_repeat(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    let mut made = Vec::new();
+    for minute in 0..25 {
+        made.push(call(&pool, tg, at(minute), None).await);
+    }
+    // Two calls at the same instant: the id orders them.
+    made.push(call(&pool, tg, at(24), None).await);
+    let newest_first: Vec<i64> = {
+        let mut v = made.clone();
+        v.sort_by_key(|id| std::cmp::Reverse(*id));
+        v
+    };
+    let mut seen = Vec::new();
+    let mut uri = "/api/calls?size=10".to_string();
+    loop {
+        let (status, answer) = get(&pool, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        seen.extend(ids(&answer));
+        match answer["next"].as_str() {
+            Some(next) => uri = format!("/api/calls?size=10&count=false&after={next}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen, newest_first);
+    let (_, oldest) = get(&pool, "/api/calls?size=10&order=oldest").await;
+    assert_eq!(ids(&oldest)[0], made[0]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_filters_narrow_the_list(pool: PgPool) {
+    let a1 = talkgroup(&pool, "SYSA", 1).await;
+    let a2 = talkgroup(&pool, "SYSA", 2).await;
+    let b1 = talkgroup(&pool, "SYSB", 1).await;
+    let x = call(&pool, a1, at(1), None).await;
+    let y = call(&pool, a2, at(2), None).await;
+    let z = call(&pool, b1, at(3), None).await;
+    let (_, by_talkgroups) = get(&pool, &format!("/api/calls?talkgroups={a1},{b1}")).await;
+    assert_eq!(ids(&by_talkgroups), vec![z, x]);
+    let system: i32 = sqlx::query_scalar("SELECT id FROM systems WHERE name = 'SYSA'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (_, by_system) = get(&pool, &format!("/api/calls?system={system}")).await;
+    assert_eq!(ids(&by_system), vec![y, x]);
+    let (_, by_time) = get(
+        &pool,
+        "/api/calls?from=2031-03-01T12:02:00Z&until=2031-03-01T12:03:00Z",
+    )
+    .await;
+    assert_eq!(ids(&by_time), vec![y], "from included, until excluded");
+    assert_eq!(by_time["total"], 1);
+    assert_eq!(by_time["total_capped"], false);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn every_form_of_the_search_box_runs(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    let fire = call(&pool, tg, at(1), Some("Engine 5, structure fire")).await;
+    let smoke = call(&pool, tg, at(2), Some("smoke showing, 10-4")).await;
+    let both = call(&pool, tg, at(3), Some("fire and smoke at O'Brien's")).await;
+    call(&pool, tg, at(4), None).await;
+    let cases: [(&str, Vec<i64>); 9] = [
+        ("engine 5", vec![fire]),
+        ("\"structure fire\"", vec![fire]),
+        ("\"fire structure\"", vec![]),
+        ("fire OR smoke", vec![both, smoke, fire]),
+        ("fire -smoke", vec![fire]),
+        ("fire NOT smoke", vec![fire]),
+        ("struct*", vec![fire]),
+        ("10-4", vec![smoke]),
+        ("o'brien*", vec![both]),
+    ];
+    for (q, want) in cases {
+        let uri = format!("/api/calls?q={}", urlencode(q));
+        let (status, answer) = get(&pool, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{q}: {answer}");
+        assert_eq!(ids(&answer), want, "{q}");
+    }
+    // Text with nothing to search for lists every call.
+    let (_, all) = get(&pool, "/api/calls?q=%21%21").await;
+    assert_eq!(ids(&all).len(), 4);
+}
+
+fn urlencode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'*' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_count_stops_at_its_cap_and_says_so(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    for minute in 0..5 {
+        call(&pool, tg, at(minute), None).await;
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    let limit = Duration::from_secs(30);
+    let everything = Filter::default();
+    assert_eq!(
+        listing::count(&mut conn, &everything, Some(3), limit)
+            .await
+            .unwrap(),
+        (3, true)
+    );
+    assert_eq!(
+        listing::count(&mut conn, &everything, Some(5), limit)
+            .await
+            .unwrap(),
+        (5, false)
+    );
+    assert_eq!(
+        listing::count(&mut conn, &everything, None, limit)
+            .await
+            .unwrap(),
+        (5, false)
+    );
+    let (_, exact) = get(&pool, "/api/calls?exact=true").await;
+    assert_eq!(
+        (exact["total"].as_i64(), exact["total_capped"].as_bool()),
+        (Some(5), Some(false))
+    );
+    let (_, none) = get(&pool, "/api/calls?count=false").await;
+    assert!(none["total"].is_null());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn smart_sort_reorders_the_page_only(pool: PgPool) {
+    let a = talkgroup(&pool, "SYSA", 1).await;
+    let b = talkgroup(&pool, "SYSA", 2).await;
+    let c = talkgroup(&pool, "SYSA", 3).await;
+    let first = call(&pool, a, at(0), None).await;
+    let other = call(&pool, b, at(0) + chrono::Duration::seconds(3), None).await;
+    let reply = call(&pool, a, at(0) + chrono::Duration::seconds(6), None).await;
+    let newest = call(&pool, c, at(0) + chrono::Duration::seconds(9), None).await;
+    let (_, plain) = get(&pool, "/api/calls").await;
+    assert_eq!(ids(&plain), vec![newest, reply, other, first]);
+    let (_, smart) = get(&pool, "/api/calls?smart=true").await;
+    assert_eq!(ids(&smart), vec![newest, other, reply, first]);
+    assert_eq!(smart["total"], plain["total"]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_bad_parameter_is_refused_with_its_reason(pool: PgPool) {
+    for uri in [
+        "/api/calls?size=7",
+        "/api/calls?order=sideways",
+        "/api/calls?after=garbage",
+        "/api/calls?talkgroups=1,x",
+        "/api/calls?from=yesterday",
+    ] {
+        let (status, answer) = get(&pool, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(answer["error"], "bad request", "{uri}");
+        assert!(!answer["detail"].as_str().unwrap().is_empty(), "{uri}");
+    }
+}
