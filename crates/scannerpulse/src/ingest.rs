@@ -386,7 +386,9 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
     let (release_tx, release_rx) = watch::channel(false);
     // While the maintenance switch is on, filing, transcription and jobs
     // pause; the lease is kept.
-    let paused = Arc::new(AtomicBool::new(false));
+    // Until the first read of maintenance.enabled succeeds, nothing is filed,
+    // transcribed or stepped.
+    let paused = Arc::new(AtomicBool::new(true));
     let (rescan_tx, rescans) = mpsc::unbounded_channel::<()>();
     // Health runs until the lease is released, so that the lease never renews
     // on a stale "healthy".
@@ -764,6 +766,8 @@ async fn maintenance_loop(
     paused: Arc<AtomicBool>,
     mut stop: watch::Receiver<bool>,
 ) {
+    let mut known: Option<bool> = None;
+    let mut failing = false;
     loop {
         let read = limited(db_limit, async {
             sqlx::query_scalar::<_, serde_json::Value>(
@@ -773,14 +777,39 @@ async fn maintenance_loop(
             .await
         })
         .await;
-        if let Ok(value) = read {
-            let on = value.and_then(|v| v.as_bool()).unwrap_or(false);
-            if paused.swap(on, Ordering::SeqCst) != on {
-                log::info(if on {
-                    "maintenance is on: filing, transcription and jobs pause; the lease is kept"
-                } else {
-                    "maintenance is off: filing, transcription and jobs go on"
-                });
+        match read {
+            Ok(value) => {
+                let on = value.and_then(|v| v.as_bool()).unwrap_or(false);
+                paused.store(on, Ordering::SeqCst);
+                match known {
+                    Some(before) if before != on => log::info(if on {
+                        "maintenance is on: filing, transcription and jobs pause; the lease is kept"
+                    } else {
+                        "maintenance is off: filing, transcription and jobs go on"
+                    }),
+                    None if on => log::info(
+                        "maintenance is on: filing, transcription and jobs pause; the lease is kept",
+                    ),
+                    _ => {}
+                }
+                if failing {
+                    log::info("maintenance setting read again");
+                    failing = false;
+                }
+                known = Some(on);
+            }
+            Err(error) => {
+                if !failing {
+                    log::warn(format!(
+                        "cannot read maintenance.enabled ({error}); filing, transcription and jobs stay {}",
+                        if paused.load(Ordering::SeqCst) {
+                            "paused"
+                        } else {
+                            "running"
+                        }
+                    ));
+                    failing = true;
+                }
             }
         }
         if wait(&mut stop, MAINTENANCE_EVERY).await {
