@@ -15,6 +15,8 @@ pub const STUCK_MINUTES: i32 = 10;
 pub const LEFT_MINUTES: i32 = 60;
 /// The days the check for calls filed twice looks back.
 pub const TWICE_DAYS: i32 = 7;
+/// The longest a reading of the Status tab may take.
+pub const TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
 struct Rejected {
@@ -43,9 +45,25 @@ struct Standby {
     replay_lag_seconds: Option<f64>,
 }
 
-/// Everything the Status tab shows.
+/// Everything the Status tab shows, within `TIME_LIMIT`.
 pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
-    let lease = crate::lease::status(pool).await?;
+    read_within(pool, TIME_LIMIT).await
+}
+
+/// Everything the Status tab shows, read in one snapshot that may take at
+/// most `limit`: a slow or locked table fails the reading rather than hang it.
+pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Result<Value> {
+    use sqlx::Connection;
+    let mut conn = pool.acquire().await?;
+    let mut tx = conn.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+        .bind(format!("{}ms", limit.as_millis()))
+        .execute(&mut *tx)
+        .await?;
+    let lease = crate::lease::status(&mut *tx).await?;
     let (waiting, rejected, left): (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE state = 'waiting'), \
                 count(*) FILTER (WHERE state = 'rejected'), \
@@ -54,7 +72,7 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
          FROM ingest_files",
     )
     .bind(LEFT_MINUTES)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     let recent_rejected: Vec<Rejected> = sqlx::query_as(
         "SELECT s.name AS source, f.rel_path, f.reason, f.seen_at \
@@ -62,11 +80,11 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
          WHERE f.state = 'rejected' ORDER BY f.seen_at DESC LIMIT $1",
     )
     .bind(LISTED)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    let queue = crate::queue::counts(pool).await?;
-    let failed = crate::queue::failed(pool, LISTED).await?;
-    let servers = crate::queue::servers(pool).await?;
+    let queue = crate::queue::counts(&mut *tx).await?;
+    let failed = crate::queue::failed(&mut *tx, LISTED).await?;
+    let servers = crate::queue::servers(&mut *tx).await?;
     // Counting every call takes seconds on a large archive: the planner's
     // estimate is enough here.
     let (calls_about, transcripts_about): (Option<i64>, Option<i64>) = sqlx::query_as(
@@ -75,7 +93,7 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
                 (SELECT sum(c.reltuples)::bigint FROM pg_inherits i \
                  JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'transcripts'::regclass)",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     let recent: Vec<Recent> = sqlx::query_as(
         "SELECT c.id, c.started_at, s.name AS system, t.number AS talkgroup, \
@@ -86,20 +104,20 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
          ORDER BY c.started_at DESC, c.id DESC LIMIT $1",
     )
     .bind(LISTED)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     let (primary, server_version, address, port): (bool, String, Option<String>, Option<i32>) =
         sqlx::query_as(
             "SELECT NOT pg_is_in_recovery(), current_setting('server_version'), \
                     inet_server_addr()::text, inet_server_port()",
         )
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
     // The same reading as ingest's maintenance loop: missing or not a bool is off.
     let maintenance = sqlx::query_scalar::<_, serde_json::Value>(
         "SELECT value FROM settings WHERE key = 'maintenance.enabled'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     .and_then(|v| v.as_bool())
     .unwrap_or(false);
@@ -108,7 +126,7 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
                 extract(epoch FROM replay_lag)::float8 AS replay_lag_seconds \
          FROM pg_stat_replication ORDER BY application_name",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     let (stuck, running): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE updated_at < now() - make_interval(mins => $1) \
@@ -117,7 +135,7 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
          FROM jobs WHERE state = 'running'",
     )
     .bind(STUCK_MINUTES)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     let twice: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM (SELECT 1 FROM calls \
@@ -125,7 +143,7 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
            GROUP BY location_id, rel_path HAVING count(*) > 1) d",
     )
     .bind(TWICE_DAYS)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     Ok(json!({
         "maintenance": maintenance,

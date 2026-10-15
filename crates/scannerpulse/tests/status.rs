@@ -80,3 +80,20 @@ async fn the_status_tab_is_for_admins(pool: PgPool) {
     assert_eq!(answer.status, 200);
     assert_eq!(answer.body["database"]["primary"], true);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_locked_table_fails_the_status_within_its_limit(pool: PgPool) {
+    use sqlx::Connection;
+    let mut holder = pool.acquire().await.unwrap();
+    let mut tx = holder.begin().await.unwrap();
+    sqlx::query("LOCK TABLE ingest_files IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let read = scannerpulse::status::read_within(&pool, std::time::Duration::from_secs(1)).await;
+    assert!(read.is_err(), "the reading waited for the lock");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    tx.rollback().await.unwrap();
+    assert!(scannerpulse::status::read(&pool).await.is_ok());
+}

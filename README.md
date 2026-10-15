@@ -167,6 +167,8 @@ listen.
   reached and shows the maintenance switch. The database already refuses a
   second filing of a file within a month, so "calls filed twice" watches the
   month edge.
+  It is read in one snapshot and gives up after 10 seconds rather than
+  wait on a locked or slow table.
 - `talkgroups` lists the talkgroups and their transcription switches;
   `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
   `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts
