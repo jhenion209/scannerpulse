@@ -324,3 +324,37 @@ fn the_transcription_summary_names_every_count() {
             .contains("1 no speech, 1 kept a person's text, 2 to try again")
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_standby_does_not_overwrite_the_holder_s_server_state(pool: PgPool) -> sqlx::Result<()> {
+    let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::seed_places(&pool, root.path(), source.path()).await;
+    set_zone(&pool).await;
+    let url = "http://127.0.0.1:9";
+    common::set_transcription(&pool, url, 1000, 5).await;
+    sqlx::query(
+        "INSERT INTO transcription_servers (url, cooling_until, failed_rounds, updated_at) \
+         VALUES ($1, now() + interval '10 minutes', 3, now())",
+    )
+    .bind(url)
+    .execute(&pool)
+    .await?;
+    common::hold_lease(&pool, "host-b 200-1900000000").await;
+    let (stop, daemon) = start(config(&pool));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (rounds, cooling): (i32, bool) = sqlx::query_as(
+        "SELECT failed_rounds, coalesce(cooling_until > now(), false) \
+         FROM transcription_servers WHERE url = $1",
+    )
+    .bind(url)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((rounds, cooling), (3, true));
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("ingest did not stop within 10 s")
+        .unwrap()
+        .unwrap();
+    Ok(())
+}

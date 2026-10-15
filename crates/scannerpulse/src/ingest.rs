@@ -772,6 +772,9 @@ async fn transcribe_loop(
     mut stop: watch::Receiver<bool>,
 ) {
     let mut read_at = Instant::now();
+    let mut unsaved: Option<Vec<crate::servers::ServerState>> = None;
+    let mut was_held = false;
+    let mut save_failed_at: Option<Instant> = None;
     loop {
         if *stop.borrow() {
             break;
@@ -799,18 +802,35 @@ async fn transcribe_loop(
             }
         }
         if let Some(states) = transcriber.take_server_change() {
-            for state in &states {
-                if let Some(cooling) = state.cooling_for {
-                    log::warn(format!(
-                        "transcription server {} cools down for {} s: {}",
-                        state.url,
-                        cooling.as_secs(),
-                        state.last_error.as_deref().unwrap_or("")
-                    ));
+            unsaved = Some(states);
+        }
+        let held = lease.held();
+        if held && !was_held {
+            unsaved = Some(transcriber.server_states());
+        }
+        was_held = held;
+        if held && save_failed_at.is_none_or(|at| at.elapsed() >= RETRY) {
+            if let Some(states) = &unsaved {
+                for state in states {
+                    if let Some(cooling) = state.cooling_for {
+                        log::warn(format!(
+                            "transcription server {} cools down for {} s: {}",
+                            state.url,
+                            cooling.as_secs(),
+                            state.last_error.as_deref().unwrap_or("")
+                        ));
+                    }
                 }
-            }
-            if let Err(error) = limited(db_limit, queue::save_servers(&pool, &states)).await {
-                log::warn(format!("the servers' state cannot be saved: {error}"));
+                match limited(db_limit, queue::save_servers(&pool, states)).await {
+                    Ok(()) => {
+                        unsaved = None;
+                        save_failed_at = None;
+                    }
+                    Err(error) => {
+                        save_failed_at = Some(Instant::now());
+                        log::warn(format!("the servers' state cannot be saved: {error}"));
+                    }
+                }
             }
         }
         if lease.should_work() && healthy.load(Ordering::SeqCst) {
