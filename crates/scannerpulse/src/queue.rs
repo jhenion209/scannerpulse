@@ -296,22 +296,35 @@ pub async fn count_past(db: impl PgExecutor<'_>, past: &Past) -> sqlx::Result<i6
         .await
 }
 
-/// Queues up to `batch` of those calls, newest first; returns how many. Called
-/// again until it returns 0.
-pub async fn queue_past(db: impl PgExecutor<'_>, past: &Past, batch: i64) -> sqlx::Result<u64> {
-    let done = sqlx::query(&format!(
-        "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
-         SELECT c.id, c.started_at, now(), now(), 'queued' {PAST} \
-         ORDER BY c.started_at DESC LIMIT $5 ON CONFLICT DO NOTHING"
+/// Queues up to `batch` of those calls, newest first, from `before` back
+/// (`None`: from the newest); returns how many, and the oldest start it
+/// queued, which is the next call's `before`. Called again until it returns 0.
+pub async fn queue_past(
+    db: impl PgExecutor<'_>,
+    past: &Past,
+    batch: i64,
+    before: Option<DateTime<Utc>>,
+) -> sqlx::Result<(u64, Option<DateTime<Utc>>)> {
+    // `<=`, not `<`: calls that share the cursor's instant and missed the last
+    // batch are still taken; the ones it queued are left out by NOT EXISTS.
+    let (n, oldest): (i64, Option<DateTime<Utc>>) = sqlx::query_as(&format!(
+        "WITH queued AS ( \
+           INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+           SELECT c.id, c.started_at, now(), now(), 'queued' {PAST} \
+             AND ($6::timestamptz IS NULL OR c.started_at <= $6) \
+           ORDER BY c.started_at DESC LIMIT $5 ON CONFLICT DO NOTHING \
+           RETURNING started_at) \
+         SELECT count(*), min(started_at) FROM queued"
     ))
     .bind(past.talkgroup_id)
     .bind(past.from)
     .bind(past.until)
     .bind(past.min_ms)
     .bind(batch)
-    .execute(db)
+    .bind(before)
+    .fetch_one(db)
     .await?;
-    Ok(done.rows_affected())
+    Ok((u64::try_from(n).unwrap_or(0), oldest))
 }
 
 /// Keeps the servers' state for the admin page, and forgets servers that are

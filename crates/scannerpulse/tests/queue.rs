@@ -302,8 +302,13 @@ async fn past_calls_are_counted_and_queued_in_batches(pool: PgPool) -> sqlx::Res
         min_ms: 1000,
     };
     assert_eq!(queue::count_past(&pool, &past).await?, 1);
-    assert_eq!(queue::queue_past(&pool, &past, 10).await?, 1);
-    assert_eq!(queue::queue_past(&pool, &past, 10).await?, 0);
+    let (n, oldest) = queue::queue_past(&pool, &past, 10, None).await?;
+    assert_eq!((n, oldest), (1, Some(ids[2].1)));
+    assert_eq!(
+        queue::queue_past(&pool, &past, 10, oldest).await?,
+        (0, None)
+    );
+    assert_eq!(queue::queue_past(&pool, &past, 10, None).await?, (0, None));
     assert_eq!(queue::count_past(&pool, &past).await?, 0);
     Ok(())
 }

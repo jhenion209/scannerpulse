@@ -79,11 +79,13 @@ pub async fn run(
     mut progress: impl FnMut(u64),
 ) -> sqlx::Result<u64> {
     let mut queued = 0;
+    let mut before = None;
     loop {
-        let n = queue::queue_past(&mut *conn, past, batch).await?;
+        let (n, oldest) = queue::queue_past(&mut *conn, past, batch, before).await?;
         if n == 0 {
             return Ok(queued);
         }
+        before = oldest;
         queued += n;
         progress(queued);
     }
