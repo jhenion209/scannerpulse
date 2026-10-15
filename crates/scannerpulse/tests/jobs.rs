@@ -376,3 +376,62 @@ async fn a_stopped_run_keeps_nothing(pool: PgPool) {
     );
     assert_eq!(runs_kept(&pool).await, 0);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_candidate_run_keeps_the_calls_it_started_with(pool: PgPool) {
+    improvement_on(&pool).await;
+    let (_root, ids) = common::labeled_set(
+        &pool,
+        &[
+            ("engine one", "engine one"),
+            ("medic two", "medic"),
+            ("a", "a"),
+            ("b", "b"),
+        ],
+    )
+    .await;
+    // The last call has no label yet, so the run does not start with it.
+    sqlx::query("DELETE FROM transcript_labels WHERE call_id = $1")
+        .bind(ids[3])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let asr = common::FakeAsr::start(vec![
+        common::Answer::Text("engine one"),
+        common::Answer::Text("medic two"),
+    ]);
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, total) = jobs::start_asr_run(&mut conn, "s1", &asr.url, "m", None, "ann")
+        .await
+        .unwrap();
+    assert_eq!(total, 3);
+    jobs::step(&pool, "host-a", &context(2)).await.unwrap();
+    // While the run goes on: take away the label of a call it has not reached,
+    // and label the call that was not in it.
+    sqlx::query("DELETE FROM transcript_labels WHERE call_id = $1")
+        .bind(ids[2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO transcript_labels (call_id, started_at, text, machine_text, source) \
+         SELECT call_id, started_at, 'late', 'late', 'user_edit' FROM eval_calls WHERE call_id = $1",
+    )
+    .bind(ids[3])
+    .execute(&pool)
+    .await
+    .unwrap();
+    while jobs::step(&pool, "host-a", &context(2))
+        .await
+        .unwrap()
+        .is_some()
+    {}
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!((job.state.as_str(), job.total), ("done", Some(3)));
+    assert_eq!(asr.requests().len(), 2, "the removed call is not sent");
+    let (wer, calls): (f32, i32) = sqlx::query_as("SELECT wer, calls FROM asr_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((wer, calls), (0.0, 2));
+}

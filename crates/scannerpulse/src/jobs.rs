@@ -168,6 +168,9 @@ pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped,
 /// The calls a queue job queues in one step.
 pub const QUEUE_BATCH: i64 = 1000;
 
+/// The longest a job step's request to a transcription server may take.
+pub const REQUEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// What a job's step may use.
 pub struct Context {
     /// The calls a queue job queues in one step.
@@ -343,6 +346,8 @@ pub struct AsrRun {
     pub prompt: Option<String>,
     pub language: Option<String>,
     pub timeout_secs: u64,
+    /// The labeled calls, in order, as the run started.
+    pub calls: Vec<i64>,
 }
 
 /// A candidate run's state between steps.
@@ -402,9 +407,10 @@ pub async fn start_asr_run(
         timeout_secs: production
             .as_ref()
             .map_or(120, |p| p.request_timeout.as_secs()),
+        calls: labeled.iter().map(|call| call.call_id).collect(),
     };
     let params = serde_json::to_value(&run).expect("an AsrRun is plain data");
-    let total = labeled.len() as i64;
+    let total = run.calls.len() as i64;
     let id = create(&mut *conn, Kind::AsrRun, &params, Some(total), started_by).await?;
     Ok((id, total))
 }
@@ -422,8 +428,8 @@ async fn asr_step(conn: &mut PgConnection, job: &Job, context: &Context) -> sqlx
     let labeled = accuracy::labeled(&mut *conn, &run.set).await?;
     let mut work: AsrWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
     let index = usize::try_from(job.done).unwrap_or(usize::MAX);
-    let total = labeled.len() as i64;
-    let Some(call) = labeled.get(index) else {
+    let total = run.calls.len() as i64;
+    let Some(&call_id) = run.calls.get(index) else {
         let (Some(wer), calls) = (work.candidate.wer(), work.candidate.calls) else {
             return Ok(Outcome::Failed(
                 "no call was scored; nothing was kept".into(),
@@ -453,12 +459,17 @@ async fn asr_step(conn: &mut PgConnection, job: &Job, context: &Context) -> sqlx
             ),
         ));
     };
+    let Some(call) = labeled.iter().find(|call| call.call_id == call_id) else {
+        // The label was taken away since the run started: the call is passed
+        // over, with no request, no score and no fault.
+        return Ok(more(job.done + 1, total, &work));
+    };
     let candidate = accuracy::Candidate {
         server: &run.server,
         model: &run.model,
         language: run.language.as_deref(),
         prompt: run.prompt.as_deref(),
-        timeout: std::time::Duration::from_secs(run.timeout_secs),
+        timeout: std::time::Duration::from_secs(run.timeout_secs).min(REQUEST_LIMIT),
     };
     match accuracy::try_one(&context.client, call, &candidate).await {
         Tried1::Text(text, took) => {
@@ -480,15 +491,19 @@ async fn asr_step(conn: &mut PgConnection, job: &Job, context: &Context) -> sqlx
         }
         Tried1::Unreadable(_) => work.skipped += 1,
     }
-    let done = job.done + 1;
-    Ok(Outcome::More {
+    Ok(more(job.done + 1, total, &work))
+}
+
+/// The outcome of a step that leaves the run at `done` calls.
+fn more(done: i64, total: i64, work: &AsrWork) -> Outcome {
+    Outcome::More {
         done,
         total: Some(total),
-        work: serde_json::to_value(&work).expect("the work is plain data"),
+        work: serde_json::to_value(work).expect("the work is plain data"),
         message: format!(
             "{} calls, {} skipped",
             progress(done, Some(total)),
             work.skipped
         ),
-    })
+    }
 }

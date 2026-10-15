@@ -617,7 +617,15 @@ async fn job_loop(
             break;
         }
         if lease.should_work() && healthy.load(Ordering::SeqCst) {
-            match limited(db_limit, crate::jobs::step(&pool, &host, &context)).await {
+            // The step's database work plus one candidate request, which the
+            // request limit caps: a slow server ends its own step, and the
+            // job line goes on.
+            match limited(
+                db_limit + crate::jobs::REQUEST_LIMIT,
+                crate::jobs::step(&pool, &host, &context),
+            )
+            .await
+            {
                 Ok(Some((id, state))) => {
                     if state != "running" {
                         log::info(format!("job {id} is {state}"));
