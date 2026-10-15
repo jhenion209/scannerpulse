@@ -36,9 +36,20 @@ pub async fn rename(
         return Err(ApiError::BadRequest(problem));
     }
     let mut conn = state.pool.acquire().await?;
+    let old: Option<String> = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
     match talkgroups::rename(&mut conn, id, &body.name).await? {
         Renamed::Done { files_correct } => {
-            record(&admin, format!("renamed talkgroup {id} {:?}", body.name));
+            record(
+                &admin,
+                format!(
+                    "renamed talkgroup {id} from {:?} to {:?}",
+                    old.unwrap_or_default(),
+                    body.name
+                ),
+            );
             Ok(Json(
                 json!({"id": id, "name": body.name, "files_correct": files_correct}),
             ))

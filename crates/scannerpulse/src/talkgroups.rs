@@ -113,6 +113,12 @@ pub async fn rename(conn: &mut sqlx::PgConnection, id: i32, name: &str) -> sqlx:
     let Some((system_id, old)) = found else {
         return Ok(Renamed::NoSuch);
     };
+    // Two renames in one system at once must not both take a name: they
+    // queue on the system.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('scannerpulse talkgroup names'), $1)")
+        .bind(system_id)
+        .execute(&mut *tx)
+        .await?;
     if old == name {
         return Ok(Renamed::Same);
     }
@@ -130,7 +136,8 @@ pub async fn rename(conn: &mut sqlx::PgConnection, id: i32, name: &str) -> sqlx:
     }
     let files_correct: bool = sqlx::query_scalar(
         "UPDATE talkgroups SET name = $2, \
-           files_name = CASE WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
+           files_name = CASE WHEN files_correct AND EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) THEN $3
+                             WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
            files_correct = files_correct AND NOT EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) \
          WHERE id = $1 RETURNING files_correct",
     )

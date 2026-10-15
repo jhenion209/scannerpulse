@@ -82,6 +82,22 @@ async fn a_rename_marks_a_talkgroup_with_calls_as_not_corrected(pool: PgPool) {
     assert_eq!(list.len(), 1);
     assert_eq!((list[0].id, list[0].calls), (seven, 1));
     assert_eq!(list[0].files_name.as_deref(), Some("Group 7"));
+
+    // The files of Eight carry the name it had when it got a call.
+    common::call(
+        &pool,
+        eight,
+        Utc.with_ymd_and_hms(2031, 3, 2, 12, 0, 0).unwrap(),
+        None,
+    )
+    .await;
+    talkgroups::rename(&mut conn, eight, "Eight 2")
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&pool, eight).await,
+        ("Eight 2".into(), Some("Eight".into()), false)
+    );
 }
 
 #[test]

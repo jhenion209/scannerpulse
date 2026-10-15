@@ -333,7 +333,8 @@ pub async fn talkgroup_id(
     if let Some(name) = renamed(&stored, &talkgroup.name) {
         sqlx::query(
             "UPDATE talkgroups SET name = $2, \
-             files_name = CASE WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
+             files_name = CASE WHEN files_correct AND EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) THEN $3
+                               WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
              files_correct = files_correct AND NOT EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) \
              WHERE id = $1",
         )
