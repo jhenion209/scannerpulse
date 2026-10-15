@@ -120,13 +120,13 @@ mod tests {
         assert_eq!(address(peer, &headers(&["203.0.113.9"]), &trusted), want);
         // A visitor's own invented entry sits to the left and is not believed.
         assert_eq!(
-            address(peer, &headers(&["1.2.3.4, 203.0.113.9"]), &trusted),
+            address(peer, &headers(&["198.51.100.1, 203.0.113.9"]), &trusted),
             want
         );
         assert_eq!(
             address(
                 peer,
-                &headers(&["1.2.3.4", "203.0.113.9, 192.0.2.11"]),
+                &headers(&["198.51.100.1", "203.0.113.9, 192.0.2.11"]),
                 &trusted
             ),
             want
