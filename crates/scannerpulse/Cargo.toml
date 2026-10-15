@@ -9,16 +9,22 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
+crc32fast = "1"
 id3 = "1"
 notify = "8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "json", "chrono"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]
+http-body-util = "0.1"
 tempfile = "3"

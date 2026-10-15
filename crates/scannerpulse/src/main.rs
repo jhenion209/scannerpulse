@@ -11,7 +11,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::{ingest, lease, settings};
+use scannerpulse::{ingest, lease, settings, web};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -23,6 +23,7 @@ const USAGE: &str = "\
 usage: scannerpulse db-update [--quiet]
        scannerpulse ingest
        scannerpulse lease
+       scannerpulse web
        scannerpulse read --zone ZONE FILE...
        scannerpulse transcribe --talkgroup SYSTEM/NUMBER --from DAY --to DAY [--yes]
        scannerpulse asr sample --set NAME --talkgroups FILE --calls N --days N
@@ -41,6 +42,9 @@ ingest      watch the sources and file their calls into the archive, sharing
             SCANNERPULSE_TRANSCRIPTION_API_KEY for servers that need a key)
 lease       show which host holds the processing lease, and each host's
             heartbeat; exit 0 when the lease has a valid holder
+web         serve the web interface and its API (reads DATABASE_URL,
+            SCANNERPULSE_WEB_LISTEN, default 127.0.0.1:8080, and
+            SCANNERPULSE_WEB_STATIC, the frontend's built files)
 read        print what ingest reads from each file, one JSON line per file;
             ZONE is the time zone of the times in the file names
 transcribe  queue the past calls of a talkgroup for transcription, from DAY to
@@ -66,6 +70,7 @@ enum Command {
     },
     Ingest,
     Lease,
+    Web,
     Read {
         zone: String,
         files: Vec<String>,
@@ -196,6 +201,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db-update", "--quiet"] => Some(Command::DbUpdate { quiet: true }),
         ["ingest"] => Some(Command::Ingest),
         ["lease"] => Some(Command::Lease),
+        ["web"] => Some(Command::Web),
         ["read", "--zone", zone, files @ ..] if !files.is_empty() => Some(Command::Read {
             zone: zone.to_string(),
             files: files.iter().map(|file| file.to_string()).collect(),
@@ -257,6 +263,19 @@ async fn main() -> ExitCode {
             }
         },
         Some(Command::Lease) => lease_status().await,
+        Some(Command::Web) => match web::Config::from_env() {
+            Ok(config) => match web::run(config, shutdown()).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    scannerpulse::log::error(format!("web cannot run: {error}"));
+                    ExitCode::FAILURE
+                }
+            },
+            Err(error) => {
+                eprintln!("web: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Some(Command::Read { zone, files }) => read(&zone, &files),
         Some(Command::Transcribe {
             talkgroup,
@@ -850,6 +869,8 @@ mod tests {
         assert_eq!(parse(&["ingest", "--now"]), None);
         assert_eq!(parse(&["lease"]), Some(Command::Lease));
         assert_eq!(parse(&["lease", "--quiet"]), None);
+        assert_eq!(parse(&["web"]), Some(Command::Web));
+        assert_eq!(parse(&["web", "--now"]), None);
     }
 
     #[test]

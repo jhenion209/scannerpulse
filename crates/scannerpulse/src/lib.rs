@@ -20,6 +20,7 @@ pub mod store;
 pub mod transcriber;
 pub mod transcripts;
 pub mod watcher;
+pub mod web;
 pub mod wer;
 
 /// The schema, applied by `scannerpulse db-update`.
