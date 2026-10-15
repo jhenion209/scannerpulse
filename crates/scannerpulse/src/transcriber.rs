@@ -347,7 +347,7 @@ async fn request(
 
 /// The bytes of a call's file, read off the async threads; a file larger
 /// than the reader's limit is not sent.
-async fn read_audio(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) async fn read_audio(path: &Path) -> Result<Vec<u8>, String> {
     let path = path.to_path_buf();
     let shown = path.display().to_string();
     let read = tokio::task::spawn_blocking(move || {
