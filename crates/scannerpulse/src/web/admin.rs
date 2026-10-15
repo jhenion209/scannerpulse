@@ -127,19 +127,20 @@ pub async fn status(_: Admin, State(state): State<AppState>) -> Result<Json<Valu
 pub const TRAFFIC_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
-/// minutes on each host, since it reads months of calls.
+/// minutes on each host, since it reads months of calls; a changed time zone
+/// makes it again.
 pub async fn traffic(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let zone = crate::settings::load(&state.pool).await?.time_zone;
     let mut kept = state.traffic.lock().await;
-    if let Some((when, value)) = kept.as_ref() {
-        if when.elapsed() < TRAFFIC_FOR {
+    if let Some((when, kept_zone, value)) = kept.as_ref() {
+        if *kept_zone == zone && when.elapsed() < TRAFFIC_FOR {
             return Ok(Json(value.clone()));
         }
     }
-    let zone = crate::settings::load(&state.pool).await?.time_zone;
     let mut conn = state.pool.acquire().await?;
     let report = crate::reports::traffic(&mut conn, zone, chrono::Utc::now()).await?;
     let value = json!(report);
-    *kept = Some((std::time::Instant::now(), value.clone()));
+    *kept = Some((std::time::Instant::now(), zone, value.clone()));
     Ok(Json(value))
 }
 

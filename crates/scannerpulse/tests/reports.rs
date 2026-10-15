@@ -95,6 +95,23 @@ async fn the_reports_tab_is_for_admins_and_is_kept_a_while(pool: PgPool) {
     )
     .await;
     assert_eq!(again.body["calls"], 1, "the report is kept for ten minutes");
+    sqlx::query("UPDATE settings SET value = '\"America/Chicago\"' WHERE key = 'time_zone'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let moved = send(
+        &app,
+        "GET",
+        "/api/admin/reports/traffic",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(
+        moved.body["calls"], 2,
+        "a new time zone makes the report again"
+    );
+    assert_eq!(moved.body["time_zone"], "America/Chicago");
 }
 
 #[sqlx::test(migrations = "./migrations")]

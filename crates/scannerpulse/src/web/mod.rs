@@ -136,8 +136,10 @@ pub struct AppState {
     pub viewers: viewers::Open,
     /// Each address's transcript saves in its current minute.
     pub saves: edit::Saves,
-    /// The traffic report, with the time it was made.
-    pub traffic: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
+    /// The traffic report, with the time it was made and the time zone it
+    /// was made for.
+    pub traffic:
+        Arc<tokio::sync::Mutex<Option<(std::time::Instant, chrono_tz::Tz, serde_json::Value)>>>,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
 }
