@@ -20,7 +20,7 @@ pub async fn export(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> Result<Response, ApiError> {
-    let _permit = state.exports.clone().try_acquire_owned().map_err(|_| {
+    let permit = state.exports.clone().try_acquire_owned().map_err(|_| {
         ApiError::Limit(
             StatusCode::TOO_MANY_REQUESTS,
             "two exports are running; try again shortly".into(),
@@ -32,24 +32,26 @@ pub async fn export(
     let page = listing::page(&mut conn, &filter, false, None, MAX_ROWS, READ_LIMIT).await?;
     drop(conn);
     let capped = page.next.is_some();
-    let rows: Vec<Vec<Cell>> = page
-        .rows
-        .iter()
-        .map(|r| {
-            let local = r.started_at.with_timezone(&zone);
-            vec![
-                Cell::Text(local.format("%Y-%m-%d").to_string()),
-                Cell::Text(local.format("%H:%M:%S").to_string()),
-                Cell::Text(r.talkgroup_name.clone().unwrap_or_default()),
-                Cell::Number(f64::from(r.duration_ms.unwrap_or(0)) / 1000.0),
-                Cell::Text(r.transcript.clone().unwrap_or_default()),
-            ]
-        })
-        .collect();
     let oldest_first: Vec<&listing::Row> = page.rows.iter().rev().collect();
     let name = export_name(&oldest_first, filter.from, filter.until, zone, "xlsx");
-    drop(page);
     let data = tokio::task::spawn_blocking(move || {
+        // The job keeps the permit: it runs on when the client goes away.
+        let _permit = permit;
+        let rows: Vec<Vec<Cell>> = page
+            .rows
+            .iter()
+            .map(|r| {
+                let local = r.started_at.with_timezone(&zone);
+                vec![
+                    Cell::Text(local.format("%Y-%m-%d").to_string()),
+                    Cell::Text(local.format("%H:%M:%S").to_string()),
+                    Cell::Text(r.talkgroup_name.clone().unwrap_or_default()),
+                    Cell::Number(f64::from(r.duration_ms.unwrap_or(0)) / 1000.0),
+                    Cell::Text(r.transcript.clone().unwrap_or_default()),
+                ]
+            })
+            .collect();
+        drop(page);
         workbook(
             "Calls",
             &["Date", "Time", "Talkgroup", "Length (s)", "Text"],

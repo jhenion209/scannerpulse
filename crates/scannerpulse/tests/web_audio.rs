@@ -1,5 +1,7 @@
 mod common;
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
@@ -168,4 +170,84 @@ async fn a_body_that_is_not_json_is_refused_in_json(pool: PgPool) {
     let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(answer["error"], "bad request");
     assert!(!answer["detail"].as_str().unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_export_of_too_much_audio_is_refused_before_it_is_read(pool: PgPool) {
+    let (root, ids) = calls_with_files(&pool, 2, 1, &[]).await;
+    for i in 0..2 {
+        // Sparse: the size is there, the disk space is not used.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join(format!("2031-03-01/127/call-{i}.mp3")))
+            .unwrap()
+            .set_len(200 << 20)
+            .unwrap();
+    }
+    let (status, _, body) = send(&pool, post(serde_json::json!({"ids": ids}))).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("419430400") && body.contains("268435456"),
+        "{body}"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_third_export_waits_for_nothing(pool: PgPool) {
+    let (_root, ids) = calls_with_files(&pool, 1, 1, &[]).await;
+    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let _both = state
+        .exports
+        .clone()
+        .acquire_many_owned(web::EXPORTS as u32)
+        .await
+        .unwrap();
+    let audio = web::router(state.clone())
+        .oneshot(post(serde_json::json!({"ids": ids})))
+        .await
+        .unwrap();
+    assert_eq!(audio.status(), StatusCode::TOO_MANY_REQUESTS);
+    let sheet = web::router(state)
+        .oneshot(
+            Request::get("/api/export/xlsx")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sheet.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_export_keeps_its_permit_while_its_files_are_read(pool: PgPool) {
+    let (root, ids) = calls_with_files(&pool, 1, 1, &[0]).await;
+    // The call's file is a pipe: reading it waits until it is written.
+    let pipe = root.path().join("2031-03-01/127/call-0.mp3");
+    std::fs::create_dir_all(pipe.parent().unwrap()).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    // The client gives up while the export reads.
+    let cut = tokio::time::timeout(
+        Duration::from_secs(1),
+        web::router(state.clone()).oneshot(post(serde_json::json!({"ids": ids}))),
+    )
+    .await;
+    assert!(cut.is_err(), "the export waits on the pipe");
+    let during = state.exports.available_permits();
+    std::fs::write(&pipe, common::frames(1)).unwrap();
+    assert_eq!(during, web::EXPORTS - 1, "the reading job holds its permit");
+    for _ in 0..50 {
+        if state.exports.available_permits() == web::EXPORTS {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the permit is given back when the job ends");
 }

@@ -76,7 +76,7 @@ listen.
     `/api/labels/todo?set=NAME` when the labelers' list is public;
   - `/audio/<id>`: a call's file, with byte ranges;
   - `POST /api/export/audio`: up to 200 calls, by `ids` or by the filters,
-    joined into one mp3; `/api/export/xlsx`: a search's matches, newest
+    joined into one mp3 of at most 256 MiB of audio; `/api/export/xlsx`: a search's matches, newest
     first, at most 100,000 rows, as an Excel file; two exports at a time;
   - `/api/live`: a websocket of new calls and transcripts (`talkgroups`, and
     `since`, the last call a reconnecting page saw);

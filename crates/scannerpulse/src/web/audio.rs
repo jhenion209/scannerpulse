@@ -18,6 +18,9 @@ use crate::listing::{self, Filter};
 
 /// The most calls one export joins.
 pub const MAX_EXPORT_CALLS: usize = 200;
+/// The most audio, in bytes, one export reads: the join is held in memory,
+/// so the exports at once hold at most this much each.
+pub const MAX_EXPORT_BYTES: u64 = 256 << 20;
 
 /// Where a call's file is.
 async fn file_of(state: &AppState, id: i64) -> Result<PathBuf, ApiError> {
@@ -77,7 +80,7 @@ pub async fn export(
     State(state): State<AppState>,
     Json(ask): Json<ExportAsk>,
 ) -> Result<Response, ApiError> {
-    let _permit = state.exports.clone().try_acquire_owned().map_err(|_| {
+    let permit = state.exports.clone().try_acquire_owned().map_err(|_| {
         ApiError::Limit(
             StatusCode::TOO_MANY_REQUESTS,
             "two exports are running; try again shortly".into(),
@@ -94,9 +97,13 @@ pub async fn export(
         .iter()
         .map(|p| PathBuf::from(&p.root).join(&p.rel_path))
         .collect();
-    let (joined, missing) = tokio::task::spawn_blocking(move || join(&files))
-        .await
-        .map_err(|error| ApiError::Internal(format!("the audio export failed: {error}")))?;
+    let (joined, missing) = tokio::task::spawn_blocking(move || {
+        // The job keeps the permit: it runs on when the client goes away.
+        let _permit = permit;
+        join(&files)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("the audio export failed: {error}")))??;
     let mut response = Response::new(Body::from(joined));
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/mpeg"));
@@ -158,8 +165,22 @@ pub(super) async fn time_zone(state: &AppState) -> Result<Tz, ApiError> {
 }
 
 /// The audio of every file, one after the other, and how many could not be
-/// read.
-fn join(files: &[PathBuf]) -> (Vec<u8>, usize) {
+/// read; refused before any is read when their sizes add up to more than
+/// `MAX_EXPORT_BYTES`.
+fn join(files: &[PathBuf]) -> Result<(Vec<u8>, usize), ApiError> {
+    let total: u64 = files
+        .iter()
+        .filter_map(|file| std::fs::metadata(file).ok())
+        .map(|m| m.len())
+        .sum();
+    if total > MAX_EXPORT_BYTES {
+        return Err(ApiError::Limit(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "the calls' audio is {total} bytes; one export reads at most {MAX_EXPORT_BYTES}"
+            ),
+        ));
+    }
     let mut joined = Vec::new();
     let mut missing = 0;
     for file in files {
@@ -171,7 +192,7 @@ fn join(files: &[PathBuf]) -> (Vec<u8>, usize) {
             Err(_) => missing += 1,
         }
     }
-    (joined, missing)
+    Ok((joined, missing))
 }
 
 /// `20310301_120000-20310301_130000_ScannerPulse_TG-7-SYSA,9-SYSB.mp3`: the
