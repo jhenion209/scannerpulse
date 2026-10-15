@@ -15,7 +15,7 @@ pub const STUCK_MINUTES: i32 = 10;
 pub const LEFT_MINUTES: i32 = 60;
 /// The days the check for calls filed twice looks back.
 pub const TWICE_DAYS: i32 = 7;
-/// The longest a reading of the Status tab may take.
+/// The longest each of the Status tab's queries may take.
 pub const TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
@@ -50,8 +50,9 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
     read_within(pool, TIME_LIMIT).await
 }
 
-/// Everything the Status tab shows, read in one snapshot that may take at
-/// most `limit`: a slow or locked table fails the reading rather than hang it.
+/// Everything the Status tab shows, read in one snapshot in which each query
+/// may take at most `limit`: a slow or locked table then fails the reading
+/// rather than hang it.
 pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Result<Value> {
     use sqlx::Connection;
     let mut conn = pool.acquire().await?;

@@ -92,7 +92,12 @@ async fn a_locked_table_fails_the_status_within_its_limit(pool: PgPool) {
         .unwrap();
     let started = std::time::Instant::now();
     let read = scannerpulse::status::read_within(&pool, std::time::Duration::from_secs(1)).await;
-    assert!(read.is_err(), "the reading waited for the lock");
+    let error = read.expect_err("the reading waited for the lock");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("57014"),
+        "{error}"
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     tx.rollback().await.unwrap();
     assert!(scannerpulse::status::read(&pool).await.is_ok());
