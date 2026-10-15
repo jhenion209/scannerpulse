@@ -4,6 +4,7 @@
 
 mod calls;
 mod error;
+mod info;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -64,6 +65,8 @@ pub struct AppState {
     pub database: PgConnectOptions,
     /// The exact counts that may run at once on this host.
     pub exact_counts: Arc<tokio::sync::Semaphore>,
+    /// The filter choices, with the time they were read.
+    pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
 }
 
 impl AppState {
@@ -72,6 +75,7 @@ impl AppState {
             pool,
             database,
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
+            filters: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 }
@@ -82,6 +86,11 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/healthz", get(healthz))
         .route("/api/calls", get(calls::list))
+        .route("/api/calls/{id}", get(info::call))
+        .route("/api/filters", get(info::filters))
+        .route("/api/favorites", get(info::favorites))
+        .route("/api/status", get(info::status))
+        .route("/api/labels/todo", get(info::labels_todo))
         .with_state(state)
 }
 

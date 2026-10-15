@@ -11,6 +11,8 @@ pub enum ApiError {
     /// The request asks for something that cannot be done (400).
     BadRequest(String),
     NotFound,
+    /// Not open to this visitor (403).
+    Forbidden(String),
     /// Too many at once, or too large (429 or 413 come from the caller).
     Limit(StatusCode, String),
     /// The database failed or is gone (503).
@@ -28,6 +30,7 @@ impl IntoResponse for ApiError {
         let (status, error, detail) = match self {
             ApiError::BadRequest(detail) => (StatusCode::BAD_REQUEST, "bad request", detail),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found", String::new()),
+            ApiError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail),
             ApiError::Limit(status, detail) => (status, "limit", detail),
             ApiError::Database(error) => {
                 if is_timeout(&error) {

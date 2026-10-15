@@ -2,101 +2,15 @@ mod common;
 
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use chrono::{DateTime, TimeZone, Utc};
-use http_body_util::BodyExt;
+use common::{call, get, talkgroup};
 use scannerpulse::listing::{self, Filter};
-use scannerpulse::web::{self, AppState};
 use serde_json::Value;
 use sqlx::PgPool;
-use tower::ServiceExt;
 
 fn at(minute: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap()
-}
-
-/// A talkgroup of `system`; returns its id.
-async fn talkgroup(pool: &PgPool, system: &str, number: i64) -> i32 {
-    let system: i32 = sqlx::query_scalar(
-        "INSERT INTO systems (name) VALUES ($1) \
-         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-    )
-    .bind(system)
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    sqlx::query_scalar(
-        "INSERT INTO talkgroups (system_id, number, name) VALUES ($1, $2, 'Group ' || $2) \
-         ON CONFLICT (system_id, number) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-    )
-    .bind(system)
-    .bind(number)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-/// A call of `talkgroup` at `at`, with a machine transcript when `text` is set.
-async fn call(pool: &PgPool, talkgroup: i32, at: DateTime<Utc>, text: Option<&str>) -> i64 {
-    let places: (i16, i16) = match sqlx::query_as(
-        "SELECT (SELECT id FROM locations LIMIT 1), (SELECT id FROM sources LIMIT 1) \
-         WHERE EXISTS (SELECT 1 FROM locations)",
-    )
-    .fetch_optional(pool)
-    .await
-    .unwrap()
-    {
-        Some(found) => found,
-        None => {
-            common::seed_places(
-                pool,
-                std::path::Path::new("/nonexistent/archive"),
-                std::path::Path::new("/nonexistent/in"),
-            )
-            .await
-        }
-    };
-    scannerpulse::store::ensure_partition(pool, at)
-        .await
-        .unwrap();
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
-         VALUES ($1, 2000, $2, $3, $4, gen_random_uuid()::text || '.mp3') RETURNING id",
-    )
-    .bind(at)
-    .bind(talkgroup)
-    .bind(places.1)
-    .bind(places.0)
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    if let Some(text) = text {
-        sqlx::query(
-            "INSERT INTO transcripts (call_id, started_at, text, origin) VALUES ($1, $2, $3, 'machine')",
-        )
-        .bind(id)
-        .bind(at)
-        .bind(text)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-    id
-}
-
-async fn get(pool: &PgPool, uri: &str) -> (StatusCode, Value) {
-    let app = web::router(AppState::new(
-        pool.clone(),
-        (*pool.connect_options()).clone(),
-    ));
-    let response = app
-        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
 fn ids(answer: &Value) -> Vec<i64> {
