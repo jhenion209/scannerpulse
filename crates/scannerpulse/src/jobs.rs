@@ -224,6 +224,7 @@ pub async fn step(
     let job: Option<Job> = sqlx::query_as(&format!(
         "SELECT {COLUMNS} FROM jobs \
          WHERE id = (SELECT min(id) FROM jobs WHERE state IN ('queued', 'running')) \
+           AND state IN ('queued', 'running') \
          FOR UPDATE SKIP LOCKED"
     ))
     .fetch_optional(&mut *tx)

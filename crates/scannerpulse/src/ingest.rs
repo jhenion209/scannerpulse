@@ -403,6 +403,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
             "jobs",
             tokio::spawn(job_loop(
                 pool.clone(),
+                config.db_limit,
                 config.host.clone(),
                 lease.clone(),
                 healthy.clone(),
@@ -603,6 +604,7 @@ async fn file_loop(
 /// between steps, and a job left running by another host resumes here.
 async fn job_loop(
     pool: PgPool,
+    db_limit: Duration,
     host: String,
     lease: Arc<Lease>,
     healthy: Arc<AtomicBool>,
@@ -613,7 +615,12 @@ async fn job_loop(
             break;
         }
         if lease.should_work() && healthy.load(Ordering::SeqCst) {
-            match crate::jobs::step(&pool, &host, crate::jobs::QUEUE_BATCH).await {
+            match limited(
+                db_limit,
+                crate::jobs::step(&pool, &host, crate::jobs::QUEUE_BATCH),
+            )
+            .await
+            {
                 Ok(Some((id, state))) => {
                     if state != "running" {
                         log::info(format!("job {id} is {state}"));
