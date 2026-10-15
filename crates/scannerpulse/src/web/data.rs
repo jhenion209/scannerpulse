@@ -3,6 +3,7 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -62,4 +63,44 @@ pub async fn rename(
         ))),
         Renamed::NoSuch => Err(ApiError::Missing(format!("there is no talkgroup {id}"))),
     }
+}
+
+/// The typed confirmation of a job that moves or deletes files: the
+/// talkgroup's name, exactly.
+#[derive(Debug, Deserialize)]
+pub struct Confirm {
+    pub confirm: String,
+}
+
+/// `GET /api/admin/talkgroups/<id>/correct`: how many files a correction
+/// would change.
+pub async fn correct_preview(
+    _: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    Ok(Json(json!(
+        crate::data::correct_preview(&mut conn, id).await?
+    )))
+}
+
+/// `POST /api/admin/talkgroups/<id>/correct`: starts the correction job.
+pub async fn correct_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(body): Json<Confirm>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (job, count) =
+        crate::data::start_correct(&mut conn, id, &body.confirm, &admin.0.login).await?;
+    record(
+        &admin,
+        format!("started job {job}: correct {count} files of talkgroup {id}"),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": job, "count": count})),
+    ))
 }

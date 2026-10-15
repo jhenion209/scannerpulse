@@ -191,6 +191,18 @@ listen.
   listed by `talkgroups uncorrected` (and `/api/admin/data/uncorrected`),
   with the old name its files carry. A rename that ingest sees in the
   recorder's files lists the talkgroup the same way.
+- `talkgroup correct SYSTEM/NUMBER [--confirm NAME]` (and `GET`, then
+  `POST /api/admin/talkgroups/<id>/correct` with `confirm`) shows how many
+  files carry an old name and, once the talkgroup's name is typed exactly,
+  starts a job that corrects them: each file is written into
+  `<day>/<number>-<name>/`, with the talkgroup token of its file name and
+  its ID3 title rewritten, read back and checked with the reader's own
+  rules, and keeps its modification time; its call then names it, and the
+  old file is removed by the next step, after that is committed. A file
+  whose talkgroup the rewrite cannot carry (a patch's title, or a name with
+  `/` or `_` in a file name without a title) is refused and stays; files in
+  read-only locations stay too. The talkgroup leaves the list when none of
+  its calls is left in another folder.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
   each host) gives the calls per five minutes of the 120 days before today,
   in the site's time zone, as weekday and weekend profiles (calls a day),

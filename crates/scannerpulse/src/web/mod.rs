@@ -215,6 +215,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/queue/retry", post(transcription::retry_failed))
         .route("/api/admin/data/uncorrected", get(data::uncorrected))
         .route("/api/admin/talkgroups/{id}/rename", post(data::rename))
+        .route(
+            "/api/admin/talkgroups/{id}/correct",
+            get(data::correct_preview).post(data::correct_start),
+        )
         .route("/api/admin/asr/sets", get(transcription::sets))
         .route("/api/admin/asr/report", get(transcription::report))
         .route("/api/admin/jobs", get(jobs::list))

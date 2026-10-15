@@ -203,3 +203,293 @@ async fn an_admin_renames_a_talkgroup(pool: PgPool) {
     assert_eq!(list.body[0]["name"], "Alpha");
     assert_eq!(list.body[0]["files_name"], "Group 7");
 }
+
+/// A recorder's tag for SYSA, with `title` when given.
+fn tag(title: Option<&str>) -> id3::Tag {
+    use id3::TagLike;
+    let mut tag = id3::Tag::new();
+    if let Some(title) = title {
+        tag.set_title(title);
+    }
+    tag.set_artist("711351");
+    tag.set_text("TIT1", "SYSA");
+    tag
+}
+
+/// Writes `data` at `rel` under `root` (unless it is `None`) and records its
+/// call of SYSA/127 at `at`.
+async fn filed(
+    pool: &PgPool,
+    places: (i16, i16),
+    root: &std::path::Path,
+    rel: &str,
+    data: Option<Vec<u8>>,
+    at: chrono::DateTime<Utc>,
+) -> (i64, i32) {
+    if let Some(data) = data {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+    common::insert_call(pool, places, rel, at, 2000, false).await
+}
+
+async fn rel_of(pool: &PgPool, call: i64) -> String {
+    sqlx::query_scalar("SELECT rel_path FROM calls WHERE id = $1")
+        .bind(call)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn run_jobs(pool: &PgPool) {
+    let context = scannerpulse::jobs::Context::new(None);
+    while scannerpulse::jobs::step(pool, "host-a", &context)
+        .await
+        .unwrap()
+        .is_some()
+    {}
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_correction_moves_each_file_under_the_new_name(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let old_dir = "2031-03-01/127-Alpha Fire";
+    let titled_name = "20310301_120000SYSA_SYSA-P25_T-SYSA-North__TO_127_FROM_711351.mp3";
+    let titled_data = common::tagged(&tag(Some("127\"Alpha Fire\"")), 3);
+    let (titled, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        &format!("{old_dir}/{titled_name}"),
+        Some(titled_data.clone()),
+        at(0),
+    )
+    .await;
+    let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_930_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(root.join(format!("{old_dir}/{titled_name}")))
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let token_name = "2031-03-01_120500_127-Alpha Fire_711351-_SYSA-North_SYSA.mp3";
+    let (token, _) = filed(
+        &pool,
+        places,
+        &root,
+        &format!("{old_dir}/{token_name}"),
+        Some(common::tagged(&tag(None), 2)),
+        at(5),
+    )
+    .await;
+    let (missing, _) = filed(
+        &pool,
+        places,
+        &root,
+        &format!("{old_dir}/20310301_121000.mp3"),
+        None,
+        at(10),
+    )
+    .await;
+    let patch_rel = format!("{old_dir}/20310301_121500.mp3");
+    let (patch, _) = filed(
+        &pool,
+        places,
+        &root,
+        &patch_rel,
+        Some(common::tagged(&tag(Some("P:127,128 \"Alpha\"")), 1)),
+        at(15),
+    )
+    .await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    talkgroups::rename(&mut conn, talkgroup, "Alpha / Fire")
+        .await
+        .unwrap();
+    let preview = scannerpulse::data::correct_preview(&mut conn, talkgroup)
+        .await
+        .unwrap();
+    assert_eq!((preview.calls, preview.read_only), (4, 0));
+    assert!(
+        scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha Fire", "ann")
+            .await
+            .is_err(),
+        "the old name does not confirm"
+    );
+    let (job, count) =
+        scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha / Fire", "ann")
+            .await
+            .unwrap();
+    assert_eq!(count, 4);
+    run_jobs(&pool).await;
+
+    let new_dir = "2031-03-01/127-Alpha _ Fire";
+    assert_eq!(
+        rel_of(&pool, titled).await,
+        format!("{new_dir}/{titled_name}")
+    );
+    let moved = std::fs::read(root.join(format!("{new_dir}/{titled_name}"))).unwrap();
+    assert_eq!(
+        scannerpulse::reader::tags(&moved).title.as_deref(),
+        Some("127\"Alpha / Fire\"")
+    );
+    assert_eq!(
+        std::fs::metadata(root.join(format!("{new_dir}/{titled_name}")))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mtime,
+        "the file keeps its modification time"
+    );
+    assert!(!root.join(format!("{old_dir}/{titled_name}")).exists());
+    // A file name cannot hold the `/`, and this file has no title to carry
+    // it: the file is refused and stays as it was.
+    assert_eq!(
+        rel_of(&pool, token).await,
+        format!("{old_dir}/{token_name}")
+    );
+    // The missing file and the patch stay where they were.
+    assert_eq!(
+        rel_of(&pool, missing).await,
+        format!("{old_dir}/20310301_121000.mp3")
+    );
+    assert_eq!(rel_of(&pool, patch).await, patch_rel);
+    assert!(root.join(&patch_rel).exists());
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done");
+    assert!(
+        ended
+            .message
+            .contains("1 files of SYSA/127 corrected; 2 refused, 1 missing"),
+        "{}",
+        ended.message
+    );
+    assert!(
+        !names(&pool, talkgroup).await.2,
+        "three calls still carry the old name"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stopped_correction_leaves_every_row_with_its_file(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let n = scannerpulse::data::FILES_PER_STEP + 10;
+    let mut calls = Vec::new();
+    let mut talkgroup = 0;
+    for i in 0..n {
+        let at = Utc.with_ymd_and_hms(2031, 3, 1, 0, 0, 0).unwrap() + chrono::Duration::minutes(i);
+        let name = format!("{}SYSA.mp3", at.format("%Y%m%d_%H%M%S"));
+        let (call, id) = filed(
+            &pool,
+            places,
+            &root,
+            &format!("2031-03-01/127-Alpha Fire/{name}"),
+            Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+            at,
+        )
+        .await;
+        calls.push(call);
+        talkgroup = id;
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    talkgroups::rename(&mut conn, talkgroup, "Alpha 2")
+        .await
+        .unwrap();
+    let (job, _) = scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha 2", "ann")
+        .await
+        .unwrap();
+    let context = scannerpulse::jobs::Context::new(None);
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    scannerpulse::jobs::stop(&mut conn, job, "ann")
+        .await
+        .unwrap();
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        scannerpulse::jobs::get(&pool, job)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "stopped"
+    );
+    let mut in_new = 0;
+    for &call in &calls {
+        let rel = rel_of(&pool, call).await;
+        assert!(root.join(&rel).exists(), "{rel} has its file");
+        in_new += i64::from(rel.starts_with("2031-03-01/127-Alpha 2/"));
+    }
+    assert_eq!(in_new, scannerpulse::data::FILES_PER_STEP);
+    let old_files = std::fs::read_dir(root.join("2031-03-01/127-Alpha Fire"))
+        .unwrap()
+        .count();
+    assert_eq!(
+        old_files as i64,
+        n - in_new,
+        "the stop removed the replaced files"
+    );
+
+    scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha 2", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    assert!(
+        !root.join("2031-03-01/127-Alpha Fire").exists(),
+        "the empty folder goes"
+    );
+    assert_eq!(
+        names(&pool, talkgroup).await,
+        ("Alpha 2".into(), None, true)
+    );
+    assert!(talkgroups::uncorrected(&pool).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_starts_a_correction_with_its_name_typed(pool: PgPool) {
+    let seven = common::talkgroup(&pool, "SYSA", 7).await;
+    let app = app(&pool);
+    admin(&pool, "ann", PASSWORD).await;
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let change = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let uri = format!("/api/admin/talkgroups/{seven}/correct");
+    let preview = send(&app, "GET", &uri, &[("cookie", &cookie)], None).await;
+    assert_eq!(preview.status, 200);
+    assert_eq!(preview.body["calls"], 0);
+    assert_eq!(preview.body["talkgroup"]["name"], "Group 7");
+    let wrong = send(
+        &app,
+        "POST",
+        &uri,
+        &change,
+        Some(json!({"confirm": "Group 8"})),
+    )
+    .await;
+    assert_eq!(wrong.status, 400);
+    let started = send(
+        &app,
+        "POST",
+        &uri,
+        &change,
+        Some(json!({"confirm": "Group 7"})),
+    )
+    .await;
+    assert_eq!(started.status, 201);
+    let missing = send(
+        &app,
+        "GET",
+        "/api/admin/talkgroups/999999/correct",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(missing.status, 400);
+}

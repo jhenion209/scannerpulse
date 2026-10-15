@@ -47,6 +47,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
        scannerpulse talkgroups uncorrected
+       scannerpulse talkgroup correct SYSTEM/NUMBER [--confirm NAME]
        scannerpulse queue retry-failed
        scannerpulse status
        scannerpulse report traffic
@@ -109,7 +110,9 @@ talkgroups  list the talkgroups and their transcription switches;
 talkgroup   turn a talkgroup's transcription on or off (its new calls only;
             `jobs queue --talkgroup` queues its past calls); rename a
             talkgroup (its files keep the old name until they are corrected;
-            the recorder's next file of it brings the recorder's name back)
+            the recorder's next file of it brings the recorder's name back);
+            correct a talkgroup's files (folder, file name and title) after a
+            rename, as a job, once its name is typed (or given by --confirm)
 queue       retry-failed: put every failed call back in the queue
 report      traffic: calls per 5 minutes over the last 120 days, as weekday and
             weekend profiles, and the quietest hours (for maintenance)
@@ -160,11 +163,22 @@ enum Command {
         name: String,
     },
     Uncorrected,
+    Data(Data),
     RetryFailed,
     Status,
     Traffic,
     Version,
     Help,
+}
+
+/// The Data tab's jobs, which move files; each starts once the talkgroup's
+/// name is typed or given with `--confirm`.
+#[derive(Debug, PartialEq, Eq)]
+enum Data {
+    Correct {
+        talkgroup: String,
+        confirm: Option<String>,
+    },
 }
 
 /// The improvement module's commands.
@@ -427,6 +441,13 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["rescan"] => Some(Command::Rescan),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
+        ["talkgroup", "correct", talkgroup, rest @ ..] => {
+            let found = flags(rest, &[], &["--confirm"], &[])?;
+            Some(Command::Data(Data::Correct {
+                talkgroup: talkgroup.to_string(),
+                confirm: found.get("--confirm").map(|c| c.to_string()),
+            }))
+        }
         ["talkgroup", "rename", talkgroup, name] => Some(Command::TalkgroupRename {
             talkgroup: talkgroup.to_string(),
             name: name.to_string(),
@@ -553,6 +574,13 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Data(command)) => match data_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("talkgroup: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -954,6 +982,48 @@ async fn transcription_command(command: Command) -> CommandResult {
         }
         _ => unreachable!("only the transcription commands come here"),
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The id of a talkgroup written SYSTEM/NUMBER.
+async fn talkgroup_id(conn: &mut sqlx::PgConnection, written: &str) -> Result<i32, String> {
+    let (system, number) = talkgroup_name(written).ok_or("write the talkgroup as SYSTEM/NUMBER")?;
+    talkgroups::find(&mut *conn, system, number)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("there is no talkgroup {written}"))
+}
+
+/// The confirmation given, or the line typed after `question`.
+fn typed(given: Option<String>, question: &str) -> std::io::Result<String> {
+    if let Some(given) = given {
+        return Ok(given);
+    }
+    print!("{question}");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim_end_matches(['\n', '\r']).to_string())
+}
+
+async fn data_command(command: Data) -> CommandResult {
+    let mut conn = connect().await?;
+    let by = command_line_user();
+    let (job, what) = match command {
+        Data::Correct { talkgroup, confirm } => {
+            let id = talkgroup_id(&mut conn, &talkgroup).await?;
+            let preview = scannerpulse::data::correct_preview(&mut conn, id).await?;
+            println!(
+                "{talkgroup} {:?}: {} files to correct; {} in read-only locations stay as they are",
+                preview.talkgroup.name, preview.calls, preview.read_only
+            );
+            let confirm = typed(confirm, "type the talkgroup's name to start: ")?;
+            let (job, count) =
+                scannerpulse::data::start_correct(&mut conn, id, &confirm, &by).await?;
+            (job, format!("correct {count} files"))
+        }
+    };
+    println!("job {job} is started: {what}; `scannerpulse jobs show {job}` follows it");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1559,7 +1629,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Admin, Asr, Command, Favorites, Jobs, Settings, parse, talkgroup_list};
+    use super::{Admin, Asr, Command, Data, Favorites, Jobs, Settings, parse, talkgroup_list};
 
     #[test]
     fn db_update_runs_with_or_without_quiet() {
@@ -1857,6 +1927,21 @@ mod tests {
             })
         );
         assert_eq!(parse(&["talkgroup", "rename", "SYSA/7"]), None);
+        assert_eq!(
+            parse(&["talkgroup", "correct", "SYSA/7", "--confirm", "Alpha"]),
+            Some(Command::Data(Data::Correct {
+                talkgroup: "SYSA/7".into(),
+                confirm: Some("Alpha".into())
+            }))
+        );
+        assert_eq!(
+            parse(&["talkgroup", "correct", "SYSA/7"]),
+            Some(Command::Data(Data::Correct {
+                talkgroup: "SYSA/7".into(),
+                confirm: None
+            }))
+        );
+        assert_eq!(parse(&["talkgroup", "correct", "SYSA/7", "--yes"]), None);
         assert_eq!(
             parse(&["talkgroups", "uncorrected"]),
             Some(Command::Uncorrected)

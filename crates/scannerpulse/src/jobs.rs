@@ -19,6 +19,8 @@ pub enum Kind {
     Queue,
     /// Transcribes a set's labeled calls with a candidate and keeps its score.
     AsrRun,
+    /// Corrects a talkgroup's files after a rename.
+    Correct,
 }
 
 impl Kind {
@@ -26,6 +28,7 @@ impl Kind {
         match self {
             Kind::Queue => "queue",
             Kind::AsrRun => "asr_run",
+            Kind::Correct => "correct",
         }
     }
 
@@ -33,6 +36,7 @@ impl Kind {
         match name {
             "queue" => Some(Kind::Queue),
             "asr_run" => Some(Kind::AsrRun),
+            "correct" => Some(Kind::Correct),
             _ => None,
         }
     }
@@ -101,7 +105,7 @@ impl From<sqlx::Error> for JobError {
 
 /// A settings failure as a job's: the database's stays one, the rest are
 /// reasons to refuse.
-fn from_settings(error: crate::settings::SettingsError) -> JobError {
+pub(crate) fn from_settings(error: crate::settings::SettingsError) -> JobError {
     match error {
         crate::settings::SettingsError::Database(error) => JobError::Database(error),
         other => JobError::Refused(other.to_string()),
@@ -295,7 +299,7 @@ pub async fn queue_plan(
 }
 
 /// What one step of a job did.
-enum Outcome {
+pub(crate) enum Outcome {
     /// There is more to do: the counts and the state to resume from.
     More {
         done: i64,
@@ -343,11 +347,17 @@ pub async fn step(
         return Ok(None);
     };
     let outcome = if job.stop_requested {
+        if Kind::parse(&job.kind) == Some(Kind::Correct) {
+            // The files its last step replaced go before it stops: a later
+            // job would not know them.
+            crate::data::release(&mut tx, &job).await?;
+        }
         Outcome::Stopped
     } else {
         match Kind::parse(&job.kind) {
             Some(Kind::Queue) => queue_step(&mut tx, &job, context.batch).await?,
             Some(Kind::AsrRun) => asr_step(&mut tx, &job, context).await?,
+            Some(Kind::Correct) => crate::data::correct_step(&mut tx, &job).await?,
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };
@@ -393,7 +403,7 @@ pub async fn step(
     Ok(Some((job.id, state.to_string())))
 }
 
-fn progress(done: i64, total: Option<i64>) -> String {
+pub(crate) fn progress(done: i64, total: Option<i64>) -> String {
     match total {
         Some(total) => format!("{done} of {total}"),
         None => done.to_string(),
