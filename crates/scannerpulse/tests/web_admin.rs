@@ -94,3 +94,72 @@ async fn an_admin_changes_settings_through_their_checks(pool: PgPool) {
     .await;
     assert_eq!(without.status, 403);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_sets_and_removes_favorite_lists(pool: PgPool) {
+    let one = common::talkgroup(&pool, "SYSA", 1).await;
+    let two = common::talkgroup(&pool, "SYSA", 2).await;
+    let app = app(&pool);
+    let lists = || {
+        let app = app.clone();
+        async move { send(&app, "GET", "/api/favorites", &[], None).await.body }
+    };
+    let body = Some(json!({"talkgroups": [two, one, two]}));
+    let visitor = send(&app, "PUT", "/api/admin/favorites/Fire", &[], body.clone()).await;
+    assert_eq!(visitor.status, 401);
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    assert_eq!(
+        send(&app, "PUT", "/api/admin/favorites/Fire", &h, body)
+            .await
+            .status,
+        204
+    );
+    let mut ids = [one, two];
+    ids.sort();
+    assert_eq!(
+        lists().await,
+        json!([{"id": lists().await[0]["id"], "name": "Fire", "talkgroups": ids}])
+    );
+    // Setting it again replaces its talkgroups.
+    let only = Some(json!({"talkgroups": [one]}));
+    send(&app, "PUT", "/api/admin/favorites/Fire", &h, only).await;
+    assert_eq!(lists().await[0]["talkgroups"], json!([one]));
+    let unknown = send(
+        &app,
+        "PUT",
+        "/api/admin/favorites/Fire",
+        &h,
+        Some(json!({"talkgroups": [one, 999_999]})),
+    )
+    .await;
+    assert_eq!(unknown.status, 400);
+    assert!(unknown.body["detail"].as_str().unwrap().contains("999999"));
+    assert_eq!(
+        lists().await[0]["talkgroups"],
+        json!([one]),
+        "a refused change keeps the list"
+    );
+    let spaced = send(
+        &app,
+        "PUT",
+        "/api/admin/favorites/%20Fire",
+        &h,
+        Some(json!({"talkgroups": []})),
+    )
+    .await;
+    assert_eq!(spaced.status, 400);
+    assert_eq!(
+        send(&app, "DELETE", "/api/admin/favorites/Fire", &h, None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(lists().await, json!([]));
+    assert_eq!(
+        send(&app, "DELETE", "/api/admin/favorites/Fire", &h, None)
+            .await
+            .status,
+        404
+    );
+}

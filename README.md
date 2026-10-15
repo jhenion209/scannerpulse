@@ -61,8 +61,10 @@ listen.
     per call beside production's. It stops when the server fails three calls
     in a row.
 - `web` serves the web interface and its API. It reads `DATABASE_URL`,
-  `SCANNERPULSE_WEB_LISTEN` (default `127.0.0.1:8080`) and
-  `SCANNERPULSE_WEB_STATIC` (the frontend's built files). It never writes to
+  `SCANNERPULSE_WEB_LISTEN` (default `127.0.0.1:8080`),
+  `SCANNERPULSE_WEB_STATIC` (the frontend's built files) and
+  `SCANNERPULSE_HOST` (its name in the list of open pages; default: the
+  host's name). It never writes to
   the archive and needs no lease, so several hosts can serve the same site
   behind a load balancer. Its routes:
   - `/api/calls`: the list and the archive search: filters (`talkgroups`,
@@ -99,6 +101,12 @@ listen.
     `["192.0.2.10"]`): only then is its `X-Forwarded-For` believed;
   - `/api/admin/settings` lists the settings, and `PUT` or `DELETE`
     `/api/admin/settings/<key>` (`value`) changes one, as `settings` does;
+  - `PUT /api/admin/favorites/<name>` (`talkgroups`, a list of talkgroup
+    ids) creates a favorite list or replaces its talkgroups, and `DELETE`
+    removes it;
+  - `/api/admin/viewers`: every open page of every host (its address,
+    whether that address is local, its browser and whether an admin opened
+    it), refreshed every 30 seconds; a page's row goes when it closes;
   - `/api/admin/accounts` lists and adds admins;
     `/api/admin/accounts/<login>/password`, `/disable` and `/enable` change
     one, as the `admin` command does;
@@ -115,6 +123,9 @@ listen.
   setting checks it, so a bad value is refused before it is saved; a name no
   part reads is refused too. The admin page's `/api/admin/settings` does the
   same.
+- `favorites list`, `favorites set NAME SYSTEM/NUMBER...` and
+  `favorites remove NAME` manage the favorite lists; `viewers` lists the
+  open pages.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 

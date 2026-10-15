@@ -11,7 +11,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::{accounts, ingest, lease, settings, web};
+use scannerpulse::{accounts, favorites, ingest, lease, settings, web};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -37,6 +37,10 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse settings list
        scannerpulse settings set KEY JSON
        scannerpulse settings unset KEY
+       scannerpulse favorites list
+       scannerpulse favorites set NAME SYSTEM/NUMBER...
+       scannerpulse favorites remove NAME
+       scannerpulse viewers
        scannerpulse --version
        scannerpulse --help
 
@@ -49,8 +53,9 @@ ingest      watch the sources and file their calls into the archive, sharing
 lease       show which host holds the processing lease, and each host's
             heartbeat; exit 0 when the lease has a valid holder
 web         serve the web interface and its API (reads DATABASE_URL,
-            SCANNERPULSE_WEB_LISTEN, default 127.0.0.1:8080, and
-            SCANNERPULSE_WEB_STATIC, the frontend's built files)
+            SCANNERPULSE_WEB_LISTEN, default 127.0.0.1:8080,
+            SCANNERPULSE_WEB_STATIC, the frontend's built files, and
+            SCANNERPULSE_HOST, its name in the list of open pages)
 read        print what ingest reads from each file, one JSON line per file;
             ZONE is the time zone of the times in the file names
 transcribe  queue the past calls of a talkgroup for transcription, from DAY to
@@ -79,7 +84,9 @@ admin       the admin accounts:
             command line can always turn it back on)
 settings    list, set or remove the administrator's settings; a value is JSON
             (text in double quotes, a number, true or false, or a list) and
-            is checked as the parts that read it check it";
+            is checked as the parts that read it check it
+favorites   list, set or remove the named favorite lists of talkgroups
+viewers     list the open pages of every web host";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -102,6 +109,8 @@ enum Command {
     Asr(Asr),
     Admin(Admin),
     Settings(Settings),
+    Favorites(Favorites),
+    Viewers,
     Version,
     Help,
 }
@@ -141,6 +150,26 @@ enum Admin {
     Enable(String),
     List,
     PasswordSignin(bool),
+}
+
+/// The favorite lists' commands.
+#[derive(Debug, PartialEq, Eq)]
+enum Favorites {
+    List,
+    Set(String, Vec<String>),
+    Remove(String),
+}
+
+fn parse_favorites(args: &[&str]) -> Option<Favorites> {
+    match args {
+        ["list"] => Some(Favorites::List),
+        ["set", name, talkgroups @ ..] if !talkgroups.is_empty() => Some(Favorites::Set(
+            name.to_string(),
+            talkgroups.iter().map(|t| t.to_string()).collect(),
+        )),
+        ["remove", name] => Some(Favorites::Remove(name.to_string())),
+        _ => None,
+    }
 }
 
 /// The settings' commands.
@@ -285,6 +314,8 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["asr", rest @ ..] => parse_asr(rest).map(Command::Asr),
         ["admin", rest @ ..] => parse_admin(rest).map(Command::Admin),
         ["settings", rest @ ..] => parse_settings(rest).map(Command::Settings),
+        ["favorites", rest @ ..] => parse_favorites(rest).map(Command::Favorites),
+        ["viewers"] => Some(Command::Viewers),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -370,6 +401,20 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("settings: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Favorites(command)) => match favorites_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("favorites: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Viewers) => match viewers().await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("viewers: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -609,6 +654,71 @@ async fn settings_command(command: Settings) -> CommandResult {
             settings::change(&mut conn, &key, None).await?;
             println!("{key} is removed");
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn favorites_command(command: Favorites) -> CommandResult {
+    let mut conn = connect().await?;
+    match command {
+        Favorites::List => {
+            let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+                "SELECT f.name, COALESCE(array_agg(s.name || '/' || t.number ORDER BY s.name, t.number) \
+                        FILTER (WHERE t.id IS NOT NULL), '{}') \
+                 FROM favorites f \
+                 LEFT JOIN favorite_talkgroups ft ON ft.favorite_id = f.id \
+                 LEFT JOIN talkgroups t ON t.id = ft.talkgroup_id \
+                 LEFT JOIN systems s ON s.id = t.system_id \
+                 GROUP BY f.name ORDER BY f.name",
+            )
+            .fetch_all(&mut conn)
+            .await?;
+            for (name, talkgroups) in rows {
+                println!("{name}\t{}", talkgroups.join(" "));
+            }
+        }
+        Favorites::Set(name, talkgroups) => {
+            let mut ids = Vec::new();
+            for text in &talkgroups {
+                let (system, number) =
+                    talkgroup_name(text).ok_or_else(|| format!("{text} is not SYSTEM/NUMBER"))?;
+                let id: Option<i32> = sqlx::query_scalar(
+                    "SELECT t.id FROM talkgroups t JOIN systems s ON s.id = t.system_id \
+                     WHERE s.name = $1 AND t.number = $2",
+                )
+                .bind(system)
+                .bind(number)
+                .fetch_optional(&mut conn)
+                .await?;
+                ids.push(id.ok_or_else(|| format!("there is no talkgroup {text}"))?);
+            }
+            favorites::set(&mut conn, &name, &ids).await?;
+            println!("{name} holds {} talkgroups", ids.len());
+        }
+        Favorites::Remove(name) => {
+            favorites::remove(&mut conn, &name).await?;
+            println!("{name} is removed");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn viewers() -> CommandResult {
+    let mut conn = connect().await?;
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT host, address, COALESCE(admin, '-'), \
+                to_char(connected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
+                user_agent \
+         FROM viewers WHERE seen_at >= now() - make_interval(secs => $1) ORDER BY connected_at",
+    )
+    .bind(f64::from(web::viewers::STALE_SECONDS))
+    .fetch_all(&mut conn)
+    .await?;
+    for (host, address, admin, connected_at, user_agent) in rows {
+        // The browser's description is the visitor's own text: control
+        // characters are not printed.
+        let user_agent: String = user_agent.chars().filter(|c| !c.is_control()).collect();
+        println!("{host}\t{address}\t{admin}\t{connected_at}\t{user_agent}");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1035,7 +1145,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Admin, Asr, Command, Settings, parse, talkgroup_list};
+    use super::{Admin, Asr, Command, Favorites, Settings, parse, talkgroup_list};
 
     #[test]
     fn db_update_runs_with_or_without_quiet() {
@@ -1246,6 +1356,24 @@ mod tests {
         );
         assert_eq!(parse(&["settings", "set", "time_zone"]), None);
         assert_eq!(parse(&["settings"]), None);
+    }
+
+    #[test]
+    fn favorites_take_a_name_and_talkgroups() {
+        assert_eq!(
+            parse(&["favorites", "set", "Fire", "SYSA/1", "SYSA/2"]),
+            Some(Command::Favorites(Favorites::Set(
+                "Fire".into(),
+                vec!["SYSA/1".into(), "SYSA/2".into()]
+            )))
+        );
+        assert_eq!(parse(&["favorites", "set", "Fire"]), None);
+        assert_eq!(
+            parse(&["favorites", "remove", "Fire"]),
+            Some(Command::Favorites(Favorites::Remove("Fire".into())))
+        );
+        assert_eq!(parse(&["viewers"]), Some(Command::Viewers));
+        assert_eq!(parse(&["viewers", "all"]), None);
     }
 
     #[test]

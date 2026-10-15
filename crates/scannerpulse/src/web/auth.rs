@@ -51,6 +51,18 @@ fn reads_only(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD)
 }
 
+/// The session the request's cookie names, if it is open; the CSRF token
+/// is not checked.
+pub async fn session(
+    db: impl sqlx::PgExecutor<'_>,
+    headers: &HeaderMap,
+) -> sqlx::Result<Option<Session>> {
+    match token(headers) {
+        Some(token) => sessions::find(db, &token).await,
+        None => Ok(None),
+    }
+}
+
 /// A signed-in admin; for a change, with the session's CSRF token.
 #[derive(Debug, Clone)]
 pub struct Admin(pub Session);

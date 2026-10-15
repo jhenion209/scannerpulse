@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,6 +20,8 @@ use sqlx::postgres::PgListener;
 use tokio::sync::broadcast;
 
 use super::AppState;
+use super::client::Peer;
+use super::viewers;
 use crate::listing::Row;
 
 /// The events a host can hold for a slow page before that page misses some
@@ -147,16 +150,24 @@ const INCOMING: usize = 4096;
 pub async fn socket(
     State(state): State<AppState>,
     Query(params): Query<LiveParams>,
+    Peer(peer): Peer,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     // A page sends nothing the feed reads: what a client sends is kept small.
     upgrade
         .max_message_size(INCOMING)
         .max_frame_size(INCOMING)
-        .on_upgrade(move |ws| serve(state, params, ws))
+        .on_upgrade(move |mut ws| async move {
+            // The page is an Active Viewer for as long as its socket is open;
+            // its row is written beside the feed, never before it.
+            let viewer = viewers::opened(&state, peer, headers);
+            follow(&state, params, &mut ws).await;
+            viewers::closed(&state, viewer);
+        })
 }
 
-async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
+async fn follow(state: &AppState, params: LiveParams, ws: &mut WebSocket) {
     let talkgroups: HashSet<i32> = params
         .talkgroups
         .as_deref()
@@ -176,7 +187,7 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
     // this page connected would never be reported by `changed`.
     let stopped = *stop.borrow();
     if stopped {
-        close(&mut ws).await;
+        close(ws).await;
         return;
     }
     // The calls sent by the catch-up that may still arrive live: each is
@@ -192,14 +203,14 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
         let missed = match missed {
             Ok(missed) if missed.len() as i64 <= CATCH_UP => missed,
             _ => {
-                let _ = send(&mut ws, &Event::Resync).await;
+                let _ = send(ws, &Event::Resync).await;
                 Vec::new()
             }
         };
         for call in missed {
             sent.insert(call.id);
             let event = Event::Call { call };
-            if wanted(&event) && send(&mut ws, &event).await.is_err() {
+            if wanted(&event) && send(ws, &event).await.is_err() {
                 return;
             }
         }
@@ -217,7 +228,7 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
                         continue;
                     }
                 }
-                if wanted(&event) && send(&mut ws, &event).await.is_err() {
+                if wanted(&event) && send(ws, &event).await.is_err() {
                     return;
                 }
             }
@@ -226,7 +237,7 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
                 Some(Ok(_)) => {}
             },
             _ = stop.changed() => {
-                close(&mut ws).await;
+                close(ws).await;
                 return;
             }
         }

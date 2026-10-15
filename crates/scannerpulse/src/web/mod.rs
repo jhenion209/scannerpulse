@@ -12,6 +12,7 @@ mod error;
 mod info;
 pub mod live;
 mod sheet;
+pub mod viewers;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -45,6 +46,8 @@ pub struct Config {
     pub listen: SocketAddr,
     /// The frontend's built files, served for every path the API does not take.
     pub static_dir: Option<PathBuf>,
+    /// The host's name in the Active Viewers list.
+    pub host: String,
 }
 
 impl Config {
@@ -61,10 +64,18 @@ impl Config {
             )
         })?;
         let static_dir = std::env::var_os("SCANNERPULSE_WEB_STATIC").map(PathBuf::from);
+        let host = std::env::var("SCANNERPULSE_HOST")
+            .or_else(|_| {
+                std::fs::read_to_string("/proc/sys/kernel/hostname").map(|n| n.trim().to_string())
+            })
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "web".to_string());
         Ok(Config {
             database,
             listen,
             static_dir,
+            host,
         })
     }
 }
@@ -88,6 +99,10 @@ pub struct AppState {
     pub exports: Arc<tokio::sync::Semaphore>,
     /// The password sign-ins hashing now on this host.
     pub sign_ins: Arc<tokio::sync::Semaphore>,
+    /// This host's name in the viewers' rows.
+    pub host: String,
+    /// The pages this host holds open.
+    pub viewers: viewers::Open,
     /// Each address's transcript saves in its current minute.
     pub saves: edit::Saves,
     /// The filter choices, with the time they were read.
@@ -102,6 +117,8 @@ impl AppState {
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             saves: edit::Saves::default(),
+            host: "web".to_string(),
+            viewers: viewers::Open::default(),
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
             sign_ins: Arc::new(tokio::sync::Semaphore::new(SIGN_INS)),
             live: live::feed(),
@@ -141,6 +158,11 @@ pub fn router(state: AppState) -> Router {
             post(admin::accounts_disable),
         )
         .route("/api/admin/settings", get(admin::settings_list))
+        .route("/api/admin/viewers", get(viewers::list))
+        .route(
+            "/api/admin/favorites/{name}",
+            axum::routing::put(admin::favorites_set).delete(admin::favorites_remove),
+        )
         .route(
             "/api/admin/settings/{key}",
             axum::routing::put(admin::settings_set).delete(admin::settings_unset),
@@ -213,7 +235,9 @@ pub async fn run(
         .connect_lazy_with(config.database.clone());
     let mut state = AppState::new(pool, config.database);
     state.static_dir = config.static_dir;
+    state.host = config.host;
     live::spawn(state.pool.clone(), state.live.clone());
+    viewers::spawn(state.clone());
     let stop_live = state.shutdown.clone();
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await

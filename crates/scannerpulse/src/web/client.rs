@@ -21,14 +21,28 @@ impl FromRequestParts<AppState> for Client {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Client, ApiError> {
-        // Without the connection's address (a test that sets none), the
-        // request counts as coming from nowhere in particular.
-        let peer = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
-            .await
-            .map(|info| info.0.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let Peer(peer) = Peer::from_request_parts(parts, state).await?;
         let trusted = trusted_proxies(&state.pool).await?;
         Ok(Client(address(peer, &parts.headers, &trusted)))
+    }
+}
+
+/// The address the connection came from, whoever it is. Without one (a
+/// test that sets none), the request counts as coming from nowhere in
+/// particular.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer(pub IpAddr);
+
+impl<S: Send + Sync> FromRequestParts<S> for Peer {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Peer, ApiError> {
+        Ok(Peer(
+            ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
+                .await
+                .map(|info| info.0.ip())
+                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        ))
     }
 }
 

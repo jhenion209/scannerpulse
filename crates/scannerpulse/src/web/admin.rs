@@ -161,3 +161,48 @@ pub async fn settings_unset(
     record(&admin, format!("removed {key}"));
     Ok(StatusCode::NO_CONTENT)
 }
+
+impl From<crate::favorites::FavoriteError> for ApiError {
+    fn from(error: crate::favorites::FavoriteError) -> ApiError {
+        use crate::favorites::FavoriteError;
+        match error {
+            FavoriteError::Database(error) => ApiError::Database(error),
+            FavoriteError::NoSuch(_) => ApiError::Missing(error.to_string()),
+            _ => ApiError::BadRequest(error.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Favorite {
+    pub talkgroups: Vec<i32>,
+}
+
+/// Creates the list, or replaces its talkgroups.
+pub async fn favorites_set(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<Favorite>,
+) -> Result<StatusCode, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    crate::favorites::set(&mut conn, &name, &body.talkgroups).await?;
+    record(
+        &admin,
+        format!(
+            "set the favorites {name:?} to {} talkgroups",
+            body.talkgroups.len()
+        ),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn favorites_remove(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    crate::favorites::remove(&state.pool, &name).await?;
+    record(&admin, format!("removed the favorites {name:?}"));
+    Ok(StatusCode::NO_CONTENT)
+}
