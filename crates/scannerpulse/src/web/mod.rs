@@ -7,6 +7,7 @@ mod audio;
 pub mod auth;
 mod calls;
 pub mod client;
+mod edit;
 mod error;
 mod info;
 pub mod live;
@@ -22,7 +23,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 
@@ -87,6 +88,8 @@ pub struct AppState {
     pub exports: Arc<tokio::sync::Semaphore>,
     /// The password sign-ins hashing now on this host.
     pub sign_ins: Arc<tokio::sync::Semaphore>,
+    /// Each address's transcript saves in its current minute.
+    pub saves: edit::Saves,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
 }
@@ -98,6 +101,7 @@ impl AppState {
             database,
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
+            saves: edit::Saves::default(),
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
             sign_ins: Arc::new(tokio::sync::Semaphore::new(SIGN_INS)),
             live: live::feed(),
@@ -115,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/api/calls", get(calls::list))
         .route("/api/calls/{id}", get(info::call))
+        .route("/api/calls/{id}/transcript", patch(edit::save))
         .route("/api/filters", get(info::filters))
         .route("/api/favorites", get(info::favorites))
         .route("/api/status", get(info::status))

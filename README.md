@@ -75,6 +75,12 @@ listen.
   - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, `/api/status`, and
     `/api/labels/todo?set=NAME` (for admins, and for everyone when the
     labelers' list is public);
+  - `PATCH /api/calls/<id>/transcript` (`text`): anyone may correct a
+    transcript; the machine's first output is kept beside it, with the
+    admin's name when an admin saves it. A text has at most 4,000 characters
+    and no `<`, `>` or control character other than a new line; one address
+    may save 30 times a minute per host; saving pauses while the setting
+    `maintenance.enabled` is true;
   - `/audio/<id>`: a call's file, with byte ranges;
   - `POST /api/export/audio`: up to 200 calls, by `ids` or by the filters,
     joined into one mp3 of at most 256 MiB of audio; `/api/export/xlsx`: a search's matches, newest
