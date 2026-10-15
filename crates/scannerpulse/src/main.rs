@@ -27,8 +27,10 @@ usage: scannerpulse db-update [--quiet]
 
 db-update   create or update the database schema (reads DATABASE_URL)
 ingest      watch the sources and file their calls into the archive, sharing
-            the work with the other host through the lease (reads
-            DATABASE_URL, SCANNERPULSE_HOST, SCANNERPULSE_PREFERRED)
+            the work with the other host through the lease, and transcribe
+            them when transcription is on (reads DATABASE_URL,
+            SCANNERPULSE_HOST, SCANNERPULSE_PREFERRED, and
+            SCANNERPULSE_TRANSCRIPTION_API_KEY for servers that need a key)
 lease       show which host holds the processing lease, and each host's
             heartbeat; exit 0 when the lease has a valid holder
 read        print what ingest reads from each file, one JSON line per file;

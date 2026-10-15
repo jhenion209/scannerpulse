@@ -27,6 +27,20 @@ listen.
   many requests each takes at once), the model, the minimum length, and an
   optional language, prompt and term list. A server that needs a key reads it
   from `SCANNERPULSE_TRANSCRIPTION_API_KEY`; keys never go in the database.
+  To turn it on, for example:
+
+  ```sql
+  INSERT INTO settings (key, value) VALUES
+    ('transcription.enabled', 'true'),
+    ('transcription.servers',
+     '[{"url": "http://HOST:8000/v1/audio/transcriptions", "weight": 2}]'),
+    ('transcription.model', '"model-name"'),
+    ('transcription.min_duration_ms', '1500')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+  ```
+
+  Each talkgroup has its own switch, `talkgroups.transcribe` (off for a new
+  talkgroup): `UPDATE talkgroups SET transcribe = true WHERE ...`.
 - `transcribe --talkgroup SYSTEM/NUMBER --from DAY --to DAY [--yes]` queues the
   past calls of one talkgroup for transcription.
 - `lease` shows which host holds the lease, and each host's heartbeat.
