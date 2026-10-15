@@ -41,7 +41,7 @@ pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// What `web` reads from the environment until the host configuration file
 /// exists.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub database: PgConnectOptions,
     pub listen: SocketAddr,
@@ -51,6 +51,21 @@ pub struct Config {
     pub host: String,
     /// The OIDC client's secret; secrets never go in the database.
     pub oidc_secret: Option<String>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("database", &self.database)
+            .field("listen", &self.listen)
+            .field("static_dir", &self.static_dir)
+            .field("host", &self.host)
+            .field(
+                "oidc_secret",
+                &self.oidc_secret.as_ref().map(|_| "<hidden>"),
+            )
+            .finish()
+    }
 }
 
 impl Config {

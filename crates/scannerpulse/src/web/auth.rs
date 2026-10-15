@@ -193,7 +193,7 @@ pub async fn login(
             "the name or the password is wrong".into(),
         ));
     };
-    let (token, csrf) = sessions::create(&mut tx, admin).await?;
+    let (token, csrf) = sessions::create(&mut tx, admin, false).await?;
     tx.commit().await?;
     crate::log::info(format!("admin {name} signed in from {address}"));
     Ok(signed_in(&token, &name, &csrf))

@@ -405,3 +405,20 @@ async fn parallel_guesses_check_at_most_five_passwords(pool: PgPool) {
     .unwrap();
     assert_eq!(counted, checked, "every checked password is counted");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_password_session_outlives_twelve_hours_while_used(pool: PgPool) {
+    admin(&pool, "ann", "correct horse battery").await;
+    let app = app(&pool);
+    let (cookie, _) = sign_in(&app, "ann", "correct horse battery").await;
+    // Signed in 12 hours and a minute ago, and used just now: still open.
+    sqlx::query(
+        "UPDATE sessions SET created_at = now() - interval '12 hours 1 minute', last_seen = now() \
+         WHERE NOT oidc",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let me = send(&app, "GET", "/api/auth/me", &[("cookie", &cookie)], None).await;
+    assert_eq!(me.status, 200, "{:?}", me.body);
+}

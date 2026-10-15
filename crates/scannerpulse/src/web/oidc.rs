@@ -41,13 +41,25 @@ const ALGORITHMS: [Algorithm; 9] = [
 ];
 
 /// The provider, when every OIDC setting and the client secret are set.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Provider {
     pub issuer: String,
     pub client_id: String,
     pub admin_group: String,
     pub redirect_url: String,
     pub secret: String,
+}
+
+impl std::fmt::Debug for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Provider")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("admin_group", &self.admin_group)
+            .field("redirect_url", &self.redirect_url)
+            .field("secret", &"<hidden>")
+            .finish()
+    }
 }
 
 pub async fn provider(state: &AppState) -> Result<Option<Provider>, ApiError> {
@@ -187,12 +199,10 @@ fn pending(headers: &HeaderMap) -> Option<(String, String, String)> {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .find_map(|pair| pair.trim().strip_prefix(STATE_COOKIE)?.strip_prefix('='))?;
-    let mut parts = value.splitn(3, '.');
-    Some((
-        parts.next()?.to_string(),
-        parts.next()?.to_string(),
-        parts.next()?.to_string(),
-    ))
+    let mut parts = value.splitn(3, '.').map(str::to_string);
+    let (state, nonce, verifier) = (parts.next()?, parts.next()?, parts.next()?);
+    (!state.is_empty() && !nonce.is_empty() && !verifier.is_empty())
+        .then_some((state, nonce, verifier))
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,7 +332,7 @@ pub async fn callback(
     if disabled {
         return Err(ApiError::Forbidden("this account is disabled".into()));
     }
-    let (token, _) = sessions::create(&mut conn, admin).await?;
+    let (token, _) = sessions::create(&mut conn, admin, true).await?;
     crate::log::info(format!(
         "admin {login} signed in through OIDC from {address}"
     ));

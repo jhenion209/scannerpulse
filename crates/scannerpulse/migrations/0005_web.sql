@@ -16,11 +16,14 @@ CREATE TABLE admins (
     UNIQUE (oidc_issuer, oidc_subject)
 );
 
--- A signed-in admin. The cookie holds the token; only its SHA-256 is kept.
+-- A signed-in admin. The cookie holds the token; only its SHA-256 is kept. An
+-- OIDC session ends 12 hours after signing in, so the provider's group is
+-- checked again at least that often.
 CREATE TABLE sessions (
     token_hash bytea PRIMARY KEY,
     admin_id   bigint NOT NULL REFERENCES admins (id) ON DELETE CASCADE,
     csrf       text NOT NULL,
+    oidc       boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL,
     last_seen  timestamptz NOT NULL
 );

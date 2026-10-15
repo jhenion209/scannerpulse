@@ -349,6 +349,35 @@ async fn without_its_secret_oidc_is_off(pool: PgPool) {
     );
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn an_oidc_session_ends_twelve_hours_after_sign_in(pool: PgPool) {
+    let fake = provider_on_a_port().await;
+    let app = set_up(&pool, &fake).await;
+    let back = sign_in(&app, &fake, "user-1", &[GROUP]).await;
+    assert_eq!(back.status, 303, "{:?}", back.body);
+    let pair = back
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .find(|c| c.starts_with("scannerpulse_session="))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    // Still in use: the idle limit is fresh, but the sign-in is 12 hours and a minute old.
+    sqlx::query(
+        "UPDATE sessions SET created_at = now() - interval '12 hours 1 minute', last_seen = now() \
+         WHERE oidc",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let me = send(&app, "GET", "/api/auth/me", &[("cookie", &pair)], None).await;
+    assert_eq!(me.status, 401, "{:?}", me.body);
+}
+
 // The ID token's checks, one at a time.
 
 fn provider(issuer: &str) -> Provider {

@@ -9,6 +9,8 @@ use sqlx::postgres::PgConnection;
 pub const IDLE_HOURS: i32 = 12;
 /// ...and at the latest this long after signing in.
 pub const MAX_DAYS: i32 = 7;
+/// A session opened through the OIDC provider ends this long after signing in, whatever its use.
+pub const OIDC_HOURS: i32 = 12;
 /// This many failed sign-ins for one name, or from one address, within
 /// `WINDOW_MINUTES` lock that name or that address for `WINDOW_MINUTES`.
 pub const FAILURES: i64 = 5;
@@ -36,16 +38,21 @@ fn digest(token: &str) -> Vec<u8> {
 
 /// Opens a session for the admin: returns the token for the cookie and the
 /// CSRF token. Records the sign-in and removes sessions that have ended.
-pub async fn create(conn: &mut PgConnection, admin_id: i64) -> sqlx::Result<(String, String)> {
+pub async fn create(
+    conn: &mut PgConnection,
+    admin_id: i64,
+    oidc: bool,
+) -> sqlx::Result<(String, String)> {
     let token = random_hex(32);
     let csrf = random_hex(16);
     sqlx::query(
-        "INSERT INTO sessions (token_hash, admin_id, csrf, created_at, last_seen) \
-         VALUES ($1, $2, $3, now(), now())",
+        "INSERT INTO sessions (token_hash, admin_id, csrf, oidc, created_at, last_seen) \
+         VALUES ($1, $2, $3, $4, now(), now())",
     )
     .bind(digest(&token))
     .bind(admin_id)
     .bind(&csrf)
+    .bind(oidc)
     .execute(&mut *conn)
     .await?;
     sqlx::query("UPDATE admins SET last_sign_in = now() WHERE id = $1")
@@ -72,11 +79,13 @@ pub async fn find(db: impl sqlx::PgExecutor<'_>, token: &str) -> sqlx::Result<Op
          WHERE s.token_hash = $1 AND a.id = s.admin_id AND NOT a.disabled \
            AND s.last_seen >= now() - make_interval(hours => $2) \
            AND s.created_at >= now() - make_interval(days => $3) \
+           AND (NOT s.oidc OR s.created_at >= now() - make_interval(hours => $4)) \
          RETURNING a.id, a.login, s.csrf",
     )
     .bind(digest(token))
     .bind(IDLE_HOURS)
     .bind(MAX_DAYS)
+    .bind(OIDC_HOURS)
     .fetch_optional(db)
     .await?;
     Ok(found.map(|(admin_id, login, csrf)| Session {
