@@ -164,6 +164,15 @@ listen.
   newest calls, estimated totals, whether the database is the primary and
   its standbys, and the checks to make after a failover (stuck jobs, failed
   calls, calls filed twice, files left in a source).
+- `talkgroups` lists the talkgroups and their transcription switches;
+  `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
+  `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts
+  every failed call back in the queue; `asr sets` lists the evaluation sets.
+  The admin page's `/api/admin/talkgroups`, `PUT
+  /api/admin/talkgroups/<id>/transcribe` (`on`), `POST
+  /api/admin/queue/retry`, `/api/admin/asr/sets` and
+  `/api/admin/asr/report?set=NAME` do the same; the last two answer only
+  while the improvement module is on.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 

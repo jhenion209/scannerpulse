@@ -270,6 +270,19 @@ pub async fn retry(db: impl PgExecutor<'_>, call: (i64, DateTime<Utc>)) -> sqlx:
     Ok(done.rows_affected() == 1)
 }
 
+/// Puts every failed call back in the queue, to be tried again from the
+/// start; returns how many.
+pub async fn retry_failed(db: impl PgExecutor<'_>) -> sqlx::Result<u64> {
+    let done = sqlx::query(
+        "UPDATE transcription_queue \
+         SET state = 'queued', attempts = 0, last_error = NULL, next_try_at = now() \
+         WHERE state = 'failed'",
+    )
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected())
+}
+
 /// What `count_past` and `queue_past` take: the past calls that were never
 /// tried, at least `min_ms` long, of one talkgroup, or with no talkgroup of
 /// every talkgroup whose transcription is on (the backlog); from `from`, and

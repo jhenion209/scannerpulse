@@ -17,6 +17,7 @@ pub use jobs::LISTED as JOBS_LISTED;
 pub mod live;
 pub mod oidc;
 mod sheet;
+mod transcription;
 pub mod viewers;
 
 use std::net::SocketAddr;
@@ -199,6 +200,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/viewers", get(viewers::list))
         .route("/api/admin/rescan", post(admin::rescan))
         .route("/api/admin/status", get(admin::status))
+        .route("/api/admin/talkgroups", get(transcription::talkgroups))
+        .route(
+            "/api/admin/talkgroups/{id}/transcribe",
+            axum::routing::put(transcription::transcribe),
+        )
+        .route("/api/admin/queue/retry", post(transcription::retry_failed))
+        .route("/api/admin/asr/sets", get(transcription::sets))
+        .route("/api/admin/asr/report", get(transcription::report))
         .route("/api/admin/jobs", get(jobs::list))
         .route(
             "/api/admin/jobs/queue",

@@ -11,7 +11,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, web};
+use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, talkgroups, web};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -30,6 +30,7 @@ usage: scannerpulse db-update [--quiet]
                                [--min-seconds S] [--seed N] [--yes]
        scannerpulse asr todo --set NAME
        scannerpulse asr report --set NAME
+       scannerpulse asr sets
        scannerpulse asr run --set NAME --server URL --model MODEL [--prompt-file FILE]
        scannerpulse admin add|password|disable|enable NAME
        scannerpulse admin list
@@ -42,6 +43,9 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse favorites remove NAME
        scannerpulse viewers
        scannerpulse rescan
+       scannerpulse talkgroups
+       scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
+       scannerpulse queue retry-failed
        scannerpulse status
        scannerpulse jobs list
        scannerpulse jobs show|stop ID
@@ -77,6 +81,7 @@ asr         the transcription improvement module, when improvement_module.enable
             have labeled is never replaced
   todo      list the set's calls that have no person's text yet
   report    score production's first output against the people's texts
+  sets      list the evaluation sets, their labeled calls and kept runs
   run       transcribe the set's labeled calls with a candidate server, model
             and prompt, without saving any transcript, and keep the score
             (reads SCANNERPULSE_TRANSCRIPTION_API_KEY for servers that need a
@@ -96,6 +101,10 @@ settings    list, set or remove the administrator's settings; a value is JSON
 favorites   list, set or remove the named favorite lists of talkgroups
 viewers     list the open pages of every web host
 rescan      ask every running ingest to list its sources now
+talkgroups  list the talkgroups and their transcription switches
+talkgroup   turn a talkgroup's transcription on or off (its new calls only;
+            `jobs queue --talkgroup` queues its past calls)
+queue       retry-failed: put every failed call back in the queue
 status      the admin page's Status tab, as JSON: the lease, ingest's files,
             the queue, the servers, the database, the checks after a failover
 jobs        the long jobs, which the host holding the lease runs one at a time:
@@ -133,6 +142,12 @@ enum Command {
     Viewers,
     Jobs(Jobs),
     Rescan,
+    Talkgroups,
+    TalkgroupSwitch {
+        talkgroup: String,
+        on: bool,
+    },
+    RetryFailed,
     Status,
     Version,
     Help,
@@ -156,6 +171,7 @@ enum Asr {
     Report {
         set: String,
     },
+    Sets,
     Run {
         set: String,
         server: String,
@@ -338,6 +354,7 @@ fn parse_asr(args: &[&str]) -> Option<Asr> {
         ["todo", rest @ ..] => Some(Asr::Todo {
             set: text(&flags(rest, &["--set"], &[], &[])?, "--set")?,
         }),
+        ["sets"] => Some(Asr::Sets),
         ["report", rest @ ..] => Some(Asr::Report {
             set: text(&flags(rest, &["--set"], &[], &[])?, "--set")?,
         }),
@@ -394,6 +411,15 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["viewers"] => Some(Command::Viewers),
         ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
         ["rescan"] => Some(Command::Rescan),
+        ["talkgroups"] => Some(Command::Talkgroups),
+        ["talkgroup", "transcribe", talkgroup, switch] => match *switch {
+            "on" | "off" => Some(Command::TalkgroupSwitch {
+                talkgroup: talkgroup.to_string(),
+                on: *switch == "on",
+            }),
+            _ => None,
+        },
+        ["queue", "retry-failed"] => Some(Command::RetryFailed),
         ["status"] => Some(Command::Status),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
@@ -494,6 +520,16 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("jobs: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(
+            command
+            @ (Command::Talkgroups | Command::TalkgroupSwitch { .. } | Command::RetryFailed),
+        ) => match transcription_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("{error}");
                 ExitCode::FAILURE
             }
         },
@@ -812,6 +848,41 @@ async fn favorites_command(command: Favorites) -> CommandResult {
     Ok(ExitCode::SUCCESS)
 }
 
+async fn transcription_command(command: Command) -> CommandResult {
+    let mut conn = connect().await?;
+    match command {
+        Command::Talkgroups => {
+            for t in talkgroups::list(&mut conn).await? {
+                println!(
+                    "{}/{}\t{}\t{}",
+                    t.system,
+                    t.number,
+                    if t.transcribe { "on" } else { "off" },
+                    t.name
+                );
+            }
+        }
+        Command::TalkgroupSwitch { talkgroup, on } => {
+            let (system, number) =
+                talkgroup_name(&talkgroup).ok_or("write the talkgroup as SYSTEM/NUMBER")?;
+            let id = talkgroups::find(&mut conn, system, number)
+                .await?
+                .ok_or_else(|| format!("there is no talkgroup {talkgroup}"))?;
+            talkgroups::set_transcribe(&mut conn, id, on).await?;
+            println!(
+                "transcription is {} for {talkgroup}'s new calls",
+                if on { "on" } else { "off" }
+            );
+        }
+        Command::RetryFailed => {
+            let retried = scannerpulse::queue::retry_failed(&mut conn).await?;
+            println!("{retried} failed calls are back in the queue");
+        }
+        _ => unreachable!("only the transcription commands come here"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn status_command() -> CommandResult {
     let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set")?;
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -1027,6 +1098,15 @@ async fn asr(command: Asr) -> CommandResult {
         }
         Asr::Todo { set } => asr_todo(&mut conn, &set).await,
         Asr::Report { set } => asr_report(&mut conn, &set).await,
+        Asr::Sets => {
+            for set in scannerpulse::evaluation::sets(&mut conn).await? {
+                println!(
+                    "{}\t{} calls\t{} labeled\t{} runs",
+                    set.set, set.size, set.labeled, set.runs
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Asr::Run {
             set,
             server,
@@ -1651,6 +1731,23 @@ mod tests {
             None
         );
         assert_eq!(parse(&["jobs", "queue", "--day", "x"]), None);
+    }
+
+    #[test]
+    fn the_transcription_commands_take_a_talkgroup_and_a_switch() {
+        assert_eq!(
+            parse(&["talkgroup", "transcribe", "SYSA/7", "on"]),
+            Some(Command::TalkgroupSwitch {
+                talkgroup: "SYSA/7".into(),
+                on: true
+            })
+        );
+        assert_eq!(parse(&["talkgroup", "transcribe", "SYSA/7", "yes"]), None);
+        assert_eq!(
+            parse(&["queue", "retry-failed"]),
+            Some(Command::RetryFailed)
+        );
+        assert_eq!(parse(&["asr", "sets"]), Some(Command::Asr(Asr::Sets)));
     }
 
     #[test]

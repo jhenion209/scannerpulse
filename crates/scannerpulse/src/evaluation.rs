@@ -261,6 +261,30 @@ pub async fn to_label(db: impl PgExecutor<'_>, set: &str) -> sqlx::Result<Vec<To
 }
 
 /// How many calls the set holds.
+/// An evaluation set, for the admin page's list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+pub struct SetSummary {
+    pub set: String,
+    pub size: i64,
+    /// Its calls that have a person's text.
+    pub labeled: i64,
+    /// The kept runs on it.
+    pub runs: i64,
+}
+
+/// Every evaluation set, by name.
+pub async fn sets(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<SetSummary>> {
+    sqlx::query_as(
+        "SELECT e.set_name AS set, count(*) AS size, \
+                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM transcript_labels l \
+                    WHERE l.call_id = e.call_id AND l.started_at = e.started_at)) AS labeled, \
+                (SELECT count(*) FROM asr_runs r WHERE r.set_name = e.set_name) AS runs \
+         FROM eval_calls e GROUP BY e.set_name ORDER BY e.set_name",
+    )
+    .fetch_all(db)
+    .await
+}
+
 pub async fn set_size(db: impl PgExecutor<'_>, set: &str) -> sqlx::Result<i64> {
     sqlx::query_scalar("SELECT count(*) FROM eval_calls WHERE set_name = $1")
         .bind(set)

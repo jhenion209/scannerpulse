@@ -25,6 +25,7 @@ pub mod settings;
 pub mod smartsort;
 pub mod status;
 pub mod store;
+pub mod talkgroups;
 pub mod transcriber;
 pub mod transcripts;
 pub mod watcher;

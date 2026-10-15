@@ -58,7 +58,7 @@ pub fn production(labeled: &[Labeled]) -> Score {
 }
 
 /// One kept run of a candidate over a set.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, serde::Serialize)]
 pub struct Run {
     pub run_at: DateTime<Utc>,
     pub server: String,
