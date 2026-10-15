@@ -266,6 +266,30 @@ pub fn refused_url() -> String {
     format!("http://127.0.0.1:{port}/v1/audio/transcriptions")
 }
 
+/// A fence whose lease the test can take away.
+pub struct HeldFence {
+    pub held: std::sync::atomic::AtomicBool,
+    pub holder: String,
+}
+
+impl HeldFence {
+    pub fn new(holder: &str) -> Arc<HeldFence> {
+        Arc::new(HeldFence {
+            held: std::sync::atomic::AtomicBool::new(true),
+            holder: holder.to_string(),
+        })
+    }
+}
+
+impl scannerpulse::filer::Fence for HeldFence {
+    fn held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
+    fn holder(&self) -> &str {
+        &self.holder
+    }
+}
+
 /// System SYSA, its talkgroup 127 (transcription on or off) and one call of
 /// it at `started_at`, `duration_ms` long, whose file is `rel_path` in the
 /// location. Returns the call's id and the talkgroup's id.

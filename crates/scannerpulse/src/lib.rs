@@ -14,6 +14,7 @@ pub mod reader;
 pub mod servers;
 pub mod settings;
 pub mod store;
+pub mod transcriber;
 pub mod transcripts;
 pub mod watcher;
 

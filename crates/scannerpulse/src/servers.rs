@@ -127,6 +127,13 @@ impl Servers {
         }
     }
 
+    /// Gives back every place; the cooldowns stay.
+    pub fn release_all(&mut self) {
+        for entry in &mut self.list {
+            entry.busy = 0;
+        }
+    }
+
     /// A request failed for the server's sake. Starts a cooldown, unless the
     /// server cools down already: then it is the same round. True when a new
     /// round began.
