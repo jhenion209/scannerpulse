@@ -11,7 +11,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::{ingest, lease, settings, web};
+use scannerpulse::{accounts, ingest, lease, settings, web};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -31,6 +31,9 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse asr todo --set NAME
        scannerpulse asr report --set NAME
        scannerpulse asr run --set NAME --server URL --model MODEL [--prompt-file FILE]
+       scannerpulse admin add|password|disable|enable NAME
+       scannerpulse admin list
+       scannerpulse admin password-signin on|off
        scannerpulse --version
        scannerpulse --help
 
@@ -61,7 +64,16 @@ asr         the transcription improvement module, when improvement_module.enable
   run       transcribe the set's labeled calls with a candidate server, model
             and prompt, without saving any transcript, and keep the score
             (reads SCANNERPULSE_TRANSCRIPTION_API_KEY for servers that need a
-            key)";
+            key)
+admin       the admin accounts:
+  add       add an account; asks for its password twice
+  password  give an account a new password and end its sessions
+  disable   disable an account and end its sessions (never the last one)
+  enable    enable a disabled account
+  list      list the accounts
+  password-signin
+            allow or refuse signing in with a password (on by default; the
+            command line can always turn it back on)";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -82,6 +94,7 @@ enum Command {
         yes: bool,
     },
     Asr(Asr),
+    Admin(Admin),
     Version,
     Help,
 }
@@ -110,6 +123,30 @@ enum Asr {
         model: String,
         prompt_file: Option<String>,
     },
+}
+
+/// The admin accounts' commands.
+#[derive(Debug, PartialEq, Eq)]
+enum Admin {
+    Add(String),
+    Password(String),
+    Disable(String),
+    Enable(String),
+    List,
+    PasswordSignin(bool),
+}
+
+fn parse_admin(args: &[&str]) -> Option<Admin> {
+    match args {
+        ["add", name] => Some(Admin::Add(name.to_string())),
+        ["password", name] => Some(Admin::Password(name.to_string())),
+        ["disable", name] => Some(Admin::Disable(name.to_string())),
+        ["enable", name] => Some(Admin::Enable(name.to_string())),
+        ["list"] => Some(Admin::List),
+        ["password-signin", "on"] => Some(Admin::PasswordSignin(true)),
+        ["password-signin", "off"] => Some(Admin::PasswordSignin(false)),
+        _ => None,
+    }
 }
 
 /// `--flag value` pairs and lone switches, each given once, in any order.
@@ -222,6 +259,7 @@ fn parse(args: &[&str]) -> Option<Command> {
             yes: !rest.is_empty(),
         }),
         ["asr", rest @ ..] => parse_asr(rest).map(Command::Asr),
+        ["admin", rest @ ..] => parse_admin(rest).map(Command::Admin),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -293,6 +331,13 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("asr: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Admin(command)) => match admin(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("admin: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -456,6 +501,95 @@ fn talkgroup_name(text: &str) -> Option<(&str, i64)> {
 }
 
 type CommandResult = Result<ExitCode, Box<dyn std::error::Error>>;
+
+async fn admin(command: Admin) -> CommandResult {
+    let mut conn = connect().await?;
+    match command {
+        Admin::Add(login) => {
+            accounts::check_login(&login)?;
+            let password = new_password()?;
+            accounts::add(&mut conn, &login, &password).await?;
+            println!("added {login}");
+        }
+        Admin::Password(login) => {
+            let password = new_password()?;
+            accounts::set_password(&mut conn, &login, &password).await?;
+            println!("{login} has a new password; its sessions have ended");
+        }
+        Admin::Disable(login) => {
+            accounts::disable(&mut conn, &login).await?;
+            println!("{login} is disabled; its sessions have ended");
+        }
+        Admin::Enable(login) => {
+            accounts::enable(&mut conn, &login).await?;
+            println!("{login} is enabled");
+        }
+        Admin::List => {
+            for admin in accounts::list(&mut conn).await? {
+                let how = match (admin.password, admin.oidc) {
+                    (true, true) => "password and OIDC",
+                    (true, false) => "password",
+                    (false, true) => "OIDC",
+                    (false, false) => "no way to sign in",
+                };
+                let last = admin
+                    .last_sign_in
+                    .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
+                    .unwrap_or_else(|| "never".into());
+                println!(
+                    "{}\t{}\t{how}\tlast sign-in {last}",
+                    admin.login,
+                    if admin.disabled {
+                        "disabled"
+                    } else {
+                        "enabled"
+                    },
+                );
+            }
+        }
+        Admin::PasswordSignin(on) => {
+            accounts::set_password_signin(&mut conn, on).await?;
+            println!("password sign-in is {}", if on { "on" } else { "off" });
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A new password, typed twice. From a terminal the typing is not shown;
+/// otherwise the first two lines of the input are read.
+fn new_password() -> Result<String, Box<dyn std::error::Error>> {
+    let first = read_secret("new password: ")?;
+    accounts::check_password(&first)?;
+    let second = read_secret("again: ")?;
+    if first != second {
+        return Err("the two passwords differ".into());
+    }
+    Ok(first)
+}
+
+fn read_secret(prompt: &str) -> std::io::Result<String> {
+    use std::io::IsTerminal;
+    let terminal = std::io::stdin().is_terminal();
+    let stty = |arg: &str| {
+        std::process::Command::new("stty")
+            .arg(arg)
+            .stdin(std::process::Stdio::inherit())
+            .status()
+    };
+    if terminal {
+        eprint!("{prompt}");
+        std::io::stderr().flush()?;
+        stty("-echo")?;
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    if terminal {
+        let _ = stty("echo");
+        eprintln!();
+    }
+    read?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+}
 
 async fn asr(command: Asr) -> CommandResult {
     let mut conn = connect().await?;
@@ -843,7 +977,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Asr, Command, parse, talkgroup_list};
+    use super::{Admin, Asr, Command, parse, talkgroup_list};
 
     #[test]
     fn db_update_runs_with_or_without_quiet() {
@@ -1016,6 +1150,23 @@ mod tests {
         let bad = talkgroup_list("SYSA/127\nAlpha Fire\n").unwrap_err();
         assert!(bad.contains("line 2"), "{bad}");
         assert!(talkgroup_list("# nothing\n").is_err());
+    }
+
+    #[test]
+    fn admin_takes_a_name_or_a_switch() {
+        assert_eq!(
+            parse(&["admin", "add", "ann"]),
+            Some(Command::Admin(Admin::Add("ann".into())))
+        );
+        assert_eq!(
+            parse(&["admin", "password-signin", "off"]),
+            Some(Command::Admin(Admin::PasswordSignin(false)))
+        );
+        assert_eq!(parse(&["admin", "list"]), Some(Command::Admin(Admin::List)));
+        assert_eq!(parse(&["admin", "add"]), None);
+        assert_eq!(parse(&["admin", "add", "ann", "bob"]), None);
+        assert_eq!(parse(&["admin", "password-signin", "yes"]), None);
+        assert_eq!(parse(&["admin", "remove", "ann"]), None);
     }
 
     #[test]

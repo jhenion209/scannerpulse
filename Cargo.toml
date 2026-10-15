@@ -8,3 +8,10 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jhenion209/scannerpulse"
 rust-version = "1.85"
+
+# Password hashing is deliberately slow; unoptimised, it makes the tests crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

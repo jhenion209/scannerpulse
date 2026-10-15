@@ -82,6 +82,11 @@ listen.
     `since`, the last call a reconnecting page saw);
   - `/healthz` (the database answers within 4 seconds and is the primary)
     and `/health` (the process is up), for a load balancer.
+- `admin add|password|disable|enable NAME`, `admin list` and
+  `admin password-signin on|off` manage the admin accounts. `add` and
+  `password` ask for the password twice (at least 12 characters); a new
+  password and a disabled account end that account's sessions; the last
+  enabled account cannot be disabled. Passwords are kept as Argon2id hashes.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
