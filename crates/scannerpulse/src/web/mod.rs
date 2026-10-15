@@ -7,6 +7,7 @@ mod audio;
 pub mod auth;
 mod calls;
 pub mod client;
+mod data;
 mod edit;
 mod error;
 mod info;
@@ -212,6 +213,8 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(transcription::transcribe),
         )
         .route("/api/admin/queue/retry", post(transcription::retry_failed))
+        .route("/api/admin/data/uncorrected", get(data::uncorrected))
+        .route("/api/admin/talkgroups/{id}/rename", post(data::rename))
         .route("/api/admin/asr/sets", get(transcription::sets))
         .route("/api/admin/asr/report", get(transcription::report))
         .route("/api/admin/jobs", get(jobs::list))

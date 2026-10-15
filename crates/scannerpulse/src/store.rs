@@ -307,7 +307,8 @@ pub async fn site_id(conn: &mut PgConnection, system_id: i32, name: &str) -> sql
 /// The id of a talkgroup of a system. A new talkgroup is added with
 /// transcription off. A new name replaces the stored one by `renamed`, and the
 /// old name goes to `files_name` when that is empty: the archive's folder and
-/// files still carry it.
+/// files still carry it, so a talkgroup with calls is marked as not having its
+/// files corrected.
 pub async fn talkgroup_id(
     conn: &mut PgConnection,
     system_id: i32,
@@ -332,7 +333,8 @@ pub async fn talkgroup_id(
     if let Some(name) = renamed(&stored, &talkgroup.name) {
         sqlx::query(
             "UPDATE talkgroups SET name = $2, \
-             files_name = CASE WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END \
+             files_name = CASE WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
+             files_correct = files_correct AND NOT EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) \
              WHERE id = $1",
         )
         .bind(id)

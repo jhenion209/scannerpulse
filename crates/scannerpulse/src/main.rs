@@ -45,6 +45,8 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse rescan
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
+       scannerpulse talkgroup rename SYSTEM/NUMBER NAME
+       scannerpulse talkgroups uncorrected
        scannerpulse queue retry-failed
        scannerpulse status
        scannerpulse report traffic
@@ -102,9 +104,12 @@ settings    list, set or remove the administrator's settings; a value is JSON
 favorites   list, set or remove the named favorite lists of talkgroups
 viewers     list the open pages of every web host
 rescan      ask every running ingest to list its sources now
-talkgroups  list the talkgroups and their transcription switches
+talkgroups  list the talkgroups and their transcription switches;
+            uncorrected: those whose files still carry an old name
 talkgroup   turn a talkgroup's transcription on or off (its new calls only;
-            `jobs queue --talkgroup` queues its past calls)
+            `jobs queue --talkgroup` queues its past calls); rename a
+            talkgroup (its files keep the old name until they are corrected;
+            the recorder's next file of it brings the recorder's name back)
 queue       retry-failed: put every failed call back in the queue
 report      traffic: calls per 5 minutes over the last 120 days, as weekday and
             weekend profiles, and the quietest hours (for maintenance)
@@ -150,6 +155,11 @@ enum Command {
         talkgroup: String,
         on: bool,
     },
+    TalkgroupRename {
+        talkgroup: String,
+        name: String,
+    },
+    Uncorrected,
     RetryFailed,
     Status,
     Traffic,
@@ -416,6 +426,11 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
         ["rescan"] => Some(Command::Rescan),
         ["talkgroups"] => Some(Command::Talkgroups),
+        ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
+        ["talkgroup", "rename", talkgroup, name] => Some(Command::TalkgroupRename {
+            talkgroup: talkgroup.to_string(),
+            name: name.to_string(),
+        }),
         ["talkgroup", "transcribe", talkgroup, switch] => match *switch {
             "on" | "off" => Some(Command::TalkgroupSwitch {
                 talkgroup: talkgroup.to_string(),
@@ -529,8 +544,11 @@ async fn main() -> ExitCode {
             }
         },
         Some(
-            command
-            @ (Command::Talkgroups | Command::TalkgroupSwitch { .. } | Command::RetryFailed),
+            command @ (Command::Talkgroups
+            | Command::TalkgroupSwitch { .. }
+            | Command::TalkgroupRename { .. }
+            | Command::Uncorrected
+            | Command::RetryFailed),
         ) => match transcription_command(command).await {
             Ok(code) => code,
             Err(error) => {
@@ -885,6 +903,50 @@ async fn transcription_command(command: Command) -> CommandResult {
                 "transcription is {} for {talkgroup}'s new calls",
                 if on { "on" } else { "off" }
             );
+        }
+        Command::TalkgroupRename { talkgroup, name } => {
+            if let Some(problem) = talkgroups::name_problem(&name) {
+                return Err(problem.into());
+            }
+            let (system, number) =
+                talkgroup_name(&talkgroup).ok_or("write the talkgroup as SYSTEM/NUMBER")?;
+            let id = talkgroups::find(&mut conn, system, number)
+                .await?
+                .ok_or_else(|| format!("there is no talkgroup {talkgroup}"))?;
+            match talkgroups::rename(&mut conn, id, &name).await? {
+                talkgroups::Renamed::Done {
+                    files_correct: true,
+                } => {
+                    println!("{talkgroup} is {name:?}; it has no calls to correct")
+                }
+                talkgroups::Renamed::Done { .. } => println!(
+                    "{talkgroup} is {name:?}; its files keep the old name until \
+                     `talkgroup correct {talkgroup}` runs"
+                ),
+                talkgroups::Renamed::Same => println!("{talkgroup} has that name already"),
+                talkgroups::Renamed::Taken(_, other) => {
+                    return Err(format!(
+                        "{other} has that name already: merge into it with \
+                         `talkgroup merge {talkgroup} --into {other}`"
+                    )
+                    .into());
+                }
+                talkgroups::Renamed::NoSuch => {
+                    return Err(format!("there is no talkgroup {talkgroup}").into());
+                }
+            }
+        }
+        Command::Uncorrected => {
+            for t in talkgroups::uncorrected(&mut conn).await? {
+                println!(
+                    "{}/{}\t{} calls\t{}\t(files: {})",
+                    t.system,
+                    t.number,
+                    t.calls,
+                    t.name,
+                    t.files_name.as_deref().unwrap_or("?")
+                );
+            }
         }
         Command::RetryFailed => {
             let retried = scannerpulse::queue::retry_failed(&mut conn).await?;
@@ -1783,6 +1845,22 @@ mod tests {
             Some(Command::RetryFailed)
         );
         assert_eq!(parse(&["asr", "sets"]), Some(Command::Asr(Asr::Sets)));
+    }
+
+    #[test]
+    fn the_data_commands_are_read() {
+        assert_eq!(
+            parse(&["talkgroup", "rename", "SYSA/7", "Alpha / Fire"]),
+            Some(Command::TalkgroupRename {
+                talkgroup: "SYSA/7".into(),
+                name: "Alpha / Fire".into()
+            })
+        );
+        assert_eq!(parse(&["talkgroup", "rename", "SYSA/7"]), None);
+        assert_eq!(
+            parse(&["talkgroups", "uncorrected"]),
+            Some(Command::Uncorrected)
+        );
     }
 
     #[test]

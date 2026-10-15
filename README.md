@@ -173,12 +173,24 @@ listen.
   `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
   `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts
   every failed call back in the queue in one statement (a call of a
-  talkgroup whose transcription is off stays failed); `asr sets` lists the evaluation sets.
+  talkgroup whose transcription is off stays failed); `asr sets` lists the
+  evaluation sets.
   The admin page's `/api/admin/talkgroups`, `PUT
   /api/admin/talkgroups/<id>/transcribe` (`on`), `POST
   /api/admin/queue/retry`, `/api/admin/asr/sets` and
   `/api/admin/asr/report?set=NAME` do the same; the last two answer only
   while the improvement module is on.
+- `talkgroup rename SYSTEM/NUMBER NAME` (and `POST
+  /api/admin/talkgroups/<id>/rename`, `name`) renames a talkgroup: every
+  call shows the new name at once. A name another talkgroup of the system
+  has is refused (merge into that one instead), and so is a name with a
+  double quote or a control character. The recorder's name wins: a
+  talkgroup it still sends takes that name back with its next call. The
+  archive's folders, file names and tags keep the old name until an
+  administrator starts their correction, so a talkgroup with calls is
+  listed by `talkgroups uncorrected` (and `/api/admin/data/uncorrected`),
+  with the old name its files carry. A rename that ingest sees in the
+  recorder's files lists the talkgroup the same way.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
   each host) gives the calls per five minutes of the 120 days before today,
   in the site's time zone, as weekday and weekend profiles (calls a day),
