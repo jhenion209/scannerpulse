@@ -47,6 +47,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse queue retry-failed
        scannerpulse status
+       scannerpulse report traffic
        scannerpulse jobs list
        scannerpulse jobs show|stop ID
        scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
@@ -105,6 +106,8 @@ talkgroups  list the talkgroups and their transcription switches
 talkgroup   turn a talkgroup's transcription on or off (its new calls only;
             `jobs queue --talkgroup` queues its past calls)
 queue       retry-failed: put every failed call back in the queue
+report      traffic: calls per 5 minutes over the last 120 days, as weekday and
+            weekend profiles, and the quietest hours (for maintenance)
 status      the admin page's Status tab, as JSON: the lease, ingest's files,
             the queue, the servers, the database, the checks after a failover
 jobs        the long jobs, which the host holding the lease runs one at a time:
@@ -149,6 +152,7 @@ enum Command {
     },
     RetryFailed,
     Status,
+    Traffic,
     Version,
     Help,
 }
@@ -421,6 +425,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         },
         ["queue", "retry-failed"] => Some(Command::RetryFailed),
         ["status"] => Some(Command::Status),
+        ["report", "traffic"] => Some(Command::Traffic),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -530,6 +535,13 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Traffic) => match traffic_command().await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("report: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -879,6 +891,29 @@ async fn transcription_command(command: Command) -> CommandResult {
             println!("{retried} failed calls are back in the queue");
         }
         _ => unreachable!("only the transcription commands come here"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn traffic_command() -> CommandResult {
+    let mut conn = connect().await?;
+    let zone = settings::load(&mut conn).await?.time_zone;
+    let report = scannerpulse::reports::traffic(&mut conn, zone, Utc::now()).await?;
+    println!(
+        "{} calls in the {} days before today ({} weekdays, {} weekend days), times in {}",
+        report.calls, report.days, report.weekdays, report.weekend_days, report.time_zone
+    );
+    for (name, windows) in [
+        ("weekdays", &report.quietest_weekday),
+        ("weekends", &report.quietest_weekend),
+    ] {
+        println!("quietest hours on {name}:");
+        for w in windows {
+            println!(
+                "  {} to {}: {:.1} calls a day",
+                w.start, w.end, w.calls_per_day
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

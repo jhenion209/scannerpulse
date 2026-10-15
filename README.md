@@ -173,6 +173,11 @@ listen.
   /api/admin/queue/retry`, `/api/admin/asr/sets` and
   `/api/admin/asr/report?set=NAME` do the same; the last two answer only
   while the improvement module is on.
+- `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
+  each host) gives the calls per five minutes of the 120 days before today,
+  in the site's time zone, as weekday and weekend profiles (calls a day),
+  the three quietest hours of each (for maintenance), and the period's
+  totals.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 

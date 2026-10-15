@@ -123,6 +123,26 @@ pub async fn status(_: Admin, State(state): State<AppState>) -> Result<Json<Valu
     Ok(Json(crate::status::read(&state.pool).await?))
 }
 
+/// How long a traffic report is kept before it is made again.
+pub const TRAFFIC_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
+/// minutes on each host, since it reads months of calls.
+pub async fn traffic(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut kept = state.traffic.lock().await;
+    if let Some((when, value)) = kept.as_ref() {
+        if when.elapsed() < TRAFFIC_FOR {
+            return Ok(Json(value.clone()));
+        }
+    }
+    let zone = crate::settings::load(&state.pool).await?.time_zone;
+    let mut conn = state.pool.acquire().await?;
+    let report = crate::reports::traffic(&mut conn, zone, chrono::Utc::now()).await?;
+    let value = json!(report);
+    *kept = Some((std::time::Instant::now(), value.clone()));
+    Ok(Json(value))
+}
+
 /// `POST /api/admin/rescan`: every running ingest lists its sources at once.
 pub async fn rescan(admin: Admin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     crate::ingest::request_rescan(&state.pool).await?;

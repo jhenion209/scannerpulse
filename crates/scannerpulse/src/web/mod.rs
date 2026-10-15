@@ -136,6 +136,8 @@ pub struct AppState {
     pub viewers: viewers::Open,
     /// Each address's transcript saves in its current minute.
     pub saves: edit::Saves,
+    /// The traffic report, with the time it was made.
+    pub traffic: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
 }
@@ -147,6 +149,7 @@ impl AppState {
             database,
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
+            traffic: Arc::new(tokio::sync::Mutex::new(None)),
             saves: edit::Saves::default(),
             host: "web".to_string(),
             oidc_secret: None,
@@ -200,6 +203,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/viewers", get(viewers::list))
         .route("/api/admin/rescan", post(admin::rescan))
         .route("/api/admin/status", get(admin::status))
+        .route("/api/admin/reports/traffic", get(admin::traffic))
         .route("/api/admin/talkgroups", get(transcription::talkgroups))
         .route(
             "/api/admin/talkgroups/{id}/transcribe",

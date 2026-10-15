@@ -18,6 +18,7 @@ pub mod log;
 pub mod mp3;
 pub mod queue;
 pub mod reader;
+pub mod reports;
 pub mod search;
 pub mod servers;
 pub mod sessions;
