@@ -663,8 +663,8 @@ async fn asr_run(
     model: &str,
     prompt_file: Option<&str>,
 ) -> CommandResult {
-    if !reqwest_url_ok(server) {
-        return Err(format!("{server} is not an http:// or https:// URL").into());
+    if !settings::server_url_ok(server) {
+        return Err("--server must be an http:// or https:// URL without a user name or password; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY".into());
     }
     let prompt = match prompt_file {
         None => None,
@@ -745,10 +745,6 @@ async fn asr_run(
     let id = accuracy::save_run(&mut *conn, set, &run).await?;
     println!("kept as run {id}");
     Ok(ExitCode::SUCCESS)
-}
-
-fn reqwest_url_ok(url: &str) -> bool {
-    reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
 
 /// Asks a yes-or-no question on the terminal; anything but y or yes is no.

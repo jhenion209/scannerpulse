@@ -178,6 +178,7 @@ fn a_bad_server_list_is_refused() {
         json!([{"url": "http://asr-1"}, {"url": "http://asr-1"}]),
         json!([{"url": "http:// host"}]),
         json!([{"url": "http://asr-1", "weight": 65}]),
+        json!([{"url": "http://user:key@asr-1:8000/v1/audio/transcriptions"}]),
     ] {
         let values = on(&[("transcription.servers", servers.clone())]);
         assert!(
@@ -190,6 +191,16 @@ fn a_bad_server_list_is_refused() {
             ),
             "{servers}"
         );
+    }
+}
+
+#[test]
+fn a_server_url_is_http_or_https_without_credentials() {
+    assert!(settings::server_url_ok(
+        "http://asr-1:8000/v1/audio/transcriptions"
+    ));
+    for url in ["ftp://x", "http://user:key@x/", "http://user@x/"] {
+        assert!(!settings::server_url_ok(url), "{url}");
     }
 }
 

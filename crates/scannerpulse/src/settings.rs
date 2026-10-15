@@ -262,6 +262,14 @@ fn text(
     }
 }
 
+/// A transcription server's URL: http or https, and no user name or password
+/// in it, because settings are kept in the database and a key is not.
+pub fn server_url_ok(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https") && u.username().is_empty() && u.password().is_none()
+    })
+}
+
 fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError> {
     const KEY: &str = "transcription.servers";
     let list = match values.get(KEY) {
@@ -279,10 +287,15 @@ fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError
             .get("url")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|url| {
-                reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
-            })
-            .ok_or_else(|| invalid(KEY, format!("{entry} has no http:// or https:// url")))?;
+            .filter(|url| server_url_ok(url))
+            .ok_or_else(|| {
+                invalid(
+                    KEY,
+                    format!(
+                        "{entry} has no http:// or https:// url without a user name or password; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY"
+                    ),
+                )
+            })?;
         let weight = match entry.get("weight") {
             None => 1,
             Some(weight) => weight
