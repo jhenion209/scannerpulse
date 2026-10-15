@@ -265,3 +265,50 @@ pub fn refused_url() -> String {
         .port();
     format!("http://127.0.0.1:{port}/v1/audio/transcriptions")
 }
+
+/// System SYSA, its talkgroup 127 (transcription on or off) and one call of
+/// it at `started_at`, `duration_ms` long, whose file is `rel_path` in the
+/// location. Returns the call's id and the talkgroup's id.
+pub async fn insert_call(
+    pool: &PgPool,
+    places: (i16, i16),
+    rel_path: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    duration_ms: i32,
+    transcribe: bool,
+) -> (i64, i32) {
+    scannerpulse::store::ensure_partition(pool, started_at)
+        .await
+        .unwrap();
+    let system: i32 = sqlx::query_scalar(
+        "INSERT INTO systems (name) VALUES ('SYSA') \
+         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let talkgroup: i32 = sqlx::query_scalar(
+        "INSERT INTO talkgroups (system_id, number, name, transcribe) VALUES ($1, 127, 'Alpha Fire', $2) \
+         ON CONFLICT (system_id, number) DO UPDATE SET transcribe = EXCLUDED.transcribe RETURNING id",
+    )
+    .bind(system)
+    .bind(transcribe)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let (location, source) = places;
+    let call: i64 = sqlx::query_scalar(
+        "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(started_at)
+    .bind(duration_ms)
+    .bind(talkgroup)
+    .bind(source)
+    .bind(location)
+    .bind(rel_path)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (call, talkgroup)
+}

@@ -9,6 +9,7 @@ pub mod lease;
 pub mod localtime;
 pub mod log;
 pub mod mp3;
+pub mod queue;
 pub mod reader;
 pub mod servers;
 pub mod settings;

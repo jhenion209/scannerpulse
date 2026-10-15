@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnection;
-use sqlx::{Connection, PgExecutor};
+use sqlx::{Connection, PgExecutor, Postgres, Transaction};
 
 use crate::reader::{Described, FileCall, Talkgroup};
 
@@ -378,19 +378,13 @@ impl fmt::Display for RecordError {
 
 impl std::error::Error for RecordError {}
 
-/// Step 3 of filing, in one transaction: checks that `holder` holds the
-/// lease, looks up the system, site and talkgroup, records the call, marks
-/// the ingest row `row_id` done, and announces the call on
-/// `scannerpulse_calls`. Returns the call's id and start.
-///
-/// The lease row is read FOR SHARE, so a takeover waits for this transaction:
-/// the check and the insert cannot be split.
-pub async fn record(
-    conn: &mut PgConnection,
+/// A transaction in which `holder` holds the processing lease. The lease row
+/// is read FOR SHARE, so a takeover waits for the transaction: the check and
+/// the writes cannot be split. The transaction may sit idle 5 s at most.
+pub async fn fenced<'c>(
+    conn: &'c mut PgConnection,
     holder: &str,
-    row_id: i64,
-    new: &NewCall<'_>,
-) -> Result<(i64, DateTime<Utc>), RecordError> {
+) -> Result<Transaction<'c, Postgres>, RecordError> {
     let mut tx = conn.begin().await?;
     sqlx::query(&format!(
         "SET LOCAL idle_in_transaction_session_timeout = '{FENCE_IDLE_TIMEOUT}'"
@@ -407,6 +401,19 @@ pub async fn record(
     if held.is_none() {
         return Err(RecordError::LeaseLost);
     }
+    Ok(tx)
+}
+
+/// Step 3 of filing, in one fenced transaction: looks up the system, site and
+/// talkgroup, records the call, marks the ingest row `row_id` done, and
+/// announces the call on `scannerpulse_calls`. Returns the call's id and start.
+pub async fn record(
+    conn: &mut PgConnection,
+    holder: &str,
+    row_id: i64,
+    new: &NewCall<'_>,
+) -> Result<(i64, DateTime<Utc>), RecordError> {
+    let mut tx = fenced(conn, holder).await?;
     let (talkgroup_id, site_id) = lookups(&mut tx, &new.call.described).await?;
     let call = new.call;
     let d = &call.described;
