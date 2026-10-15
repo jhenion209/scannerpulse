@@ -110,3 +110,120 @@ async fn the_settings_are_read_from_the_table(pool: PgPool) -> sqlx::Result<()> 
     assert_eq!(got.missing_source_grace, Duration::from_secs(900));
     Ok(())
 }
+
+fn on(extra: &[(&str, Value)]) -> HashMap<String, Value> {
+    let mut pairs = vec![
+        ("transcription.enabled", json!(true)),
+        (
+            "transcription.servers",
+            json!([{"url": "http://asr-1:8000/v1/audio/transcriptions", "weight": 3},
+                   {"url": "https://asr-2/v1/audio/transcriptions"}]),
+        ),
+        ("transcription.model", json!("model-x")),
+        ("transcription.min_duration_ms", json!(1000)),
+    ];
+    pairs.extend(extra.iter().cloned());
+    values(&pairs)
+}
+
+#[test]
+fn transcription_is_off_unless_it_is_turned_on() {
+    assert_eq!(
+        settings::transcription_from_values(&values(&[])).unwrap(),
+        None
+    );
+    let off = values(&[
+        ("transcription.enabled", json!(false)),
+        ("transcription.model", json!(7)),
+    ]);
+    assert_eq!(settings::transcription_from_values(&off).unwrap(), None);
+}
+
+#[test]
+fn transcription_on_takes_its_servers_model_and_minimum() {
+    let t = settings::transcription_from_values(&on(&[]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.servers.len(), 2);
+    assert_eq!((t.servers[0].weight, t.servers[1].weight), (3, 1));
+    assert_eq!(t.model, "model-x");
+    assert_eq!(t.min_duration_ms, 1000);
+    assert_eq!(t.request_timeout, Duration::from_secs(120));
+    assert_eq!((t.language, t.prompt), (None, None));
+}
+
+#[test]
+fn transcription_on_needs_servers_a_model_and_a_minimum() {
+    for missing in [
+        "transcription.servers",
+        "transcription.model",
+        "transcription.min_duration_ms",
+    ] {
+        let mut values = on(&[]);
+        values.remove(missing);
+        match settings::transcription_from_values(&values) {
+            Err(SettingsError::Missing(key)) => assert_eq!(key, missing),
+            other => panic!("{missing}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_bad_server_list_is_refused() {
+    for servers in [
+        json!([]),
+        json!("http://asr-1"),
+        json!([{"url": "asr-1:8000"}]),
+        json!([{"url": "http://asr-1", "weight": 0}]),
+        json!([{"url": "http://asr-1"}, {"url": "http://asr-1"}]),
+    ] {
+        let values = on(&[("transcription.servers", servers.clone())]);
+        assert!(
+            matches!(
+                settings::transcription_from_values(&values),
+                Err(SettingsError::Invalid {
+                    key: "transcription.servers",
+                    ..
+                })
+            ),
+            "{servers}"
+        );
+    }
+}
+
+#[test]
+fn the_prompt_and_the_terms_make_one_prompt() {
+    let t = settings::transcription_from_values(&on(&[
+        ("transcription.prompt", json!("Fire and police dispatch.")),
+        (
+            "transcription.terms",
+            json!(["Engine 5", " Main Street ", ""]),
+        ),
+        ("transcription.language", json!("en")),
+    ]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        t.prompt.as_deref(),
+        Some("Fire and police dispatch. Engine 5, Main Street")
+    );
+    assert_eq!(t.language.as_deref(), Some("en"));
+    let terms_only = settings::whisper_prompt("", &["Engine 5".to_string()]);
+    assert_eq!(terms_only.as_deref(), Some("Engine 5"));
+    assert_eq!(settings::whisper_prompt("  ", &[]), None);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_transcription_settings_are_read_from_the_table(pool: PgPool) -> sqlx::Result<()> {
+    assert_eq!(settings::load_transcription(&pool).await.unwrap(), None);
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('transcription.enabled', 'true'), \
+         ('transcription.servers', '[{\"url\": \"http://asr-1/v1/audio/transcriptions\"}]'), \
+         ('transcription.model', '\"model-x\"'), ('transcription.min_duration_ms', '1000')",
+    )
+    .execute(&pool)
+    .await?;
+    let t = settings::load_transcription(&pool).await.unwrap().unwrap();
+    assert_eq!(t.servers[0].url, "http://asr-1/v1/audio/transcriptions");
+    Ok(())
+}
