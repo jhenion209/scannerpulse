@@ -18,6 +18,7 @@ pub mod queue;
 pub mod reader;
 pub mod search;
 pub mod servers;
+pub mod sessions;
 pub mod settings;
 pub mod smartsort;
 pub mod store;

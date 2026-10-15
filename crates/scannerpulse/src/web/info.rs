@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::auth::MaybeAdmin;
 use super::{ApiError, AppState};
 
 /// How long the filter choices are kept before they are read again.
@@ -158,9 +159,11 @@ pub struct TodoParams {
     pub set: String,
 }
 
-/// The labelers' list of a set, when `labeler_list.public` is true.
+/// The labelers' list of a set: for everyone when `labeler_list.public` is
+/// true, for admins otherwise.
 pub async fn labels_todo(
     State(state): State<AppState>,
+    MaybeAdmin(admin): MaybeAdmin,
     Query(params): Query<TodoParams>,
 ) -> Result<Json<Value>, ApiError> {
     let improvement = crate::settings::load_improvement(&state.pool)
@@ -169,7 +172,7 @@ pub async fn labels_todo(
             crate::settings::SettingsError::Database(error) => ApiError::Database(error),
             other => ApiError::Internal(other.to_string()),
         })?;
-    if !improvement.enabled || !improvement.labeler_list_public {
+    if !improvement.enabled || (!improvement.labeler_list_public && admin.is_none()) {
         return Err(ApiError::Forbidden(
             "the labelers' list is not public".into(),
         ));

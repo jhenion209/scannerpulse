@@ -13,8 +13,14 @@ pub enum ApiError {
     NotFound,
     /// Not found, with the reason (404).
     Missing(String),
+    /// Sign in first (401).
+    Unauthorized(String),
     /// Not open to this visitor (403).
     Forbidden(String),
+    /// The change cannot be made as things stand (409).
+    Conflict(String),
+    /// Not now: maintenance, or a part that is off (503).
+    Unavailable(String),
     /// Too many at once, or too large (429 or 413 come from the caller).
     Limit(StatusCode, String),
     /// The database failed or is gone (503).
@@ -36,7 +42,12 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(detail) => (StatusCode::BAD_REQUEST, "bad request", detail),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found", String::new()),
             ApiError::Missing(detail) => (StatusCode::NOT_FOUND, "not found", detail),
+            ApiError::Unauthorized(detail) => (StatusCode::UNAUTHORIZED, "unauthorized", detail),
             ApiError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail),
+            ApiError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail),
+            ApiError::Unavailable(detail) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "unavailable", detail)
+            }
             ApiError::Limit(status, detail) => (status, "limit", detail),
             ApiError::Internal(error) => {
                 crate::log::error(format!("internal: {error}"));

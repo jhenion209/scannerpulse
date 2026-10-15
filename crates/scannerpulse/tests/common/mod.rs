@@ -459,3 +459,88 @@ pub async fn get(pool: &PgPool, uri: &str) -> (axum::http::StatusCode, serde_jso
     }
     (status, answer)
 }
+
+/// The address every request of `app` comes from.
+pub const PEER: [u8; 4] = [198, 51, 100, 7];
+
+/// The router, as a host serves it, with requests from `PEER`.
+pub fn app(pool: &PgPool) -> axum::Router {
+    scannerpulse::web::router(scannerpulse::web::AppState::new(
+        pool.clone(),
+        (*pool.connect_options()).clone(),
+    ))
+    .layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((PEER, 40_000)),
+    ))
+}
+
+/// What the router answered: the status, the headers and the JSON body
+/// (`Null` when there is none).
+pub struct Reply {
+    pub status: axum::http::StatusCode,
+    pub headers: axum::http::HeaderMap,
+    pub body: serde_json::Value,
+}
+
+/// Sends one request with `headers` and, when given, a JSON body. Every
+/// error must be `{error, detail}`.
+pub async fn send(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Option<serde_json::Value>,
+) -> Reply {
+    let mut request = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = match body {
+        Some(body) => request
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string())),
+        None => request.body(axum::body::Body::empty()),
+    }
+    .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    if status.as_u16() >= 400 {
+        assert!(
+            body["error"].is_string() && body["detail"].is_string(),
+            "{method} {uri}: an error is {{error, detail}}, not {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    Reply {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// An admin account named `login`, with the password `password`.
+pub async fn admin(pool: &PgPool, login: &str, password: &str) {
+    let mut conn = pool.acquire().await.unwrap();
+    scannerpulse::accounts::add(&mut conn, login, password)
+        .await
+        .unwrap();
+}
+
+/// Signs in; returns the `Cookie` header value and the CSRF token.
+pub async fn sign_in(app: &axum::Router, login: &str, password: &str) -> (String, String) {
+    let answer = send(
+        app,
+        "POST",
+        "/api/auth/login",
+        &[],
+        Some(serde_json::json!({"login": login, "password": password})),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{:?}", answer.body);
+    let cookie = answer.headers["set-cookie"].to_str().unwrap();
+    let pair = cookie.split(';').next().unwrap().to_string();
+    (pair, answer.body["csrf"].as_str().unwrap().to_string())
+}

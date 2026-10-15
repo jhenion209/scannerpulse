@@ -2,8 +2,11 @@
 //! archive and never writes to the archive, so any number of hosts can run it
 //! side by side behind a load balancer.
 
+mod admin;
 mod audio;
+pub mod auth;
 mod calls;
+pub mod client;
 mod error;
 mod info;
 pub mod live;
@@ -111,6 +114,26 @@ pub fn router(state: AppState) -> Router {
         .route("/api/favorites", get(info::favorites))
         .route("/api/status", get(info::status))
         .route("/api/labels/todo", get(info::labels_todo))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/me", get(auth::me))
+        .route("/api/auth/methods", get(auth::methods))
+        .route(
+            "/api/admin/accounts",
+            get(admin::accounts_list).post(admin::accounts_add),
+        )
+        .route(
+            "/api/admin/accounts/{login}/password",
+            post(admin::accounts_password),
+        )
+        .route(
+            "/api/admin/accounts/{login}/disable",
+            post(admin::accounts_disable),
+        )
+        .route(
+            "/api/admin/accounts/{login}/enable",
+            post(admin::accounts_enable),
+        )
         .route("/audio/{id}", get(audio::one))
         .route("/api/export/audio", post(audio::export))
         .route("/api/export/xlsx", get(sheet::export))

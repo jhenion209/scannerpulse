@@ -73,13 +73,27 @@ listen.
     at 10,000 unless it is exact, and each read of a page or a count has
     30 seconds;
   - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, `/api/status`, and
-    `/api/labels/todo?set=NAME` when the labelers' list is public;
+    `/api/labels/todo?set=NAME` (for admins, and for everyone when the
+    labelers' list is public);
   - `/audio/<id>`: a call's file, with byte ranges;
   - `POST /api/export/audio`: up to 200 calls, by `ids` or by the filters,
     joined into one mp3 of at most 256 MiB of audio; `/api/export/xlsx`: a search's matches, newest
     first, at most 100,000 rows, as an Excel file; two exports at a time;
   - `/api/live`: a websocket of new calls and transcripts (`talkgroups`, and
     `since`, the last call a reconnecting page saw);
+  - `POST /api/auth/login` (`login`, `password`) signs an admin in: the
+    session is a cookie (`HttpOnly`, `Secure`, `SameSite=Lax`) that ends 12
+    hours after the last request and at most 7 days after signing in, and
+    every admin change must carry the session's CSRF token in an
+    `X-CSRF-Token` header (`/api/auth/me` gives it). Five failed sign-ins for
+    one name, or from one address, within 15 minutes lock that name or that
+    address for 15 minutes. `POST /api/auth/logout` signs out;
+    `/api/auth/methods` says which ways to sign in are on. Behind a proxy, list
+    its addresses in the setting `web.trusted_proxies` (for example
+    `["192.0.2.10"]`): only then is its `X-Forwarded-For` believed;
+  - `/api/admin/accounts` lists and adds admins;
+    `/api/admin/accounts/<login>/password`, `/disable` and `/enable` change
+    one, as the `admin` command does;
   - `/healthz` (the database answers within 4 seconds and is the primary)
     and `/health` (the process is up), for a load balancer.
 - `admin add|password|disable|enable NAME`, `admin list` and
