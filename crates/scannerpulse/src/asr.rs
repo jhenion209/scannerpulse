@@ -27,9 +27,12 @@ pub struct Request<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsrError {
     /// The server's fault: it refused, did not answer in time, answered 5xx,
-    /// or answered without text. The call is not to blame.
+    /// or answered without text, or it refused the key (401, 403), the path
+    /// (404), the request's time (408) or the rate (429). The call is not to
+    /// blame.
     Server(String),
-    /// The server refused this call (4xx): it counts against the call.
+    /// The server refused this call (any other 4xx): it counts against the
+    /// call.
     Call(String),
     /// The audio could not be read: it counts against the call.
     Audio(String),
@@ -100,7 +103,7 @@ impl Client {
             .bytes()
             .await
             .map_err(|error| AsrError::Server(describe(&error)))?;
-        if status.is_client_error() {
+        if status.is_client_error() && !servers_fault(status) {
             return Err(AsrError::Call(format!("{status}: {}", excerpt(&body))));
         }
         if !status.is_success() {
@@ -119,6 +122,12 @@ impl Client {
             })?;
         Ok(text.trim().to_string())
     }
+}
+
+/// A 4xx that says the server or its setup is wrong, not the call: a refused
+/// key, a wrong path, a request timeout or a rate limit.
+fn servers_fault(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 401 | 403 | 404 | 408 | 429)
 }
 
 /// An error of the connection, in words.

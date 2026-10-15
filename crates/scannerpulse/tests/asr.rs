@@ -108,3 +108,30 @@ async fn a_5xx_an_answer_without_text_a_refusal_and_silence_are_the_server_s_fau
         );
     }
 }
+
+#[tokio::test]
+async fn an_auth_path_or_rate_limit_refusal_is_the_server_s_fault() {
+    for code in [401u16, 403, 404, 408, 429] {
+        let server = FakeAsr::start(vec![Answer::Status(code, "refused")]);
+        let result = Client::new(None)
+            .transcribe(
+                &request(&server.url, Duration::from_secs(5)),
+                "c.mp3",
+                vec![1],
+            )
+            .await;
+        match result {
+            Err(AsrError::Server(why)) => assert!(why.contains(&code.to_string()), "{why}"),
+            other => panic!("{code}: {other:?}"),
+        }
+    }
+    let server = FakeAsr::start(vec![Answer::Status(422, "unprocessable")]);
+    let result = Client::new(None)
+        .transcribe(
+            &request(&server.url, Duration::from_secs(5)),
+            "c.mp3",
+            vec![1],
+        )
+        .await;
+    assert!(matches!(result, Err(AsrError::Call(_))), "{result:?}");
+}
