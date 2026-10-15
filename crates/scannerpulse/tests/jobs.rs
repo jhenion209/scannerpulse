@@ -99,6 +99,13 @@ async fn queued(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
+fn context(batch: i64) -> jobs::Context {
+    jobs::Context {
+        batch,
+        ..jobs::Context::new(None)
+    }
+}
+
 fn past(talkgroup: Option<i32>) -> Past {
     Past {
         talkgroup_id: talkgroup,
@@ -117,7 +124,7 @@ async fn a_queue_job_queues_in_steps_until_it_is_done(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 5);
     let mut states = Vec::new();
-    while let Some((stepped, state)) = jobs::step(&pool, "host-a", 2).await.unwrap() {
+    while let Some((stepped, state)) = jobs::step(&pool, "host-a", &context(2)).await.unwrap() {
         assert_eq!(stepped, id);
         states.push(state);
     }
@@ -139,7 +146,11 @@ async fn the_backlog_takes_only_the_talkgroups_that_are_on(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 5);
-    while jobs::step(&pool, "host-a", 1000).await.unwrap().is_some() {}
+    while jobs::step(&pool, "host-a", &context(1000))
+        .await
+        .unwrap()
+        .is_some()
+    {}
     assert_eq!(queued(&pool).await, 5);
 }
 
@@ -150,20 +161,23 @@ async fn a_stop_takes_effect_after_the_current_step(pool: PgPool) {
     let (id, _) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
         .await
         .unwrap();
-    jobs::step(&pool, "host-a", 2).await.unwrap();
+    jobs::step(&pool, "host-a", &context(2)).await.unwrap();
     assert_eq!(
         jobs::stop(&mut conn, id, "bob").await.unwrap(),
         Stopped::AfterStep
     );
     assert_eq!(
-        jobs::step(&pool, "host-a", 2).await.unwrap(),
+        jobs::step(&pool, "host-a", &context(2)).await.unwrap(),
         Some((id, "stopped".into()))
     );
     let job = jobs::get(&pool, id).await.unwrap().unwrap();
     assert_eq!(job.done, 2);
     assert!(job.message.contains("2 of 5"), "{}", job.message);
     assert_eq!(queued(&pool).await, 2);
-    assert_eq!(jobs::step(&pool, "host-a", 2).await.unwrap(), None);
+    assert_eq!(
+        jobs::step(&pool, "host-a", &context(2)).await.unwrap(),
+        None
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -186,10 +200,13 @@ async fn a_job_another_host_is_stepping_is_left_alone(pool: PgPool) {
     jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
         .await
         .unwrap();
-    assert_eq!(jobs::step(&pool, "host-b", 2).await.unwrap(), None);
+    assert_eq!(
+        jobs::step(&pool, "host-b", &context(2)).await.unwrap(),
+        None
+    );
     tx.rollback().await.unwrap();
     assert_eq!(
-        jobs::step(&pool, "host-b", 2).await.unwrap(),
+        jobs::step(&pool, "host-b", &context(2)).await.unwrap(),
         Some((id, "running".into()))
     );
 }
@@ -201,9 +218,13 @@ async fn a_job_resumes_on_another_host_where_it_was(pool: PgPool) {
     let (id, _) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
         .await
         .unwrap();
-    jobs::step(&pool, "host-a", 2).await.unwrap();
+    jobs::step(&pool, "host-a", &context(2)).await.unwrap();
     // host-a stops holding the lease; host-b takes over.
-    while jobs::step(&pool, "host-b", 2).await.unwrap().is_some() {}
+    while jobs::step(&pool, "host-b", &context(2))
+        .await
+        .unwrap()
+        .is_some()
+    {}
     let job = jobs::get(&pool, id).await.unwrap().unwrap();
     assert_eq!(
         (job.state.as_str(), job.done, job.host.as_deref()),
@@ -221,7 +242,7 @@ async fn a_job_of_an_unknown_kind_fails(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(
-        jobs::step(&pool, "host-a", 2).await.unwrap(),
+        jobs::step(&pool, "host-a", &context(2)).await.unwrap(),
         Some((id, "failed".into()))
     );
     let job = jobs::get(&pool, id).await.unwrap().unwrap();
@@ -235,4 +256,123 @@ async fn a_queue_job_for_no_such_talkgroup_is_refused(pool: PgPool) {
         jobs::start_queue(&mut conn, &past(Some(424_242)), "ann").await,
         Err(JobError::Refused(_))
     ));
+}
+
+// A candidate's run as a job.
+
+async fn improvement_on(pool: &PgPool) {
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('improvement_module.enabled', 'true')")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn runs_kept(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM asr_runs")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_candidate_run_steps_one_call_at_a_time_and_keeps_its_score(pool: PgPool) {
+    improvement_on(&pool).await;
+    let (_root, _) = common::labeled_set(
+        &pool,
+        &[
+            ("engine one", "engine one"),
+            ("medic two", "medic"),
+            ("", ""),
+        ],
+    )
+    .await;
+    let asr = common::FakeAsr::start(vec![
+        common::Answer::Text("engine one"),
+        common::Answer::Text("medic two"),
+        common::Answer::Text(""),
+    ]);
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, total) = jobs::start_asr_run(&mut conn, "s1", &asr.url, "model-y", None, "ann")
+        .await
+        .unwrap();
+    assert_eq!(total, 3);
+    let mut states = Vec::new();
+    while let Some((_, state)) = jobs::step(&pool, "host-a", &context(2)).await.unwrap() {
+        states.push(state);
+    }
+    assert_eq!(states, ["running", "running", "running", "done"]);
+    assert_eq!(asr.requests().len(), 3, "one request a step");
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert!(job.message.starts_with("kept as run"), "{}", job.message);
+    let (wer, calls): (f32, i32) = sqlx::query_as("SELECT wer, calls FROM asr_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((wer, calls), (0.0, 3));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_candidate_run_is_refused_when_it_cannot_run(pool: PgPool) {
+    let (_root, _) = common::labeled_set(&pool, &[("engine one", "engine one")]).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let refused = |r: Result<(i64, i64), JobError>| matches!(r, Err(JobError::Refused(_)));
+    let url = "http://127.0.0.1:9/v1/audio/transcriptions";
+    assert!(
+        refused(jobs::start_asr_run(&mut conn, "s1", url, "m", None, "ann").await),
+        "module off"
+    );
+    improvement_on(&pool).await;
+    assert!(refused(
+        jobs::start_asr_run(&mut conn, "s1", "http://k@x/", "m", None, "ann").await
+    ));
+    assert!(refused(
+        jobs::start_asr_run(&mut conn, "s1", url, " ", None, "ann").await
+    ));
+    assert!(refused(
+        jobs::start_asr_run(&mut conn, "nothing", url, "m", None, "ann").await
+    ));
+    assert!(
+        jobs::start_asr_run(&mut conn, "s1", url, "m", None, "ann")
+            .await
+            .is_ok()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_server_that_keeps_failing_fails_the_run_and_nothing_is_kept(pool: PgPool) {
+    improvement_on(&pool).await;
+    let (_root, _) =
+        common::labeled_set(&pool, &[("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")]).await;
+    let asr = common::FakeAsr::start(vec![common::Answer::Status(503, "busy")]);
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, _) = jobs::start_asr_run(&mut conn, "s1", &asr.url, "m", None, "ann")
+        .await
+        .unwrap();
+    while jobs::step(&pool, "host-a", &context(2))
+        .await
+        .unwrap()
+        .is_some()
+    {}
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!((job.state.as_str(), job.done), ("failed", 2));
+    assert!(job.message.contains("nothing was kept"), "{}", job.message);
+    assert_eq!(runs_kept(&pool).await, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stopped_run_keeps_nothing(pool: PgPool) {
+    improvement_on(&pool).await;
+    let (_root, _) = common::labeled_set(&pool, &[("a", "a"), ("b", "b")]).await;
+    let asr = common::FakeAsr::start(vec![common::Answer::Text("a")]);
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, _) = jobs::start_asr_run(&mut conn, "s1", &asr.url, "m", None, "ann")
+        .await
+        .unwrap();
+    jobs::step(&pool, "host-a", &context(2)).await.unwrap();
+    jobs::stop(&mut conn, id, "ann").await.unwrap();
+    assert_eq!(
+        jobs::step(&pool, "host-a", &context(2)).await.unwrap(),
+        Some((id, "stopped".into()))
+    );
+    assert_eq!(runs_kept(&pool).await, 0);
 }

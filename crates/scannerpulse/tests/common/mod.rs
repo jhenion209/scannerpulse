@@ -544,3 +544,43 @@ pub async fn sign_in(app: &axum::Router, login: &str, password: &str) -> (String
     let pair = cookie.split(';').next().unwrap().to_string();
     (pair, answer.body["csrf"].as_str().unwrap().to_string())
 }
+
+/// A set "s1" whose calls have the given labels, each as (what the person
+/// said, the machine's first output). Each call's file is in the location,
+/// unless its text is "no file".
+pub async fn labeled_set(pool: &PgPool, labels: &[(&str, &str)]) -> (tempfile::TempDir, Vec<i64>) {
+    let root = tempfile::tempdir().unwrap();
+    let places = seed_places(pool, root.path(), root.path()).await;
+    let mut ids = Vec::new();
+    for (n, (said, first)) in labels.iter().enumerate() {
+        let at: chrono::DateTime<chrono::Utc> =
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2031, 3, 1, 0, n as u32, 0).unwrap();
+        let rel_path = format!("call-{n}.mp3");
+        if *said != "no file" {
+            std::fs::write(root.path().join(&rel_path), frames(5)).unwrap();
+        }
+        let (id, _) = insert_call(pool, places, &rel_path, at, 2000, true).await;
+        sqlx::query(
+            "INSERT INTO eval_calls (set_name, call_id, started_at, drawn_at) \
+             VALUES ('s1', $1, $2, now())",
+        )
+        .bind(id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO transcript_labels (call_id, started_at, text, machine_text, source) \
+             VALUES ($1, $2, $3, $4, 'user_edit')",
+        )
+        .bind(id)
+        .bind(at)
+        .bind(said)
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    (root, ids)
+}

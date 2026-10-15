@@ -39,7 +39,7 @@ pub fn errors(said: &[String], heard: &[String]) -> usize {
 }
 
 /// The score of one transcription source over a set of labeled calls.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Score {
     pub calls: usize,
     pub errors: usize,

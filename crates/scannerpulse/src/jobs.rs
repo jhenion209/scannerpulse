@@ -168,6 +168,23 @@ pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped,
 /// The calls a queue job queues in one step.
 pub const QUEUE_BATCH: i64 = 1000;
 
+/// What a job's step may use.
+pub struct Context {
+    /// The calls a queue job queues in one step.
+    pub batch: i64,
+    /// Sends a candidate's requests.
+    pub client: crate::asr::Client,
+}
+
+impl Context {
+    pub fn new(api_key: Option<String>) -> Context {
+        Context {
+            batch: QUEUE_BATCH,
+            client: crate::asr::Client::new(api_key),
+        }
+    }
+}
+
 /// Adds a job that queues `past`'s calls for transcription; returns its id
 /// and the number of calls it will queue.
 pub async fn start_queue(
@@ -216,7 +233,7 @@ enum Outcome {
 pub async fn step(
     pool: &sqlx::PgPool,
     host: &str,
-    batch: i64,
+    context: &Context,
 ) -> sqlx::Result<Option<(i64, String)>> {
     use sqlx::Connection;
     let mut conn = pool.acquire().await?;
@@ -236,8 +253,9 @@ pub async fn step(
         Outcome::Stopped
     } else {
         match Kind::parse(&job.kind) {
-            Some(Kind::Queue) => queue_step(&mut tx, &job, batch).await?,
-            _ => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
+            Some(Kind::Queue) => queue_step(&mut tx, &job, context.batch).await?,
+            Some(Kind::AsrRun) => asr_step(&mut tx, &job, context).await?,
+            None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };
     let (state, done, total, work, message) = match outcome {
@@ -312,5 +330,165 @@ async fn queue_step(conn: &mut PgConnection, job: &Job, batch: i64) -> sqlx::Res
         total: job.total.map(|total| total.max(done)),
         work: serde_json::json!({ "before": oldest }),
         message: format!("queued {}", progress(done, job.total.map(|t| t.max(done)))),
+    })
+}
+
+/// A candidate's run: the set, the server and the model, and the request's
+/// prompt, language and time limit.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AsrRun {
+    pub set: String,
+    pub server: String,
+    pub model: String,
+    pub prompt: Option<String>,
+    pub language: Option<String>,
+    pub timeout_secs: u64,
+}
+
+/// A candidate run's state between steps.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct AsrWork {
+    candidate: crate::wer::Score,
+    /// Production's first output, on the same calls the candidate answered.
+    production: crate::wer::Score,
+    skipped: u64,
+    elapsed_ms: u64,
+    /// Calls in a row without an answer.
+    faults: usize,
+}
+
+/// Adds a job that runs a candidate over a set's labeled calls, as `asr run`
+/// does; returns its id and the number of calls. The language and the time
+/// limit are production's.
+pub async fn start_asr_run(
+    conn: &mut PgConnection,
+    set: &str,
+    server: &str,
+    model: &str,
+    prompt: Option<String>,
+    started_by: &str,
+) -> Result<(i64, i64), JobError> {
+    let improvement = crate::settings::load_improvement(&mut *conn)
+        .await
+        .map_err(|error| JobError::Refused(error.to_string()))?;
+    if !improvement.enabled {
+        return Err(JobError::Refused(
+            "the improvement module is off (improvement_module.enabled)".into(),
+        ));
+    }
+    if !crate::settings::server_url_ok(server) {
+        return Err(JobError::Refused(
+            "the server must be an http:// or https:// URL without a user name, password, query or fragment; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY".into(),
+        ));
+    }
+    if model.trim().is_empty() {
+        return Err(JobError::Refused("a model is needed".into()));
+    }
+    let labeled = crate::accuracy::labeled(&mut *conn, set).await?;
+    if labeled.is_empty() {
+        return Err(JobError::Refused(format!(
+            "no call of the set {set} has a person's text yet"
+        )));
+    }
+    let production = crate::settings::load_transcription(&mut *conn)
+        .await
+        .map_err(|error| JobError::Refused(error.to_string()))?;
+    let run = AsrRun {
+        set: set.to_string(),
+        server: server.to_string(),
+        model: model.trim().to_string(),
+        prompt: prompt.filter(|p| !p.trim().is_empty()),
+        language: production.as_ref().and_then(|p| p.language.clone()),
+        timeout_secs: production
+            .as_ref()
+            .map_or(120, |p| p.request_timeout.as_secs()),
+    };
+    let params = serde_json::to_value(&run).expect("an AsrRun is plain data");
+    let total = labeled.len() as i64;
+    let id = create(&mut *conn, Kind::AsrRun, &params, Some(total), started_by).await?;
+    Ok((id, total))
+}
+
+/// Transcribes the next labeled call with the candidate; after the last,
+/// keeps the run's score.
+async fn asr_step(conn: &mut PgConnection, job: &Job, context: &Context) -> sqlx::Result<Outcome> {
+    use crate::accuracy::{self, Tried1};
+    let Ok(run) = serde_json::from_value::<AsrRun>(job.params.clone()) else {
+        return Ok(Outcome::Failed(format!(
+            "the job's parameters are not a candidate run's: {}",
+            job.params
+        )));
+    };
+    let labeled = accuracy::labeled(&mut *conn, &run.set).await?;
+    let mut work: AsrWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
+    let index = usize::try_from(job.done).unwrap_or(usize::MAX);
+    let total = labeled.len() as i64;
+    let Some(call) = labeled.get(index) else {
+        let (Some(wer), calls) = (work.candidate.wer(), work.candidate.calls) else {
+            return Ok(Outcome::Failed(
+                "no call was scored; nothing was kept".into(),
+            ));
+        };
+        let seconds = work.elapsed_ms as f64 / 1000.0 / calls as f64;
+        let id = accuracy::save_run(
+            &mut *conn,
+            &run.set,
+            &accuracy::Run {
+                run_at: Utc::now(),
+                server: run.server.clone(),
+                model: run.model.clone(),
+                prompt: run.prompt.clone(),
+                calls: calls as i32,
+                wer: wer as f32,
+                seconds_per_call: seconds as f32,
+            },
+        )
+        .await?;
+        return Ok(Outcome::Done(
+            job.done,
+            format!(
+                "kept as run {id}: candidate {}; production on the same calls {}; {seconds:.2} s per call",
+                work.candidate.summary(),
+                work.production.summary()
+            ),
+        ));
+    };
+    let candidate = accuracy::Candidate {
+        server: &run.server,
+        model: &run.model,
+        language: run.language.as_deref(),
+        prompt: run.prompt.as_deref(),
+        timeout: std::time::Duration::from_secs(run.timeout_secs),
+    };
+    match accuracy::try_one(&context.client, call, &candidate).await {
+        Tried1::Text(text, took) => {
+            work.faults = 0;
+            work.elapsed_ms += u64::try_from(took.as_millis()).unwrap_or(u64::MAX);
+            work.candidate.add(&call.said, &text);
+            work.production
+                .add(&call.said, call.first_output.as_deref().unwrap_or(""));
+        }
+        Tried1::NoAnswer(why) => {
+            work.faults += 1;
+            work.skipped += 1;
+            if work.faults >= accuracy::STOP_AFTER_FAULTS {
+                return Ok(Outcome::Failed(format!(
+                    "{} calls in a row without an answer, the last: {why}; nothing was kept",
+                    accuracy::STOP_AFTER_FAULTS
+                )));
+            }
+        }
+        Tried1::Unreadable(_) => work.skipped += 1,
+    }
+    let done = job.done + 1;
+    Ok(Outcome::More {
+        done,
+        total: Some(total),
+        work: serde_json::to_value(&work).expect("the work is plain data"),
+        message: format!(
+            "{} calls, {} skipped",
+            progress(done, Some(total)),
+            work.skipped
+        ),
     })
 }

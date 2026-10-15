@@ -405,6 +405,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
                 pool.clone(),
                 config.db_limit,
                 config.host.clone(),
+                crate::jobs::Context::new(config.api_key.clone()),
                 lease.clone(),
                 healthy.clone(),
                 stop_rx.clone(),
@@ -606,6 +607,7 @@ async fn job_loop(
     pool: PgPool,
     db_limit: Duration,
     host: String,
+    context: crate::jobs::Context,
     lease: Arc<Lease>,
     healthy: Arc<AtomicBool>,
     mut stop: watch::Receiver<bool>,
@@ -615,12 +617,7 @@ async fn job_loop(
             break;
         }
         if lease.should_work() && healthy.load(Ordering::SeqCst) {
-            match limited(
-                db_limit,
-                crate::jobs::step(&pool, &host, crate::jobs::QUEUE_BATCH),
-            )
-            .await
-            {
+            match limited(db_limit, crate::jobs::step(&pool, &host, &context)).await {
                 Ok(Some((id, state))) => {
                     if state != "running" {
                         log::info(format!("job {id} is {state}"));

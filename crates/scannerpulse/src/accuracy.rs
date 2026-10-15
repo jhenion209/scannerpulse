@@ -135,6 +135,46 @@ impl Tried {
     }
 }
 
+/// What the candidate made of one call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tried1 {
+    /// Its text, and the time the request took.
+    Text(String, Duration),
+    /// The server failed or refused the call: counts towards stopping.
+    NoAnswer(String),
+    /// The call's file could not be read: the server is not to blame.
+    Unreadable(String),
+}
+
+/// Transcribes one labeled call with the candidate. Nothing is saved.
+pub async fn try_one(client: &Client, call: &Labeled, candidate: &Candidate<'_>) -> Tried1 {
+    let request = Request {
+        url: candidate.server,
+        model: candidate.model,
+        language: candidate.language,
+        prompt: candidate.prompt,
+        timeout: candidate.timeout,
+    };
+    let path = call.path();
+    let started = Instant::now();
+    let answer = match crate::transcriber::read_audio(&path).await {
+        Err(why) => Err(AsrError::Audio(why)),
+        Ok(audio) => {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("call.mp3")
+                .to_string();
+            client.transcribe(&request, &name, audio).await
+        }
+    };
+    match answer {
+        Ok(text) => Tried1::Text(text, started.elapsed()),
+        Err(AsrError::Server(why) | AsrError::Call(why)) => Tried1::NoAnswer(why),
+        Err(AsrError::Audio(why)) => Tried1::Unreadable(why),
+    }
+}
+
 /// Transcribes each labeled call with the candidate, one call at a time, and
 /// scores the answers. Nothing is saved. `each` hears the number of calls done.
 pub async fn try_candidate(
@@ -145,37 +185,17 @@ pub async fn try_candidate(
 ) -> Tried {
     let mut tried = Tried::default();
     let mut faults = 0;
-    let request = Request {
-        url: candidate.server,
-        model: candidate.model,
-        language: candidate.language,
-        prompt: candidate.prompt,
-        timeout: candidate.timeout,
-    };
     for (done, call) in labeled.iter().enumerate() {
-        let path = call.path();
-        let started = Instant::now();
-        let answer = match crate::transcriber::read_audio(&path).await {
-            Err(why) => Err(AsrError::Audio(why)),
-            Ok(audio) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("call.mp3")
-                    .to_string();
-                client.transcribe(&request, &name, audio).await
-            }
-        };
-        match answer {
-            Ok(text) => {
+        match try_one(client, call, candidate).await {
+            Tried1::Text(text, took) => {
                 faults = 0;
-                tried.elapsed += started.elapsed();
+                tried.elapsed += took;
                 tried.candidate.add(&call.said, &text);
                 tried
                     .production
                     .add(&call.said, call.first_output.as_deref().unwrap_or(""));
             }
-            Err(AsrError::Server(why) | AsrError::Call(why)) => {
+            Tried1::NoAnswer(why) => {
                 faults += 1;
                 tried.skipped.push((call.call_id, why.clone()));
                 if faults >= STOP_AFTER_FAULTS {
@@ -185,7 +205,7 @@ pub async fn try_candidate(
                     break;
                 }
             }
-            Err(AsrError::Audio(why)) => {
+            Tried1::Unreadable(why) => {
                 tried.skipped.push((call.call_id, why));
             }
         }
