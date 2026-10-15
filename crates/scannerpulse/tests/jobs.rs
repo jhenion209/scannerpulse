@@ -76,6 +76,32 @@ async fn stopping_a_waiting_job_ends_it_and_a_running_one_after_its_step(pool: P
     ));
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stop_that_meets_a_step_in_progress_is_told_to_ask_again(pool: PgPool) {
+    let id = jobs::create(&pool, Kind::Queue, &json!({}), None, "ann")
+        .await
+        .unwrap();
+    let mut step = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *step)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let asked = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        jobs::stop(&mut conn, id, "bob"),
+    )
+    .await
+    .expect("stop must not wait without a limit");
+    assert!(matches!(asked, Err(JobError::Busy(busy)) if busy == id));
+    step.rollback().await.unwrap();
+    assert_eq!(
+        jobs::stop(&mut conn, id, "bob").await.unwrap(),
+        Stopped::Now
+    );
+}
+
 /// Five untried calls of a talkgroup (transcription on or off), a minute apart.
 async fn calls(pool: &PgPool, number: i64, on: bool) -> i32 {
     let talkgroup = common::talkgroup(pool, "SYSA", number).await;

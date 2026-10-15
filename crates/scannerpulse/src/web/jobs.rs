@@ -21,7 +21,7 @@ impl From<JobError> for ApiError {
         match error {
             JobError::Database(error) => ApiError::Database(error),
             JobError::NoSuch(_) => ApiError::Missing(error.to_string()),
-            JobError::Ended(_) => ApiError::Conflict(error.to_string()),
+            JobError::Ended(_) | JobError::Busy(_) => ApiError::Conflict(error.to_string()),
             JobError::Refused(_) => ApiError::BadRequest(error.to_string()),
         }
     }

@@ -71,6 +71,8 @@ pub enum JobError {
     NoSuch(i64),
     /// The job has ended already.
     Ended(i64),
+    /// The job's row is locked by a step that is still running.
+    Busy(i64),
     Database(sqlx::Error),
 }
 
@@ -80,6 +82,10 @@ impl fmt::Display for JobError {
             JobError::Refused(why) => f.write_str(why),
             JobError::NoSuch(id) => write!(f, "there is no job {id}"),
             JobError::Ended(id) => write!(f, "job {id} has ended already"),
+            JobError::Busy(id) => write!(
+                f,
+                "job {id} is in the middle of a step; ask again in a moment"
+            ),
             JobError::Database(error) => write!(f, "the database failed: {error}"),
         }
     }
@@ -141,6 +147,13 @@ pub enum Stopped {
 
 /// Asks a job to stop; `by` is who asked.
 pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped, JobError> {
+    use sqlx::Connection;
+    let mut tx = conn.begin().await?;
+    // A step holds the job's row for as long as it runs: wait a little, then
+    // say so rather than hang.
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
     let row: Option<String> = sqlx::query_scalar(
         "UPDATE jobs SET \
            stop_requested = true, \
@@ -153,16 +166,24 @@ pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped,
     )
     .bind(id)
     .bind(by)
-    .fetch_optional(&mut *conn)
-    .await?;
-    match row.as_deref() {
-        Some("stopped") => Ok(Stopped::Now),
-        Some(_) => Ok(Stopped::AfterStep),
-        None => match get(&mut *conn, id).await? {
-            Some(_) => Err(JobError::Ended(id)),
-            None => Err(JobError::NoSuch(id)),
-        },
-    }
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| match &error {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03") => JobError::Busy(id),
+        _ => JobError::Database(error),
+    })?;
+    let stopped = match row.as_deref() {
+        Some("stopped") => Stopped::Now,
+        Some(_) => Stopped::AfterStep,
+        None => {
+            return match get(&mut *tx, id).await? {
+                Some(_) => Err(JobError::Ended(id)),
+                None => Err(JobError::NoSuch(id)),
+            };
+        }
+    };
+    tx.commit().await?;
+    Ok(stopped)
 }
 
 /// The calls a queue job queues in one step.
@@ -283,6 +304,15 @@ pub async fn step(
     use sqlx::Connection;
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
+    // A host frozen or cut off in the middle of a step must not keep the head
+    // job locked: the server ends the session and the next lease holder
+    // carries on.
+    sqlx::query(&format!(
+        "SET LOCAL idle_in_transaction_session_timeout = '{}s'",
+        REQUEST_LIMIT.as_secs() + 30
+    ))
+    .execute(&mut *tx)
+    .await?;
     let job: Option<Job> = sqlx::query_as(&format!(
         "SELECT {COLUMNS} FROM jobs \
          WHERE id = (SELECT min(id) FROM jobs WHERE state IN ('queued', 'running')) \
@@ -462,10 +492,9 @@ pub async fn start_asr_run(
 async fn asr_step(conn: &mut PgConnection, job: &Job, context: &Context) -> sqlx::Result<Outcome> {
     use crate::accuracy::{self, Tried1};
     let Ok(run) = serde_json::from_value::<AsrRun>(job.params.clone()) else {
-        return Ok(Outcome::Failed(format!(
-            "the job's parameters are not a candidate run's: {}",
-            job.params
-        )));
+        return Ok(Outcome::Failed(
+            "the job's parameters are not a candidate run's".into(),
+        ));
     };
     let labeled = accuracy::labeled(&mut *conn, &run.set).await?;
     let mut work: AsrWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
