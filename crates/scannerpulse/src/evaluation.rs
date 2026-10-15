@@ -106,6 +106,7 @@ pub async fn draw(
     zone: Tz,
 ) -> Result<Drawn, EvalError> {
     let from = now - chrono::Duration::days(draw.days.into());
+    let mut tx = conn.begin().await?;
     let mut found = Vec::new();
     for (system, number) in &draw.talkgroups {
         let row: Option<(i32, bool)> = sqlx::query_as(
@@ -114,7 +115,7 @@ pub async fn draw(
         )
         .bind(system)
         .bind(number)
-        .fetch_optional(&mut *conn)
+        .fetch_optional(&mut *tx)
         .await?;
         let (id, transcribe) =
             row.ok_or_else(|| EvalError::UnknownTalkgroup(format!("{system}/{number}")))?;
@@ -126,7 +127,7 @@ pub async fn draw(
         .bind(from)
         .bind(draw.min_ms)
         .bind(zone.name())
-        .fetch_all(&mut *conn)
+        .fetch_all(&mut *tx)
         .await?;
         found.push((id, transcribe, months));
     }
@@ -135,7 +136,10 @@ pub async fn draw(
         .map(|(_, _, months)| months.iter().map(|(_, n)| *n as usize).sum())
         .collect();
     let quotas = even_split(draw.calls, &totals);
-    let mut tx = conn.begin().await?;
+    // A person's save waits until this draw commits, so a set cannot gain a label between the check and the replacement.
+    sqlx::query("LOCK TABLE transcript_labels IN SHARE MODE")
+        .execute(&mut *tx)
+        .await?;
     let labeled: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT (e.call_id, e.started_at)) FROM eval_calls e \
          JOIN transcript_labels l ON l.call_id = e.call_id AND l.started_at = e.started_at \
