@@ -1,12 +1,14 @@
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use chrono::SecondsFormat;
+use chrono::{NaiveDate, SecondsFormat};
 use scannerpulse::MIGRATOR;
+use scannerpulse::backfill::{self, Ask};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::{ingest, lease};
+use scannerpulse::{ingest, lease, settings};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -19,6 +21,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse ingest
        scannerpulse lease
        scannerpulse read --zone ZONE FILE...
+       scannerpulse transcribe --talkgroup SYSTEM/NUMBER --from DAY --to DAY [--yes]
        scannerpulse --version
        scannerpulse --help
 
@@ -29,14 +32,28 @@ ingest      watch the sources and file their calls into the archive, sharing
 lease       show which host holds the processing lease, and each host's
             heartbeat; exit 0 when the lease has a valid holder
 read        print what ingest reads from each file, one JSON line per file;
-            ZONE is the time zone of the times in the file names";
+            ZONE is the time zone of the times in the file names
+transcribe  queue the past calls of a talkgroup for transcription, from DAY to
+            DAY (YYYY-MM-DD, local days, both included): the calls never tried
+            and at least the minimum length; asks first unless --yes";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
-    DbUpdate { quiet: bool },
+    DbUpdate {
+        quiet: bool,
+    },
     Ingest,
     Lease,
-    Read { zone: String, files: Vec<String> },
+    Read {
+        zone: String,
+        files: Vec<String>,
+    },
+    Transcribe {
+        talkgroup: String,
+        from: String,
+        to: String,
+        yes: bool,
+    },
     Version,
     Help,
 }
@@ -52,6 +69,21 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["read", "--zone", zone, files @ ..] if !files.is_empty() => Some(Command::Read {
             zone: zone.to_string(),
             files: files.iter().map(|file| file.to_string()).collect(),
+        }),
+        [
+            "transcribe",
+            "--talkgroup",
+            talkgroup,
+            "--from",
+            from,
+            "--to",
+            to,
+            rest @ ..,
+        ] if matches!(rest, [] | ["--yes"]) => Some(Command::Transcribe {
+            talkgroup: talkgroup.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            yes: !rest.is_empty(),
         }),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
@@ -95,6 +127,18 @@ async fn main() -> ExitCode {
         },
         Some(Command::Lease) => lease_status().await,
         Some(Command::Read { zone, files }) => read(&zone, &files),
+        Some(Command::Transcribe {
+            talkgroup,
+            from,
+            to,
+            yes,
+        }) => match transcribe(&talkgroup, &from, &to, yes).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("transcribe: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Some(Command::Version) => {
             println!("scannerpulse {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -191,6 +235,72 @@ async fn db_update(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+/// Queues the past calls of a talkgroup, with a count first and progress.
+async fn transcribe(
+    talkgroup: &str,
+    from: &str,
+    to: &str,
+    yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (system, number) = talkgroup
+        .rsplit_once('/')
+        .and_then(|(system, number)| Some((system, number.parse::<i64>().ok()?)))
+        .filter(|(system, _)| !system.is_empty())
+        .ok_or("write the talkgroup as SYSTEM/NUMBER")?;
+    let day = |text: &str| {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .map_err(|_| format!("{text} is not a day such as 2031-01-15"))
+    };
+    let ask = Ask {
+        system: system.to_string(),
+        number,
+        from: day(from)?,
+        to: day(to)?,
+    };
+    let mut conn = connect().await?;
+    let zone = settings::load(&mut conn).await?.time_zone;
+    let transcription = settings::load_transcription(&mut conn)
+        .await?
+        .ok_or("transcription is off: turn it on first")?;
+    let min_ms = transcription.min_duration_ms;
+    let plan = backfill::plan(&mut conn, &ask, zone, min_ms).await?;
+    println!(
+        "{} calls of {talkgroup} from {from} to {to} were never tried and are at least {min_ms} ms long",
+        plan.count
+    );
+    if !plan.talkgroup_on {
+        println!("note: transcription is off for this talkgroup, so its new calls are not queued");
+    }
+    if plan.count == 0 {
+        return Ok(());
+    }
+    if !yes && !confirm(&format!("queue {} calls? [y/N] ", plan.count))? {
+        println!("nothing was queued");
+        return Ok(());
+    }
+    let started = Instant::now();
+    let total = plan.count;
+    let queued = backfill::run(&mut conn, &plan.past, 1000, |n| {
+        let rate = n as f64 / started.elapsed().as_secs_f64().max(0.001);
+        println!("queued {n} of {total} ({rate:.0} calls/s)");
+    })
+    .await?;
+    println!(
+        "done: {queued} calls queued in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Asks a yes-or-no question on the terminal; anything but y or yes is no.
+fn confirm(question: &str) -> std::io::Result<bool> {
+    print!("{question}");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Prints one JSON line per file. Exits 0 when every file was read.
@@ -298,6 +408,32 @@ mod tests {
         );
         assert_eq!(parse(&["read", "--zone", "UTC"]), None);
         assert_eq!(parse(&["read", "a.mp3"]), None);
+    }
+
+    #[test]
+    fn transcribe_takes_a_talkgroup_two_days_and_maybe_yes() {
+        let args = [
+            "transcribe",
+            "--talkgroup",
+            "SYSA/127",
+            "--from",
+            "2031-01-01",
+            "--to",
+            "2031-01-31",
+        ];
+        let want = |yes| Command::Transcribe {
+            talkgroup: "SYSA/127".to_string(),
+            from: "2031-01-01".to_string(),
+            to: "2031-01-31".to_string(),
+            yes,
+        };
+        assert_eq!(parse(&args), Some(want(false)));
+        let mut with_yes = args.to_vec();
+        with_yes.push("--yes");
+        assert_eq!(parse(&with_yes), Some(want(true)));
+        with_yes.push("--yes");
+        assert_eq!(parse(&with_yes), None);
+        assert_eq!(parse(&args[..5]), None);
     }
 
     #[test]

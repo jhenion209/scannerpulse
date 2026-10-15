@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod asr;
+pub mod backfill;
 pub mod filer;
 pub mod health;
 pub mod ingest;
