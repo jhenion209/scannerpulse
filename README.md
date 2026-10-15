@@ -163,11 +163,15 @@ listen.
   files, the transcription queue and its failed calls, the servers, the
   newest calls, estimated totals, whether the database is the primary and
   its standbys, and the checks to make after a failover (stuck jobs, failed
-  calls, calls filed twice, files left in a source).
+  calls, calls filed twice, files left in a source). It names the server it
+  reached and shows the maintenance switch. The database already refuses a
+  second filing of a file within a month, so "calls filed twice" watches the
+  month edge.
 - `talkgroups` lists the talkgroups and their transcription switches;
   `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
   `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts
-  every failed call back in the queue; `asr sets` lists the evaluation sets.
+  every failed call back in the queue in one statement (a call of a
+  talkgroup whose transcription is off stays failed); `asr sets` lists the evaluation sets.
   The admin page's `/api/admin/talkgroups`, `PUT
   /api/admin/talkgroups/<id>/transcribe` (`on`), `POST
   /api/admin/queue/retry`, `/api/admin/asr/sets` and

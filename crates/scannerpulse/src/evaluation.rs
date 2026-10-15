@@ -260,7 +260,6 @@ pub async fn to_label(db: impl PgExecutor<'_>, set: &str) -> sqlx::Result<Vec<To
     .await
 }
 
-/// How many calls the set holds.
 /// An evaluation set, for the admin page's list.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
 pub struct SetSummary {
@@ -285,6 +284,7 @@ pub async fn sets(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<SetSummary>> {
     .await
 }
 
+/// How many calls the set holds.
 pub async fn set_size(db: impl PgExecutor<'_>, set: &str) -> sqlx::Result<i64> {
     sqlx::query_scalar("SELECT count(*) FROM eval_calls WHERE set_name = $1")
         .bind(set)

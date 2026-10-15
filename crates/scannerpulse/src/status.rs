@@ -88,10 +88,21 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
     .bind(LISTED)
     .fetch_all(pool)
     .await?;
-    let (primary, server_version): (bool, String) =
-        sqlx::query_as("SELECT NOT pg_is_in_recovery(), current_setting('server_version')")
-            .fetch_one(pool)
-            .await?;
+    let (primary, server_version, address, port): (bool, String, Option<String>, Option<i32>) =
+        sqlx::query_as(
+            "SELECT NOT pg_is_in_recovery(), current_setting('server_version'), \
+                    inet_server_addr()::text, inet_server_port()",
+        )
+        .fetch_one(pool)
+        .await?;
+    // The same reading as ingest's maintenance loop: missing or not a bool is off.
+    let maintenance = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT value FROM settings WHERE key = 'maintenance.enabled'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
     let standbys: Vec<Standby> = sqlx::query_as(
         "SELECT application_name AS name, client_addr::text AS address, state, sync_state, \
                 extract(epoch FROM replay_lag)::float8 AS replay_lag_seconds \
@@ -117,6 +128,7 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
     .fetch_one(pool)
     .await?;
     Ok(json!({
+        "maintenance": maintenance,
         "lease": {
             "valid": lease.valid(),
             "holder": lease.holder,
@@ -142,6 +154,8 @@ pub async fn read(pool: &PgPool) -> sqlx::Result<Value> {
         "database": {
             "primary": primary,
             "version": server_version,
+            "address": address,
+            "port": port,
             "standbys": standbys,
         },
         "failover": {

@@ -271,12 +271,16 @@ pub async fn retry(db: impl PgExecutor<'_>, call: (i64, DateTime<Utc>)) -> sqlx:
 }
 
 /// Puts every failed call back in the queue, to be tried again from the
-/// start; returns how many.
+/// start; returns how many. A call of a talkgroup whose transcription is off
+/// stays failed.
 pub async fn retry_failed(db: impl PgExecutor<'_>) -> sqlx::Result<u64> {
     let done = sqlx::query(
-        "UPDATE transcription_queue \
+        "UPDATE transcription_queue q \
          SET state = 'queued', attempts = 0, last_error = NULL, next_try_at = now() \
-         WHERE state = 'failed'",
+         WHERE q.state = 'failed' \
+           AND NOT EXISTS (SELECT 1 FROM calls c JOIN talkgroups t ON t.id = c.talkgroup_id \
+                           WHERE c.id = q.call_id AND c.started_at = q.started_at \
+                             AND NOT t.transcribe)",
     )
     .execute(db)
     .await?;

@@ -11,6 +11,9 @@ async fn the_status_of_an_empty_site(pool: PgPool) {
     assert_eq!(status["ingest"]["waiting"], 0);
     assert_eq!(status["queue"]["queued"], 0);
     assert_eq!(status["database"]["primary"], true);
+    assert_eq!(status["maintenance"], false);
+    assert!(status["database"].get("address").is_some());
+    assert!(status["database"].get("port").is_some());
     assert_eq!(status["failover"]["jobs_stuck"], 0);
     assert_eq!(status["failover"]["calls_filed_twice"], 0);
     assert!(status["recent_calls"].as_array().unwrap().is_empty());

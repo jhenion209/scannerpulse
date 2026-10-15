@@ -74,6 +74,10 @@ async fn an_admin_turns_a_talkgroups_transcription_on_and_off(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn an_admin_puts_the_failed_calls_back_in_the_queue(pool: PgPool) {
     let talkgroup = common::talkgroup(&pool, "SYSA", 7).await;
+    sqlx::query("UPDATE talkgroups SET transcribe = true")
+        .execute(&pool)
+        .await
+        .unwrap();
     let at = Utc.with_ymd_and_hms(2031, 1, 15, 12, 0, 0).unwrap();
     for n in 0..3 {
         let at = at + chrono::Duration::minutes(n);
@@ -105,6 +109,43 @@ async fn an_admin_puts_the_failed_calls_back_in_the_queue(pool: PgPool) {
         (3, 4),
         "the retried calls start again from no attempt"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_retry_leaves_the_failed_calls_of_a_talkgroup_that_is_switched_off(pool: PgPool) {
+    let at = Utc.with_ymd_and_hms(2031, 1, 15, 12, 0, 0).unwrap();
+    let mut ids = Vec::new();
+    for (number, on) in [(7, false), (8, true)] {
+        let talkgroup = common::talkgroup(&pool, "SYSA", number).await;
+        sqlx::query("UPDATE talkgroups SET transcribe = $2 WHERE id = $1")
+            .bind(talkgroup)
+            .bind(on)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = common::call(&pool, talkgroup, at, None).await;
+        sqlx::query(
+            "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, attempts, state, last_error) \
+             VALUES ($1, $2, now(), now(), 4, 'failed', 'down')",
+        )
+        .bind(id)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let app = app(&pool);
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let change = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let retried = send(&app, "POST", "/api/admin/queue/retry", &change, None).await;
+    assert_eq!(retried.body, json!({"retried": 1}));
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM transcription_queue ORDER BY call_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(states, ["failed", "queued"]);
 }
 
 #[sqlx::test(migrations = "./migrations")]
