@@ -11,10 +11,12 @@ publish = false
 [dependencies]
 argon2 = "0.5"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros"] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 chrono-tz = "0.10"
 crc32fast = "1"
 id3 = "1"
+jsonwebtoken = "9"
 notify = "8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
@@ -29,5 +31,6 @@ tower-http = { version = "0.6", features = ["fs"] }
 [dev-dependencies]
 futures-util = "0.3"
 http-body-util = "0.1"
+ring = "0.17"
 tempfile = "3"
 tokio-tungstenite = "0.29"

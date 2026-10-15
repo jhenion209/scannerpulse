@@ -32,7 +32,7 @@ fn token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Compares in time that does not depend on where the texts first differ.
-fn same(a: &str, b: &str) -> bool {
+pub fn same(a: &str, b: &str) -> bool {
     a.len() == b.len()
         && a.bytes()
             .zip(b.bytes())
@@ -199,14 +199,18 @@ pub async fn login(
     Ok(signed_in(&token, &name, &csrf))
 }
 
-/// The answer that sets the session's cookie.
-pub fn signed_in(token: &str, login: &str, csrf: &str) -> Response {
-    let cookie = format!(
+/// The `Set-Cookie` value of a new session.
+pub fn session_cookie(token: &str) -> String {
+    format!(
         "{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
         i64::from(sessions::MAX_DAYS) * 86_400
-    );
+    )
+}
+
+/// The answer that sets the session's cookie.
+pub fn signed_in(token: &str, login: &str, csrf: &str) -> Response {
     let mut response = Json(json!({"login": login, "csrf": csrf})).into_response();
-    if let Ok(value) = HeaderValue::from_str(&cookie) {
+    if let Ok(value) = HeaderValue::from_str(&session_cookie(token)) {
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
@@ -239,5 +243,6 @@ pub async fn me(Admin(session): Admin) -> Json<serde_json::Value> {
 pub async fn methods(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(json!({
         "password": accounts::password_signin(&state.pool).await?,
+        "oidc": super::oidc::provider(&state).await?.is_some(),
     })))
 }

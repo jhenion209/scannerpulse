@@ -64,7 +64,7 @@ listen.
   `SCANNERPULSE_WEB_LISTEN` (default `127.0.0.1:8080`),
   `SCANNERPULSE_WEB_STATIC` (the frontend's built files) and
   `SCANNERPULSE_HOST` (its name in the list of open pages; default: the
-  host's name). It never writes to
+  host's name) and `SCANNERPULSE_OIDC_CLIENT_SECRET`. It never writes to
   the archive and needs no lease, so several hosts can serve the same site
   behind a load balancer. Its routes:
   - `/api/calls`: the list and the archive search: filters (`talkgroups`,
@@ -99,6 +99,17 @@ listen.
     `/api/auth/methods` says which ways to sign in are on. Behind a proxy, list
     its addresses in the setting `web.trusted_proxies` (for example
     `["192.0.2.10"]`): only then is its `X-Forwarded-For` believed;
+  - `/api/auth/oidc` signs an admin in through an OpenID Connect provider
+    (the authorization code flow with PKCE), when the settings `oidc.issuer`,
+    `oidc.client_id`, `oidc.admin_group` and `oidc.redirect_url` (this
+    site's `/api/auth/oidc/callback`, as registered with the provider) are
+    set and the host has `SCANNERPULSE_OIDC_CLIENT_SECRET`; the secret never
+    goes in the database. The ID token's signature, issuer, audience, expiry
+    and nonce are checked, and its `groups` claim must hold the admin group
+    at every sign-in. The first sign-in creates the account; an existing
+    account of the same name is never taken over. Password sign-in stays
+    the way in when the provider is down, and `admin password-signin off`
+    turns it off once OIDC works;
   - `/api/admin/settings` lists the settings, and `PUT` or `DELETE`
     `/api/admin/settings/<key>` (`value`) changes one, as `settings` does;
   - `PUT /api/admin/favorites/<name>` (`talkgroups`, a list of talkgroup

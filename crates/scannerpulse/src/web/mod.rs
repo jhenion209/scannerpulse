@@ -11,6 +11,7 @@ mod edit;
 mod error;
 mod info;
 pub mod live;
+pub mod oidc;
 mod sheet;
 pub mod viewers;
 
@@ -48,6 +49,8 @@ pub struct Config {
     pub static_dir: Option<PathBuf>,
     /// The host's name in the Active Viewers list.
     pub host: String,
+    /// The OIDC client's secret; secrets never go in the database.
+    pub oidc_secret: Option<String>,
 }
 
 impl Config {
@@ -71,11 +74,15 @@ impl Config {
             .ok()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "web".to_string());
+        let oidc_secret = std::env::var("SCANNERPULSE_OIDC_CLIENT_SECRET")
+            .ok()
+            .filter(|secret| !secret.is_empty());
         Ok(Config {
             database,
             listen,
             static_dir,
             host,
+            oidc_secret,
         })
     }
 }
@@ -101,6 +108,10 @@ pub struct AppState {
     pub sign_ins: Arc<tokio::sync::Semaphore>,
     /// This host's name in the viewers' rows.
     pub host: String,
+    /// The OIDC client's secret, when sign-in through the provider is set up.
+    pub oidc_secret: Option<String>,
+    /// Asks the OIDC provider; it follows no redirect.
+    pub http: reqwest::Client,
     /// The pages this host holds open.
     pub viewers: viewers::Open,
     /// Each address's transcript saves in its current minute.
@@ -118,6 +129,12 @@ impl AppState {
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             saves: edit::Saves::default(),
             host: "web".to_string(),
+            oidc_secret: None,
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default(),
             viewers: viewers::Open::default(),
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
             sign_ins: Arc::new(tokio::sync::Semaphore::new(SIGN_INS)),
@@ -145,6 +162,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/methods", get(auth::methods))
+        .route("/api/auth/oidc", get(oidc::start))
+        .route("/api/auth/oidc/callback", get(oidc::callback))
         .route(
             "/api/admin/accounts",
             get(admin::accounts_list).post(admin::accounts_add),
@@ -236,6 +255,7 @@ pub async fn run(
     let mut state = AppState::new(pool, config.database);
     state.static_dir = config.static_dir;
     state.host = config.host;
+    state.oidc_secret = config.oidc_secret;
     live::spawn(state.pool.clone(), state.live.clone());
     viewers::spawn(state.clone());
     let stop_live = state.shutdown.clone();

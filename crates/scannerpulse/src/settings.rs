@@ -369,13 +369,30 @@ fn flag(values: &HashMap<String, Value>, key: &'static str) -> Result<bool, Sett
 }
 
 /// The settings that only the web service reads, each with its check.
-pub const WEB_KEYS: [&str; 5] = [
+pub const WEB_KEYS: [&str; 9] = [
     "maintenance.enabled",
     "auth.password_signin",
     "web.trusted_proxies",
     "web.system_order",
     "purge.holding_path",
+    "oidc.issuer",
+    "oidc.client_id",
+    "oidc.admin_group",
+    "oidc.redirect_url",
 ];
+
+/// An address of the OIDC provider or of this site's sign-in callback:
+/// https, or http to this machine only (a provider under test).
+pub fn oidc_url_ok(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        let local = matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        (u.scheme() == "https" || (u.scheme() == "http" && local))
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none()
+    })
+}
 
 /// Whether the settings would be valid with `key` set to `value`, or
 /// removed when `value` is `None`, given the other stored `values`: the same
@@ -441,6 +458,10 @@ pub fn check(
         "web.system_order" => value
             .as_array()
             .is_some_and(|list| list.iter().all(Value::is_string)),
+        "oidc.issuer" | "oidc.redirect_url" => value.as_str().is_some_and(oidc_url_ok),
+        "oidc.client_id" | "oidc.admin_group" => value
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty() && text.len() <= 200),
         _ => value
             .as_str()
             .is_some_and(|path| path.starts_with('/') && !path.split('/').any(|part| part == "..")),
@@ -452,6 +473,10 @@ pub fn check(
             "maintenance.enabled" | "auth.password_signin" => "true or false",
             "web.trusted_proxies" => "a list of addresses such as [\"192.0.2.10\"]",
             "web.system_order" => "a list of system names",
+            "oidc.issuer" | "oidc.redirect_url" => {
+                "an https:// address (http:// only to this machine), with no query"
+            }
+            "oidc.client_id" | "oidc.admin_group" => "text of 1 to 200 bytes",
             _ => "an absolute folder path without ..",
         };
         Err(invalid(key, format!("{value} is not {what}")))

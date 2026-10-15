@@ -290,3 +290,54 @@ pub async fn set_password_signin(db: impl sqlx::PgExecutor<'_>, on: bool) -> sql
     .await?;
     Ok(())
 }
+
+/// The account of someone who signed in through the OIDC provider `issuer`
+/// as `subject`: its id, login name and whether it is disabled. The first
+/// sign-in creates it, named `wanted` when that name is free and valid. An
+/// account of another way in is never taken over: a name already in use
+/// gets a suffix.
+pub async fn oidc_account(
+    conn: &mut PgConnection,
+    issuer: &str,
+    subject: &str,
+    wanted: Option<&str>,
+) -> sqlx::Result<(i64, String, bool)> {
+    let base = wanted
+        .filter(|name| check_login(name).is_ok())
+        .unwrap_or("oidc")
+        .chars()
+        .take(MAX_LOGIN - 7)
+        .collect::<String>();
+    for attempt in 0..5 {
+        let found: Option<(i64, String, bool)> = sqlx::query_as(
+            "SELECT id, login, disabled FROM admins WHERE oidc_issuer = $1 AND oidc_subject = $2",
+        )
+        .bind(issuer)
+        .bind(subject)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(found) = found {
+            return Ok(found);
+        }
+        let login = if attempt == 0 {
+            base.clone()
+        } else {
+            format!("{base}-{}", crate::sessions::random_hex(3))
+        };
+        let created: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO admins (login, oidc_issuer, oidc_subject) VALUES ($1, $2, $3) \
+             ON CONFLICT DO NOTHING RETURNING id",
+        )
+        .bind(&login)
+        .bind(issuer)
+        .bind(subject)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(id) = created {
+            return Ok((id, login, false));
+        }
+    }
+    Err(sqlx::Error::Protocol(
+        "no free login name for a new OIDC account".into(),
+    ))
+}

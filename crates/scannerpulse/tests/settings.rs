@@ -438,3 +438,38 @@ async fn a_refused_change_leaves_the_stored_value(pool: PgPool) {
             .contains_key("ingest.rescan_seconds")
     );
 }
+
+#[test]
+fn the_oidc_settings_have_their_forms() {
+    assert!(!refused(
+        "oidc.issuer",
+        Some(json!("https://id.example/application/o/sp/")),
+        &[]
+    ));
+    assert!(!refused(
+        "oidc.issuer",
+        Some(json!("http://127.0.0.1:9000/")),
+        &[]
+    ));
+    assert!(refused(
+        "oidc.issuer",
+        Some(json!("http://id.example/")),
+        &[]
+    ));
+    assert!(refused(
+        "oidc.issuer",
+        Some(json!("https://u:p@id.example/")),
+        &[]
+    ));
+    assert!(refused(
+        "oidc.redirect_url",
+        Some(json!("https://sp.example/cb?x=1")),
+        &[]
+    ));
+    assert!(!refused(
+        "oidc.admin_group",
+        Some(json!("scannerpulse-admins")),
+        &[]
+    ));
+    assert!(refused("oidc.client_id", Some(json!(" ")), &[]));
+}

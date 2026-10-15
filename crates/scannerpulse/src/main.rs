@@ -55,7 +55,9 @@ lease       show which host holds the processing lease, and each host's
 web         serve the web interface and its API (reads DATABASE_URL,
             SCANNERPULSE_WEB_LISTEN, default 127.0.0.1:8080,
             SCANNERPULSE_WEB_STATIC, the frontend's built files, and
-            SCANNERPULSE_HOST, its name in the list of open pages)
+            SCANNERPULSE_HOST, its name in the list of open pages, and
+            SCANNERPULSE_OIDC_CLIENT_SECRET when admins sign in through an
+            OIDC provider)
 read        print what ingest reads from each file, one JSON line per file;
             ZONE is the time zone of the times in the file names
 transcribe  queue the past calls of a talkgroup for transcription, from DAY to
