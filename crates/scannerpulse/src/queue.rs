@@ -187,6 +187,30 @@ pub async fn count_failure(
     Ok(wait.is_none())
 }
 
+/// Moves a queued call's next try along `RETRY_AFTER` after the servers
+/// failed on it `faults` times (2 or more), in one fenced transaction. Its
+/// attempts and state stay, so a server fault never fails a call.
+pub async fn defer(
+    conn: &mut PgConnection,
+    holder: &str,
+    queued: &Queued,
+    faults: u16,
+) -> Result<(), RecordError> {
+    let at = usize::from(faults.saturating_sub(2)).min(RETRY_AFTER.len() - 1);
+    let mut tx = store::fenced(conn, holder).await?;
+    sqlx::query(
+        "UPDATE transcription_queue SET next_try_at = now() + make_interval(secs => $3) \
+         WHERE call_id = $1 AND started_at = $2 AND state = 'queued'",
+    )
+    .bind(queued.call_id)
+    .bind(queued.started_at)
+    .bind(RETRY_AFTER[at].as_secs_f64())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// The queue in numbers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::FromRow)]
 pub struct Counts {

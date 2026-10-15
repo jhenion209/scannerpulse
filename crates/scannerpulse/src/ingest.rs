@@ -880,6 +880,7 @@ fn describe(outcome: &transcriber::Outcome) {
             call,
             server,
             error,
+            ..
         } => log::debug(format!(
             "call {call} stays queued: {server} failed: {error}"
         )),

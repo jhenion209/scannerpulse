@@ -4,10 +4,12 @@
 //!
 //! A server's failure (refused, timed out, 5xx) puts the server on a cooldown
 //! and leaves the call queued with no failure counted, so an outage never
-//! fails calls. A refusal of the call itself (4xx), or audio that cannot be
-//! read, counts against the call. After a lost lease nothing is written.
+//! fails calls. From the second server fault on one call, the call's next
+//! try moves along `queue::RETRY_AFTER`, so it stops recurring. A refusal of
+//! the call itself (4xx), or audio that cannot be read, counts against the
+//! call. After a lost lease nothing is written.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,10 +38,13 @@ pub enum Outcome {
     /// The call failed for the fifth time: it is marked failed.
     Failed { call: i64, error: String },
     /// The server failed; the call stays queued with nothing counted.
+    /// `deferred` when the servers failed on it before, so its next try is
+    /// moved along `queue::RETRY_AFTER`.
     ServerDown {
         call: i64,
         server: String,
         error: String,
+        deferred: bool,
     },
     /// The lease was lost before the result could be written.
     LeaseLost(i64),
@@ -62,6 +67,8 @@ pub struct Transcriber {
     servers: Servers,
     jobs: JoinSet<Done>,
     in_flight: HashSet<i64>,
+    /// Server faults per call, since its last other outcome.
+    faults: HashMap<i64, u16>,
     db_limit: Duration,
     servers_changed: bool,
 }
@@ -76,6 +83,7 @@ impl Transcriber {
             servers: Servers::default(),
             jobs: JoinSet::new(),
             in_flight: HashSet::new(),
+            faults: HashMap::new(),
             db_limit: DEFAULT_DB_LIMIT,
             servers_changed: false,
         }
@@ -188,13 +196,37 @@ impl Transcriber {
                 if self.servers.failed(&server, &error, Instant::now()) {
                     self.servers_changed = true;
                 }
-                return Ok(Outcome::ServerDown {
-                    call,
-                    server,
-                    error,
-                });
+                let faults = self.faults.entry(call).or_insert(0);
+                *faults = faults.saturating_add(1);
+                let faults = *faults;
+                if faults < 2 {
+                    return Ok(Outcome::ServerDown {
+                        call,
+                        server,
+                        error,
+                        deferred: false,
+                    });
+                }
+                if !self.fence.held() {
+                    return Ok(Outcome::LeaseLost(call));
+                }
+                let mut conn = store::limited(self.db_limit, self.pool.acquire()).await?;
+                let holder = self.fence.holder().to_string();
+                let defer = queue::defer(&mut conn, &holder, &queued, faults);
+                return match tokio::time::timeout(self.db_limit, defer).await {
+                    Ok(Ok(())) => Ok(Outcome::ServerDown {
+                        call,
+                        server,
+                        error,
+                        deferred: true,
+                    }),
+                    Ok(Err(RecordError::LeaseLost)) => Ok(Outcome::LeaseLost(call)),
+                    Ok(Err(RecordError::Database(error))) => Err(error),
+                    Err(_) => Err(store::timed_out(self.db_limit)),
+                };
             }
             Ok(text) => {
+                self.faults.remove(&call);
                 if self.servers.succeeded(&server) {
                     self.servers_changed = true;
                 }
@@ -213,12 +245,16 @@ impl Transcriber {
                 };
             }
             Err(AsrError::Call(error)) => {
+                self.faults.remove(&call);
                 if self.servers.succeeded(&server) {
                     self.servers_changed = true;
                 }
                 error
             }
-            Err(AsrError::Audio(error)) => error,
+            Err(AsrError::Audio(error)) => {
+                self.faults.remove(&call);
+                error
+            }
         };
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost(call));

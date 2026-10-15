@@ -201,3 +201,39 @@ async fn while_transcription_is_off_nothing_is_sent(pool: PgPool) -> sqlx::Resul
     assert!(server.requests().is_empty());
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_call_the_servers_keep_failing_on_is_deferred(pool: PgPool) -> sqlx::Result<()> {
+    let a = FakeAsr::start(vec![Answer::Status(500, "broken")]);
+    let b = FakeAsr::start(vec![Answer::Status(500, "broken")]);
+    let (_root, _fence, mut t, calls) = site(&pool, 1, &a.url, 1).await;
+    let mut both = settings(&a.url, 1);
+    both.servers.push(Server {
+        url: b.url.clone(),
+        weight: 1,
+    });
+    t.set(Some(both));
+    assert_eq!(t.fill().await?, 1);
+    match one(&mut t).await {
+        Outcome::ServerDown { deferred, .. } => assert!(!deferred),
+        other => panic!("{other:?}"),
+    }
+    assert!(t.server_states()[1].cooling_for.is_none());
+    assert_eq!(t.fill().await?, 1);
+    match one(&mut t).await {
+        Outcome::ServerDown { call, deferred, .. } => {
+            assert_eq!(call, calls[0].0);
+            assert!(deferred);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(queued(&pool).await, [(calls[0].0, 0, "queued".to_string())]);
+    let ahead: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM next_try_at - now())::float8 FROM transcription_queue",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!((50.0..=61.0).contains(&ahead), "{ahead}");
+    assert_eq!(t.fill().await?, 0);
+    Ok(())
+}
