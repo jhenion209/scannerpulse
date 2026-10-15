@@ -136,3 +136,25 @@ async fn a_page_hears_new_calls_again_once_the_lost_listener_is_back(pool: PgPoo
     notify(&pool, "scannerpulse_calls", later).await;
     assert_eq!(next(&mut ws).await["call"]["id"], later);
 }
+
+#[tokio::test]
+async fn a_page_that_connects_during_shutdown_is_closed_at_once() {
+    // A state whose shutdown fired before the page connected; no database is
+    // needed, because the socket closes before it reads any call.
+    let pool = PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap();
+    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.shutdown.send_replace(true);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, web::router(state)).await.unwrap() });
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/api/live"))
+        .await
+        .unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("the socket closes within 5 s");
+    assert!(
+        !matches!(end, Some(Ok(Message::Text(_)))),
+        "no event is sent after shutdown"
+    );
+}

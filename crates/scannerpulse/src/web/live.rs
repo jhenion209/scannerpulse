@@ -165,6 +165,13 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
     // Listen before catching up, so nothing falls between the two.
     let mut events = state.live.subscribe();
     let mut stop = state.shutdown.subscribe();
+    // `subscribe` marks the current value as seen: a stop that fired before
+    // this page connected would never be reported by `changed`.
+    let stopped = *stop.borrow();
+    if stopped {
+        close(&mut ws).await;
+        return;
+    }
     // The calls sent by the catch-up that may still arrive live: each is
     // skipped once, then forgotten, so the set is at most `CATCH_UP` long.
     let mut sent: HashSet<i64> = HashSet::new();
@@ -212,7 +219,7 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
                 Some(Ok(_)) => {}
             },
             _ = stop.changed() => {
-                let _ = ws.send(Message::Close(None)).await;
+                close(&mut ws).await;
                 return;
             }
         }
@@ -223,4 +230,10 @@ async fn send(ws: &mut WebSocket, event: &Event) -> Result<(), axum::Error> {
     let text =
         serde_json::to_string(event).unwrap_or_else(|_| json!({"type": "resync"}).to_string());
     ws.send(Message::Text(text.into())).await
+}
+
+/// Sends the Close frame, waiting at most a second: a client that stopped
+/// reading must not hold the task.
+async fn close(ws: &mut WebSocket) {
+    let _ = tokio::time::timeout(Duration::from_secs(1), ws.send(Message::Close(None))).await;
 }
