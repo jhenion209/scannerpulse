@@ -3,6 +3,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use axum::http::HeaderMap;
 use common::{admin, send, sign_in};
 use futures_util::SinkExt;
 use scannerpulse::web::{self, AppState, viewers};
@@ -156,6 +157,37 @@ async fn a_refresh_keeps_the_open_pages_and_clears_the_rest(pool: PgPool) {
             ("other".into(), true)
         ]
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_page_whose_first_write_failed_gets_its_row_at_the_next_refresh(pool: PgPool) {
+    let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.host = "web-a".into();
+    let page = viewers::opened(&state, "192.0.2.9".parse().unwrap(), HeaderMap::new());
+    // Wait for the page's first write to finish, up to 5 seconds.
+    let mut remembered = false;
+    for _ in 0..100 {
+        let done = matches!(state.viewers.lock().unwrap().values().next(), Some(Some(_)));
+        if done {
+            remembered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(remembered, "the page was never remembered");
+    // The row is lost, as a failed write or another host's pruning would leave it.
+    sqlx::query("DELETE FROM viewers")
+        .execute(&pool)
+        .await
+        .unwrap();
+    viewers::refresh(&state).await.unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT host, address FROM viewers ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, [("web-a".into(), "192.0.2.9".into())]);
+    viewers::closed(&state, page);
 }
 
 #[test]

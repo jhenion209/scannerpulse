@@ -62,11 +62,17 @@ pub fn opened(state: &AppState, peer: IpAddr, headers: HeaderMap) -> Viewer {
     Viewer { id, written }
 }
 
+/// Writes an open page's row. The page is remembered first, so a failed
+/// write is made good by the next refresh.
 async fn record(state: &AppState, id: &str, peer: IpAddr, headers: &HeaderMap) -> sqlx::Result<()> {
-    let trusted = client::trusted_proxies(&state.pool).await?;
+    let trusted = client::trusted_proxies(&state.pool)
+        .await
+        .unwrap_or_default();
     let address = client::address(peer, headers, &trusted);
     let admin = auth::session(&state.pool, headers)
-        .await?
+        .await
+        .ok()
+        .flatten()
         .map(|session| session.login);
     let user_agent: String = headers
         .get(header::USER_AGENT)
@@ -75,6 +81,14 @@ async fn record(state: &AppState, id: &str, peer: IpAddr, headers: &HeaderMap) -
         .chars()
         .take(USER_AGENT)
         .collect();
+    if let Some(slot) = pages(&state.viewers).get_mut(id) {
+        *slot = Some(Page {
+            address: address.to_string(),
+            user_agent: user_agent.clone(),
+            admin: admin.clone(),
+            connected_at: Utc::now(),
+        });
+    }
     let connected_at: DateTime<Utc> = sqlx::query_scalar(
         "INSERT INTO viewers (id, host, address, user_agent, admin, connected_at, seen_at) \
          VALUES ($1, $2, $3, $4, $5, now(), now()) RETURNING connected_at",
@@ -86,13 +100,8 @@ async fn record(state: &AppState, id: &str, peer: IpAddr, headers: &HeaderMap) -
     .bind(&admin)
     .fetch_one(&state.pool)
     .await?;
-    if let Some(page) = pages(&state.viewers).get_mut(id) {
-        *page = Some(Page {
-            address: address.to_string(),
-            user_agent,
-            admin,
-            connected_at,
-        });
+    if let Some(Some(page)) = pages(&state.viewers).get_mut(id) {
+        page.connected_at = connected_at;
     }
     Ok(())
 }
