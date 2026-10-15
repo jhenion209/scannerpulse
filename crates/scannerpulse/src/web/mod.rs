@@ -6,6 +6,7 @@ mod audio;
 mod calls;
 mod error;
 mod info;
+pub mod live;
 mod sheet;
 
 use std::net::SocketAddr;
@@ -70,6 +71,8 @@ pub struct AppState {
     pub database: PgConnectOptions,
     /// The exact counts that may run at once on this host.
     pub exact_counts: Arc<tokio::sync::Semaphore>,
+    /// The host's live feed: every open page listens to it.
+    pub live: live::Feed,
     /// The exports that may run at once on this host.
     pub exports: Arc<tokio::sync::Semaphore>,
     /// The filter choices, with the time they were read.
@@ -84,6 +87,7 @@ impl AppState {
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
+            live: live::feed(),
         }
     }
 }
@@ -102,6 +106,7 @@ pub fn router(state: AppState) -> Router {
         .route("/audio/{id}", get(audio::one))
         .route("/api/export/audio", post(audio::export))
         .route("/api/export/xlsx", get(sheet::export))
+        .route("/api/live", get(live::socket))
         .with_state(state)
 }
 
@@ -115,6 +120,7 @@ pub async fn run(
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy_with(config.database.clone());
     let state = AppState::new(pool, config.database);
+    live::spawn(state.pool.clone(), state.live.clone());
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("cannot listen on {}: {error}", config.listen))?;
