@@ -34,6 +34,27 @@ pub fn id3v2_len(data: &[u8]) -> usize {
 /// The frames after any ID3v2 tags at the start of `data`; `None` when there is
 /// no audio frame.
 pub fn stream(data: &[u8]) -> Option<Stream> {
+    walk(data).map(|walked| Stream {
+        frames: walked.frames,
+        duration_ms: (walked.seconds * 1000.0).round() as u64,
+    })
+}
+
+/// The audio of `data`: its whole frames, without the tags before or after
+/// them and without a leading Xing, Info or VBRI frame. The audio of several
+/// calls, one after the other, plays as one stream.
+pub fn audio(data: &[u8]) -> Option<&[u8]> {
+    walk(data).map(|walked| &data[walked.start..walked.end])
+}
+
+struct Walked {
+    start: usize,
+    end: usize,
+    frames: u64,
+    seconds: f64,
+}
+
+fn walk(data: &[u8]) -> Option<Walked> {
     let mut start = 0;
     while let Some(rest) = data.get(start..) {
         match id3v2_len(rest) {
@@ -47,6 +68,7 @@ pub fn stream(data: &[u8]) -> Option<Stream> {
             pos += first.len;
         }
     }
+    let first = pos;
     let mut frames = 0u64;
     let mut seconds = 0f64;
     while let Some(frame) = data.get(pos..).and_then(header) {
@@ -62,9 +84,11 @@ pub fn stream(data: &[u8]) -> Option<Stream> {
     if frames == 0 {
         return None;
     }
-    Some(Stream {
+    Some(Walked {
+        start: first,
+        end: pos,
         frames,
-        duration_ms: (seconds * 1000.0).round() as u64,
+        seconds,
     })
 }
 

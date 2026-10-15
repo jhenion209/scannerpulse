@@ -2,6 +2,7 @@
 //! archive and never writes to the archive, so any number of hosts can run it
 //! side by side behind a load balancer.
 
+mod audio;
 mod calls;
 mod error;
 mod info;
@@ -15,11 +16,14 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 
 pub use error::ApiError;
+
+/// The exports, of either kind, that may run at once on this host.
+pub const EXPORTS: usize = 2;
 
 /// How long `/healthz` waits for the database before it answers 503.
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(4);
@@ -65,6 +69,8 @@ pub struct AppState {
     pub database: PgConnectOptions,
     /// The exact counts that may run at once on this host.
     pub exact_counts: Arc<tokio::sync::Semaphore>,
+    /// The exports that may run at once on this host.
+    pub exports: Arc<tokio::sync::Semaphore>,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
 }
@@ -76,6 +82,7 @@ impl AppState {
             database,
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
+            exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
         }
     }
 }
@@ -91,6 +98,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/favorites", get(info::favorites))
         .route("/api/status", get(info::status))
         .route("/api/labels/todo", get(info::labels_todo))
+        .route("/audio/{id}", get(audio::one))
+        .route("/api/export/audio", post(audio::export))
         .with_state(state)
 }
 

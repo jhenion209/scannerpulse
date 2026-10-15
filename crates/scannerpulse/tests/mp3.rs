@@ -1,7 +1,7 @@
 mod common;
 
 use common::{frame, frames, id3v2_header};
-use scannerpulse::mp3::{Stream, id3v2_len, stream};
+use scannerpulse::mp3::{Stream, audio, id3v2_len, stream};
 
 #[test]
 fn the_frames_add_up_to_the_length() {
@@ -118,4 +118,20 @@ fn a_padded_frame_is_one_byte_longer() {
     let mut data = frames_of([0xFF, 0xFB, 0x92, 0x00], 418, 2);
     data.extend_from_slice(&frames_of([0xFF, 0xFB, 0x90, 0x00], 417, 2));
     assert_eq!(stream(&data).map(|s| s.frames), Some(4));
+}
+
+#[test]
+fn the_audio_is_the_frames_without_the_tags() {
+    let mut data = id3v2_header(30);
+    data.extend_from_slice(&[0u8; 30]);
+    data.extend_from_slice(&frames(4));
+    // An ID3v1 tag at the end: "TAG" and 125 bytes.
+    data.extend_from_slice(b"TAG");
+    data.extend_from_slice(&[b' '; 125]);
+    assert_eq!(audio(&data), Some(&frames(4)[..]));
+    assert_eq!(audio(b"not audio"), None);
+    // Two calls' audio, one after the other, is one stream of both.
+    let mut joined = audio(&data).unwrap().to_vec();
+    joined.extend_from_slice(audio(&frames(3)).unwrap());
+    assert_eq!(stream(&joined).map(|s| s.frames), Some(7));
 }
