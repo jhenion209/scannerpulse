@@ -771,3 +771,206 @@ async fn a_stopped_merge_leaves_the_talkgroup_marked_from_its_first_move(pool: P
     assert_eq!(ended.state, "stopped");
     assert!(!names(&pool, into).await.2, "marked from the first move");
 }
+
+async fn set_holding(pool: &PgPool, path: &std::path::Path) {
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('purge.holding_path', to_jsonb($1::text)) \
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(path.to_str().unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_purge_keeps_the_files_in_the_holding_folder(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let holding = dir.path().join("holding");
+    std::fs::create_dir_all(&holding).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let rels = [
+        "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3",
+        "2031-03-01/127-Alpha Fire/20310301_120100SYSA.mp3",
+    ];
+    let mut talkgroup = 0;
+    for (minute, rel) in rels.iter().enumerate() {
+        let (_, id) = filed(
+            &pool,
+            places,
+            &root,
+            rel,
+            Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+            at(minute as u32),
+        )
+        .await;
+        talkgroup = id;
+    }
+    filed(
+        &pool,
+        places,
+        &root,
+        "2031-03-01/127-Alpha Fire/gone.mp3",
+        None,
+        at(2),
+    )
+    .await;
+    let other = common::talkgroup(&pool, "SYSA", 128).await;
+    let kept = common::call(&pool, other, at(3), None).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let preview = scannerpulse::data::purge_preview(&mut conn, talkgroup)
+        .await
+        .unwrap();
+    assert_eq!((preview.calls, preview.read_only), (3, 0));
+    assert_eq!(preview.holding_path, None);
+    let refused = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("purge.holding_path"), "{refused}");
+    set_holding(&pool, &root.join("2031-03-01")).await;
+    let refused = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("overlaps"), "{refused}");
+    set_holding(&pool, &holding).await;
+    assert!(
+        scannerpulse::data::start_purge(&mut conn, talkgroup, "alpha fire", "ann")
+            .await
+            .is_err()
+    );
+    let (job, count) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+    run_jobs(&pool).await;
+
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done");
+    assert!(
+        ended.message.starts_with("3 calls of SYSA/127 purged")
+            && ended.message.ends_with("1 had no file"),
+        "{}",
+        ended.message
+    );
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM calls WHERE talkgroup_id = $1")
+        .bind(talkgroup)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    for rel in rels {
+        assert!(holding.join(rel).exists(), "{rel} is kept");
+        assert!(!root.join(rel).exists(), "{rel} left the archive");
+    }
+    let other_left: i64 = sqlx::query_scalar("SELECT count(*) FROM calls WHERE id = $1")
+        .bind(kept)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(other_left, 1, "another talkgroup's call stays");
+    assert_eq!(
+        names(&pool, talkgroup).await.0,
+        "Alpha Fire",
+        "the talkgroup stays"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_purges_only_with_a_holding_folder_and_the_name(pool: PgPool) {
+    let seven = common::talkgroup(&pool, "SYSA", 7).await;
+    let app = app(&pool);
+    admin(&pool, "ann", PASSWORD).await;
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let change = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let uri = format!("/api/admin/talkgroups/{seven}/purge");
+    let preview = send(&app, "GET", &uri, &[("cookie", &cookie)], None).await;
+    assert_eq!(preview.status, 200);
+    assert_eq!(preview.body["holding_path"], serde_json::Value::Null);
+    let unset = send(
+        &app,
+        "POST",
+        &uri,
+        &change,
+        Some(json!({"confirm": "Group 7"})),
+    )
+    .await;
+    assert_eq!(unset.status, 400);
+    let dir = tempfile::tempdir().unwrap();
+    set_holding(&pool, dir.path()).await;
+    let started = send(
+        &app,
+        "POST",
+        &uri,
+        &change,
+        Some(json!({"confirm": "Group 7"})),
+    )
+    .await;
+    assert_eq!(started.status, 201);
+    assert_eq!(
+        send(
+            &app,
+            "POST",
+            &uri,
+            &[("cookie", &cookie)],
+            Some(json!({"confirm": "Group 7"}))
+        )
+        .await
+        .status,
+        403,
+        "a change needs the CSRF token"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_purge_refuses_an_unreadable_file_and_ends(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let holding = dir.path().join("holding");
+    std::fs::create_dir_all(&holding).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    set_holding(&pool, &holding).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let good = "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3";
+    let bad = "2031-03-01/127-Alpha Fire/20310301_120100SYSA.mp3";
+    let (good_call, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        good,
+        Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+        at(0),
+    )
+    .await;
+    // A directory where the file should be cannot be read as a file.
+    std::fs::create_dir_all(root.join(bad)).unwrap();
+    let (bad_call, _) = filed(&pool, places, &root, bad, None, at(1)).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, count) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    run_jobs(&pool).await;
+
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+    assert!(ended.message.contains("1 refused"), "{}", ended.message);
+    let pool = &pool;
+    let rows = |id| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM calls WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(rows(good_call).await, 0, "the good call is gone");
+    assert!(holding.join(good).exists(), "its file is held");
+    assert!(!root.join(good).exists(), "and left the archive");
+    assert_eq!(rows(bad_call).await, 1, "the refused call stays");
+    assert!(root.join(bad).exists(), "and so does its file");
+}

@@ -23,6 +23,8 @@ pub enum Kind {
     Correct,
     /// Moves a talkgroup's calls to another of its system, then corrects them.
     Merge,
+    /// Deletes a talkgroup's calls, keeping their files in a holding folder.
+    Purge,
 }
 
 impl Kind {
@@ -32,6 +34,7 @@ impl Kind {
             Kind::AsrRun => "asr_run",
             Kind::Correct => "correct",
             Kind::Merge => "merge",
+            Kind::Purge => "purge",
         }
     }
 
@@ -41,6 +44,7 @@ impl Kind {
             "asr_run" => Some(Kind::AsrRun),
             "correct" => Some(Kind::Correct),
             "merge" => Some(Kind::Merge),
+            "purge" => Some(Kind::Purge),
             _ => None,
         }
     }
@@ -351,7 +355,10 @@ pub async fn step(
         return Ok(None);
     };
     let outcome = if job.stop_requested {
-        if matches!(Kind::parse(&job.kind), Some(Kind::Correct | Kind::Merge)) {
+        if matches!(
+            Kind::parse(&job.kind),
+            Some(Kind::Correct | Kind::Merge | Kind::Purge)
+        ) {
             // The files its last step replaced go before it stops: a later
             // job would not know them.
             crate::data::release(&mut tx, &job).await?;
@@ -363,6 +370,7 @@ pub async fn step(
             Some(Kind::AsrRun) => asr_step(&mut tx, &job, context).await?,
             Some(Kind::Correct) => crate::data::correct_step(&mut tx, &job).await?,
             Some(Kind::Merge) => crate::data::merge_step(&mut tx, &job).await?,
+            Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job).await?,
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };

@@ -36,7 +36,8 @@ async fn a_new_job_waits_and_the_newest_are_listed_first(pool: PgPool) {
     assert_eq!(job.work, json!({}));
     assert!(job.host.is_none() && job.updated_at.is_none());
     assert_eq!(Kind::parse("asr_run"), Some(Kind::AsrRun));
-    assert_eq!(Kind::parse("purge"), None);
+    assert_eq!(Kind::parse("purge"), Some(Kind::Purge));
+    assert_eq!(Kind::parse("import"), None);
 }
 
 #[sqlx::test(migrations = "./migrations")]

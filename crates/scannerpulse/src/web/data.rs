@@ -153,3 +153,36 @@ pub async fn merge_start(
         Json(json!({"id": job, "count": count})),
     ))
 }
+
+/// `GET /api/admin/talkgroups/<id>/purge`: what purging the talkgroup would
+/// delete, and where its files would be kept.
+pub async fn purge_preview(
+    _: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    Ok(Json(json!(
+        crate::data::purge_preview(&mut conn, id).await?
+    )))
+}
+
+/// `POST /api/admin/talkgroups/<id>/purge`: starts the purge job.
+pub async fn purge_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(body): Json<Confirm>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (job, count) =
+        crate::data::start_purge(&mut conn, id, &body.confirm, &admin.0.login).await?;
+    record(
+        &admin,
+        format!("started job {job}: purge talkgroup {id} ({count} calls)"),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": job, "count": count})),
+    ))
+}

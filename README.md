@@ -214,6 +214,18 @@ listen.
   number, ingest adds it again as a new talkgroup with the recorder's name
   (rename or remove it in the recorder's talkgroup list first). Its
   transcription switch goes with it; the other keeps its own.
+- `talkgroup purge SYSTEM/NUMBER [--confirm NAME]` (and `GET`, then
+  `POST /api/admin/talkgroups/<id>/purge` with `confirm`) deletes a
+  talkgroup's calls, with their transcripts, labels and queue rows, once its
+  name is typed exactly. Each file is first copied into the holding folder
+  (setting `purge.holding_path`, which the administrator empties), with the
+  archive's layout so that an import could bring it back, read back and
+  compared; then the call's row goes, and the archived file is removed by
+  the next step. A purge refuses to start without that setting, with a
+  holding folder inside an archive location (or holding one), and while any
+  of the calls is in a read-only location. The talkgroup itself, its
+  transcription switch and its favorites stay. A stopped correction, merge
+  or purge removes the files its last step replaced before it ends.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
   each host) gives the calls per five minutes of the 120 days before today,
   in the site's time zone, as weekday and weekend profiles (calls a day),

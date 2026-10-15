@@ -1,6 +1,7 @@
 //! The Data tab's jobs, which move archived files: the correction of a
-//! talkgroup's files after a rename, and the merge of a talkgroup into
-//! another of its system. A file is written under its new name,
+//! talkgroup's files after a rename, the merge of a talkgroup into another
+//! of its system, and the purge of a talkgroup, whose files go to a holding
+//! folder. A file is written under its new name,
 //! read back and compared, and its call's row moved to it, in the step's
 //! transaction; the old file is removed only by the next step, once that
 //! record is committed, so a stop, a crash or a failover never leaves a row
@@ -733,6 +734,238 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
             "{} calls moved; correcting {to_correct} files",
             work.calls_moved
         ),
+        work: serde_json::to_value(&work).expect("plain data"),
+    })
+}
+
+/// What a purge would do: delete the talkgroup's calls, keeping their files
+/// in the holding folder (setting `purge.holding_path`).
+#[derive(Debug, Clone, Serialize)]
+pub struct PurgePreview {
+    pub talkgroup: Named,
+    pub calls: i64,
+    /// Calls in read-only locations: a purge cannot move their files, so it
+    /// refuses to start while there are any.
+    pub read_only: i64,
+    pub holding_path: Option<String>,
+}
+
+pub async fn purge_preview(conn: &mut PgConnection, id: i32) -> Result<PurgePreview, JobError> {
+    let talkgroup = existing(conn, id).await?;
+    let (calls, read_only): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE l.mode <> 'managed') \
+         FROM calls c JOIN locations l ON l.id = c.location_id WHERE c.talkgroup_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let holding_path: Option<String> =
+        sqlx::query_scalar("SELECT value #>> '{}' FROM settings WHERE key = 'purge.holding_path'")
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(PurgePreview {
+        talkgroup,
+        calls,
+        read_only,
+        holding_path,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Purge {
+    talkgroup_id: i32,
+    /// The holding folder as it was when the job started.
+    holding: String,
+}
+
+/// Adds a job that purges the talkgroup, once its name is typed exactly.
+/// Returns its id and the number of calls.
+pub async fn start_purge(
+    conn: &mut PgConnection,
+    id: i32,
+    confirm: &str,
+    started_by: &str,
+) -> Result<(i64, i64), JobError> {
+    let preview = purge_preview(conn, id).await?;
+    let Some(holding) = preview.holding_path else {
+        return Err(JobError::Refused(
+            "set purge.holding_path first: the purged calls' files are kept there".into(),
+        ));
+    };
+    if !Path::new(&holding).is_dir() {
+        return Err(JobError::Refused(format!(
+            "the holding folder {holding} is not a folder this host can see"
+        )));
+    }
+    if preview.read_only > 0 {
+        return Err(JobError::Refused(format!(
+            "{} of the calls are in read-only locations, whose files a purge cannot move",
+            preview.read_only
+        )));
+    }
+    // A file kept in a location's own tree would be the file the purge then
+    // removes.
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let kept = real(Path::new(&holding));
+    for root in roots(conn).await?.values() {
+        let root = real(root);
+        if kept.starts_with(&root) || root.starts_with(&kept) {
+            return Err(JobError::Refused(format!(
+                "the holding folder {holding} overlaps the archive location {}",
+                root.display()
+            )));
+        }
+    }
+    confirmed(&preview.talkgroup, confirm)?;
+    let params = serde_json::to_value(Purge {
+        talkgroup_id: id,
+        holding,
+    })
+    .expect("plain data");
+    let job = jobs::create(
+        &mut *conn,
+        Kind::Purge,
+        &params,
+        Some(preview.calls),
+        started_by,
+    )
+    .await?;
+    Ok((job, preview.calls))
+}
+
+/// Copies the file into the holding folder, with the archive's layout, read
+/// back and compared, and gives the copy the file's modification time.
+fn hold(old: &Path, holding: &Path, rel_path: &str, data: &[u8]) -> io::Result<()> {
+    let mtime = std::fs::metadata(old)?.modified()?;
+    let digest = archive::sha256(data);
+    let (dir, name) = rel_path.rsplit_once('/').unwrap_or(("", rel_path));
+    let rel = match archive::place(holding, dir, name, data.len() as u64, &digest)? {
+        archive::Place::Copy(rel) => rel,
+        archive::Place::Free(rel) => {
+            let path = holding.join(&rel);
+            archive::write_part(&path, data, &digest)?;
+            archive::finish_part(&path)?;
+            rel
+        }
+    };
+    std::fs::File::options()
+        .write(true)
+        .open(holding.join(&rel))?
+        .set_modified(mtime)
+}
+
+/// Copies the call's file into the holding folder and deletes its row (its
+/// transcripts, labels and queue row go with it). A file that cannot be read
+/// or held refuses the call: its row and file stay. The holding folder is not
+/// the archive, so the archive's write lock is not taken.
+async fn purge_one(
+    conn: &mut PgConnection,
+    root: &Path,
+    holding: &Path,
+    call: &CallFile,
+) -> sqlx::Result<Handled> {
+    let old = root.join(&call.rel_path);
+    let kept = match std::fs::read(&old) {
+        Ok(data) => match hold(&old, holding, &call.rel_path, &data) {
+            Ok(()) => true,
+            Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
+    };
+    sqlx::query("DELETE FROM calls WHERE id = $1 AND started_at = $2")
+        .bind(call.id)
+        .bind(call.started_at)
+        .execute(&mut *conn)
+        .await?;
+    Ok(if kept {
+        Handled::Moved(Gone {
+            location_id: call.location_id,
+            rel_path: call.rel_path.clone(),
+        })
+    } else {
+        Handled::Missing
+    })
+}
+
+pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
+    let Ok(params) = serde_json::from_value::<Purge>(job.params.clone()) else {
+        return Ok(Outcome::Failed(
+            "the job's parameters are not a purge's".into(),
+        ));
+    };
+    let mut work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
+    let roots = roots(conn).await?;
+    remove_gone(conn, &roots, &work.remove).await?;
+    work.remove.clear();
+    let holding = PathBuf::from(&params.holding);
+    if !holding.is_dir() {
+        // An unmounted share: try again later rather than lose a file.
+        return Err(io_error(io::Error::other(format!(
+            "the holding folder {} is not there",
+            params.holding
+        ))));
+    }
+    let (after_at, after_id) = work.after.unzip();
+    let batch: Vec<CallFile> = sqlx::query_as(
+        "SELECT c.id, c.started_at, c.location_id, c.rel_path \
+         FROM calls c JOIN locations l ON l.id = c.location_id \
+         WHERE c.talkgroup_id = $1 AND l.mode = 'managed' \
+           AND ($3::timestamptz IS NULL OR (c.started_at, c.id) > ($3, $4)) \
+         ORDER BY c.started_at, c.id LIMIT $2",
+    )
+    .bind(params.talkgroup_id)
+    .bind(FILES_PER_STEP)
+    .bind(after_at)
+    .bind(after_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if batch.is_empty() {
+        let written = named(&mut *conn, params.talkgroup_id)
+            .await?
+            .map_or_else(|| params.talkgroup_id.to_string(), |t| t.written());
+        let mut message = format!(
+            "{} calls of {written} purged, their files kept in {}; {} had no file",
+            work.moved + work.missing,
+            params.holding,
+            work.missing
+        );
+        if work.refused > 0 {
+            message.push_str(&format!("; {} refused", work.refused));
+        }
+        if let Some(why) = &work.last_refusal {
+            message.push_str(&format!("; the last refusal: {why}"));
+        }
+        return Ok(Outcome::Done(job.done, message));
+    }
+    for call in &batch {
+        if let Some(root) = roots.get(&call.location_id) {
+            if !root.is_dir() {
+                return Err(io_error(io::Error::other(format!(
+                    "the location {} is not there",
+                    root.display()
+                ))));
+            }
+            match purge_one(conn, root, &holding, call).await? {
+                Handled::Moved(gone) => {
+                    work.moved += 1;
+                    work.remove.push(gone);
+                }
+                Handled::Refused(why) => {
+                    work.refused += 1;
+                    work.last_refusal = Some(why);
+                }
+                Handled::Missing => work.missing += 1,
+            }
+        }
+        work.after = Some((call.started_at, call.id));
+    }
+    let done = job.done + batch.len() as i64;
+    let total = job.total.map(|total| total.max(done));
+    Ok(Outcome::More {
+        done,
+        total,
+        message: format!("{} calls purged", jobs::progress(done, total)),
         work: serde_json::to_value(&work).expect("plain data"),
     })
 }
