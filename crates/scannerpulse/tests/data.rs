@@ -542,3 +542,39 @@ async fn a_file_that_cannot_be_read_is_refused_and_the_job_ends(pool: PgPool) {
     );
     assert_eq!(rel_of(&pool, bad).await, bad_rel);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_name_too_long_for_a_file_name_is_refused(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();
+    let rel =
+        "2031-03-01/127-Alpha Fire/2031-03-01_120000_127-Alpha Fire_711351-_SYSA-North_SYSA.mp3";
+    let (call, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        rel,
+        Some(common::tagged(&tag(None), 2)),
+        at,
+    )
+    .await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    // 200 characters, 400 bytes: the name rules take it, the file system not.
+    let long = "é".repeat(200);
+    talkgroups::rename(&mut conn, talkgroup, &long)
+        .await
+        .unwrap();
+    let (job, count) = scannerpulse::data::start_correct(&mut conn, talkgroup, &long, "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    run_jobs(&pool).await;
+
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done");
+    assert!(ended.message.contains("1 refused"), "{}", ended.message);
+    assert_eq!(rel_of(&pool, call).await, rel);
+}

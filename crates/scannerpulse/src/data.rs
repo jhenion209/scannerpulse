@@ -230,7 +230,7 @@ async fn free_rel(
     dir: &str,
     name: &str,
     data: &[u8],
-) -> sqlx::Result<(String, bool)> {
+) -> sqlx::Result<io::Result<(String, bool)>> {
     let digest = archive::sha256(data);
     let mut n = 0;
     loop {
@@ -249,14 +249,13 @@ async fn free_rel(
         let path = root.join(&rel);
         let _ = std::fs::remove_file(archive::part_path(&path));
         match std::fs::metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((rel, false)),
-            Err(error) => return Err(io_error(error)),
-            Ok(meta)
-                if meta.len() == data.len() as u64
-                    && archive::file_digest(&path).map_err(io_error)?.0 == digest =>
-            {
-                return Ok((rel, true));
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Ok((rel, false))),
+            Err(error) => return Ok(Err(error)),
+            Ok(meta) if meta.len() == data.len() as u64 => match archive::file_digest(&path) {
+                Ok((found, _)) if found == digest => return Ok(Ok((rel, true))),
+                Ok(_) => {}
+                Err(error) => return Ok(Err(error)),
+            },
             Ok(_) => {}
         }
     }
@@ -306,7 +305,7 @@ async fn correct_one(
     // The name is chosen and given under the lock, so that the filer, which
     // takes the same one, never takes it too.
     let writing = archive::WRITES.lock().await;
-    let (rel, copy) = free_rel(
+    let (rel, copy) = match free_rel(
         conn,
         root,
         call.location_id,
@@ -314,7 +313,13 @@ async fn correct_one(
         &retagged.name,
         &retagged.data,
     )
-    .await?;
+    .await?
+    {
+        Ok(found) => found,
+        // A name the file system refuses (too long, a file where a folder
+        // should be) refuses the call; the job goes on.
+        Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
+    };
     let path = root.join(&rel);
     let refused = |error: io::Error| Handled::Refused(format!("{}: {error}", call.rel_path));
     if !copy {
