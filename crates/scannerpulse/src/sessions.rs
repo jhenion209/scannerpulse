@@ -3,6 +3,7 @@
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use sqlx::postgres::PgConnection;
 
 /// A session ends this long after the admin's last request...
 pub const IDLE_HOURS: i32 = 12;
@@ -35,11 +36,7 @@ fn digest(token: &str) -> Vec<u8> {
 
 /// Opens a session for the admin: returns the token for the cookie and the
 /// CSRF token. Records the sign-in and removes sessions that have ended.
-pub async fn create(
-    db: impl sqlx::Acquire<'_, Database = sqlx::Postgres>,
-    admin_id: i64,
-) -> sqlx::Result<(String, String)> {
-    let mut conn = db.acquire().await?;
+pub async fn create(conn: &mut PgConnection, admin_id: i64) -> sqlx::Result<(String, String)> {
     let token = random_hex(32);
     let csrf = random_hex(16);
     sqlx::query(
@@ -137,12 +134,7 @@ pub async fn locked(db: impl sqlx::PgExecutor<'_>, kind: Kind, value: &str) -> s
 
 /// Counts a failed sign-in against the name and the address, and forgets
 /// failures older than a day.
-pub async fn failed(
-    db: impl sqlx::Acquire<'_, Database = sqlx::Postgres>,
-    name: &str,
-    address: &str,
-) -> sqlx::Result<()> {
-    let mut conn = db.acquire().await?;
+pub async fn failed(conn: &mut PgConnection, name: &str, address: &str) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO sign_in_failures (kind, value, at) \
          VALUES ('name', $1, now()), ('address', $2, now())",

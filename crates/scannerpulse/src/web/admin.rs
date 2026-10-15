@@ -32,6 +32,14 @@ fn record(admin: &Admin, what: String) {
     crate::log::info(format!("admin {}: {what}", admin.0.login));
 }
 
+/// The password's hash, made on the blocking threads.
+async fn hashed(password: String) -> Result<String, ApiError> {
+    tokio::task::spawn_blocking(move || accounts::new_hash(&password))
+        .await
+        .map_err(|error| ApiError::Internal(format!("password hash: {error}")))?
+        .map_err(ApiError::from)
+}
+
 pub async fn accounts_list(
     _: Admin,
     State(state): State<AppState>,
@@ -50,8 +58,10 @@ pub async fn accounts_add(
     State(state): State<AppState>,
     Json(body): Json<NewAccount>,
 ) -> Result<StatusCode, ApiError> {
+    accounts::check_login(&body.login)?;
+    let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;
-    accounts::add(&mut conn, &body.login, &body.password).await?;
+    accounts::add_hashed(&mut conn, &body.login, &hash).await?;
     record(&admin, format!("added the admin {}", body.login));
     Ok(StatusCode::CREATED)
 }
@@ -67,8 +77,9 @@ pub async fn accounts_password(
     Path(login): Path<String>,
     Json(body): Json<NewPassword>,
 ) -> Result<StatusCode, ApiError> {
+    let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;
-    accounts::set_password(&mut conn, &login, &body.password).await?;
+    accounts::set_hash(&mut conn, &login, &hash).await?;
     record(&admin, format!("gave {login} a new password"));
     Ok(StatusCode::NO_CONTENT)
 }

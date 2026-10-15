@@ -30,6 +30,8 @@ pub use error::ApiError;
 
 /// The exports, of either kind, that may run at once on this host.
 pub const EXPORTS: usize = 2;
+/// The password sign-ins that may hash at once on this host.
+pub const SIGN_INS: usize = 4;
 
 /// How long `/healthz` waits for the database before it answers 503.
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(4);
@@ -83,6 +85,8 @@ pub struct AppState {
     pub shutdown: tokio::sync::watch::Sender<bool>,
     /// The exports that may run at once on this host.
     pub exports: Arc<tokio::sync::Semaphore>,
+    /// The password sign-ins hashing now on this host.
+    pub sign_ins: Arc<tokio::sync::Semaphore>,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
 }
@@ -95,6 +99,7 @@ impl AppState {
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
+            sign_ins: Arc::new(tokio::sync::Semaphore::new(SIGN_INS)),
             live: live::feed(),
             shutdown: tokio::sync::watch::channel(false).0,
             static_dir: None,

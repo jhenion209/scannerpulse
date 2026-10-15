@@ -366,3 +366,42 @@ async fn an_admin_sees_the_labelers_list_when_it_is_not_public(pool: PgPool) {
     .await;
     assert_eq!(admin.status, 404);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn parallel_guesses_check_at_most_five_passwords(pool: PgPool) {
+    admin(&pool, "ann", PASSWORD).await;
+    // A wide hashing limit, so that only the per-name lock can hold the
+    // guesses back.
+    let mut state =
+        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.sign_ins = std::sync::Arc::new(tokio::sync::Semaphore::new(100));
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let guesses: Vec<_> = (0..20)
+        .map(|n| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                try_sign_in(&app, "ann", &format!("wrong password {n:02}"))
+                    .await
+                    .status
+            })
+        })
+        .collect();
+    let mut checked = 0;
+    for guess in guesses {
+        let status = guess.await.unwrap();
+        assert!(status == 401 || status == 429, "{status}");
+        if status == 401 {
+            checked += 1;
+        }
+    }
+    assert!(checked <= 5, "{checked} passwords were checked");
+    let counted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sign_in_failures WHERE kind = 'name' AND value = 'ann'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counted, checked, "every checked password is counted");
+}

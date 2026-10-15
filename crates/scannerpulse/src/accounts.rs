@@ -149,6 +149,13 @@ pub async fn by_login(
         .await
 }
 
+/// A checked password's hash. Hashing takes tens of milliseconds of one
+/// core: a server calls this on its blocking threads.
+pub fn new_hash(password: &str) -> Result<String, AccountError> {
+    check_password(password)?;
+    Ok(hash_password(password))
+}
+
 /// Adds an enabled account that signs in with `password`; returns its id.
 pub async fn add(
     conn: &mut PgConnection,
@@ -156,14 +163,23 @@ pub async fn add(
     password: &str,
 ) -> Result<i64, AccountError> {
     check_login(login)?;
-    check_password(password)?;
-    let hash = hash_password(password);
+    let hash = new_hash(password)?;
+    add_hashed(conn, login, &hash).await
+}
+
+/// Adds an enabled account with an Argon2id `hash` from `new_hash`; returns its id.
+pub async fn add_hashed(
+    conn: &mut PgConnection,
+    login: &str,
+    hash: &str,
+) -> Result<i64, AccountError> {
+    check_login(login)?;
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO admins (login, password_hash) VALUES ($1, $2) \
          ON CONFLICT (login) DO NOTHING RETURNING id",
     )
     .bind(login)
-    .bind(&hash)
+    .bind(hash)
     .fetch_optional(&mut *conn)
     .await?;
     id.ok_or_else(|| AccountError::Exists(login.to_string()))
@@ -175,13 +191,21 @@ pub async fn set_password(
     login: &str,
     password: &str,
 ) -> Result<(), AccountError> {
-    check_password(password)?;
-    let hash = hash_password(password);
+    let hash = new_hash(password)?;
+    set_hash(conn, login, &hash).await
+}
+
+/// Gives the account the password whose hash is `hash` (from `new_hash`) and ends its sessions.
+pub async fn set_hash(
+    conn: &mut PgConnection,
+    login: &str,
+    hash: &str,
+) -> Result<(), AccountError> {
     let mut tx = conn.begin().await?;
     let id: Option<i64> =
         sqlx::query_scalar("UPDATE admins SET password_hash = $2 WHERE login = $1 RETURNING id")
             .bind(login)
-            .bind(&hash)
+            .bind(hash)
             .fetch_optional(&mut *tx)
             .await?;
     let id = id.ok_or_else(|| AccountError::NoSuch(login.to_string()))?;

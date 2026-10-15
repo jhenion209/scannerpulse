@@ -114,39 +114,75 @@ pub async fn login(
     // A longer name cannot be an account's; it is kept short in the counts.
     let name: String = body.login.chars().take(accounts::MAX_LOGIN).collect();
     let address = address.to_string();
-    if sessions::locked(&state.pool, Kind::Name, &name).await?
-        || sessions::locked(&state.pool, Kind::Address, &address).await?
-    {
-        return Err(ApiError::Limit(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "too many failed sign-ins: wait {} minutes",
-                sessions::WINDOW_MINUTES
-            ),
+    // One attempt at a time for a name and for an address, on every host:
+    // the check, the password and the record of a failure run in this
+    // transaction, so parallel guesses cannot all pass the check before
+    // their failures are counted. A second attempt does not wait.
+    let mut tx = state.pool.begin().await?;
+    let free: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtext('scannerpulse sign-in name ' || $1)) \
+            AND pg_try_advisory_xact_lock(hashtext('scannerpulse sign-in address ' || $2))",
+    )
+    .bind(&name)
+    .bind(&address)
+    .fetch_one(&mut *tx)
+    .await?;
+    let too_many = |why: String| ApiError::Limit(StatusCode::TOO_MANY_REQUESTS, why);
+    if !free {
+        return Err(too_many(
+            "a sign-in for this name or from this address is under way: try again".into(),
         ));
     }
-    let account = accounts::by_login(&state.pool, &name).await?;
+    if sessions::locked(&mut *tx, Kind::Name, &name).await?
+        || sessions::locked(&mut *tx, Kind::Address, &address).await?
+    {
+        return Err(too_many(format!(
+            "too many failed sign-ins: wait {} minutes",
+            sessions::WINDOW_MINUTES
+        )));
+    }
+    // Each check holds about 19 MiB for tens of milliseconds: a few at once.
+    let permit = state
+        .sign_ins
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| too_many("too many sign-ins at once: try again".into()))?;
+    let account = accounts::by_login(&mut *tx, &name).await?;
+    let known = account.is_some();
     let password = body.password;
     // Hashing takes tens of milliseconds of one core: not on the async threads.
-    let admin = tokio::task::spawn_blocking(move || match account {
-        Some((id, hash, disabled)) if !hash.is_empty() => {
-            (accounts::verify_password(&hash, &password) && !disabled).then_some(id)
-        }
-        _ => {
-            accounts::verify_nothing(&password);
-            None
+    let admin = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match account {
+            Some((id, hash, disabled)) if !hash.is_empty() => {
+                (accounts::verify_password(&hash, &password) && !disabled).then_some(id)
+            }
+            _ => {
+                accounts::verify_nothing(&password);
+                None
+            }
         }
     })
     .await
     .map_err(|error| ApiError::Internal(format!("password check: {error}")))?;
     let Some(admin) = admin else {
-        sessions::failed(&state.pool, &name, &address).await?;
-        crate::log::info(format!("failed sign-in as {name:?} from {address}"));
+        sessions::failed(&mut tx, &name, &address).await?;
+        tx.commit().await?;
+        // A mistyped password can land in the name field: only an
+        // account's name is logged.
+        if known {
+            crate::log::info(format!("failed sign-in as {name} from {address}"));
+        } else {
+            crate::log::info(format!(
+                "failed sign-in with an unknown name from {address}"
+            ));
+        }
         return Err(ApiError::Unauthorized(
             "the name or the password is wrong".into(),
         ));
     };
-    let (token, csrf) = sessions::create(&state.pool, admin).await?;
+    let (token, csrf) = sessions::create(&mut tx, admin).await?;
+    tx.commit().await?;
     crate::log::info(format!("admin {name} signed in from {address}"));
     Ok(signed_in(&token, &name, &csrf))
 }
