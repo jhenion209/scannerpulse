@@ -163,8 +163,23 @@ async fn a_refresh_keeps_the_open_pages_and_clears_the_rest(pool: PgPool) {
 async fn a_page_whose_first_write_failed_gets_its_row_at_the_next_refresh(pool: PgPool) {
     let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
     state.host = "web-a".into();
+    // Every insert into viewers is refused, as a failed first write would be.
+    sqlx::query(
+        "CREATE FUNCTION refuse_viewers() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'refused for the test'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse BEFORE INSERT ON viewers FOR EACH ROW \
+         EXECUTE FUNCTION refuse_viewers()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let page = viewers::opened(&state, "192.0.2.9".parse().unwrap(), HeaderMap::new());
-    // Wait for the page's first write to finish, up to 5 seconds.
+    // Wait until the page is remembered, up to 5 seconds.
     let mut remembered = false;
     for _ in 0..100 {
         let done = matches!(state.viewers.lock().unwrap().values().next(), Some(Some(_)));
@@ -175,8 +190,12 @@ async fn a_page_whose_first_write_failed_gets_its_row_at_the_next_refresh(pool: 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(remembered, "the page was never remembered");
-    // The row is lost, as a failed write or another host's pruning would leave it.
-    sqlx::query("DELETE FROM viewers")
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM viewers")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(written, 0, "the first write was refused");
+    sqlx::query("DROP TRIGGER refuse ON viewers")
         .execute(&pool)
         .await
         .unwrap();
