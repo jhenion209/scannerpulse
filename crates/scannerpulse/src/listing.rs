@@ -132,16 +132,20 @@ fn push_transcripts<'a>(q: &mut QueryBuilder<'a, Postgres>, filter: &'a Filter, 
     }
     if !filter.talkgroups.is_empty() || filter.system.is_some() {
         q.push(
-            " AND EXISTS (SELECT 1 FROM calls c JOIN talkgroups t ON t.id = c.talkgroup_id \
+            " AND EXISTS (SELECT 1 FROM calls c \
              WHERE c.id = tr.call_id AND c.started_at = tr.started_at",
         );
+        // The calls alone: a join to talkgroups here makes the planner read
+        // a busy talkgroup's every call.
         if !filter.talkgroups.is_empty() {
             q.push(" AND c.talkgroup_id = ANY(")
                 .push_bind(&filter.talkgroups)
                 .push(")");
         }
         if let Some(system) = filter.system {
-            q.push(" AND t.system_id = ").push_bind(system);
+            q.push(" AND c.talkgroup_id IN (SELECT id FROM talkgroups WHERE system_id = ")
+                .push_bind(system)
+                .push(")");
         }
         q.push(")");
     }
