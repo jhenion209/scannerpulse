@@ -146,6 +146,18 @@ async fn a_server_that_keeps_failing_stops_the_run(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_server_that_refuses_every_call_stops_the_run(pool: PgPool) {
+    let labels: Vec<(&str, &str)> = (0..5).map(|_| ("engine one", "engine one")).collect();
+    let (_root, _) = labeled_set(&pool, &labels).await;
+    let asr = FakeAsr::start(vec![Answer::Status(422, "{}")]);
+    let labeled = accuracy::labeled(&pool, "s1").await.unwrap();
+    let tried =
+        accuracy::try_candidate(&Client::new(None), &labeled, &candidate(&asr.url), |_| {}).await;
+    assert!(tried.stopped.is_some());
+    assert_eq!(asr.requests().len(), STOP_AFTER_FAULTS);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn runs_are_kept_for_the_set(pool: PgPool) {
     let run = Run {
         run_at: Utc.with_ymd_and_hms(2031, 3, 2, 0, 0, 0).unwrap(),

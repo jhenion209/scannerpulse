@@ -109,8 +109,10 @@ pub struct Candidate<'a> {
     pub timeout: Duration,
 }
 
-/// After this many server faults in a row the server is taken to be down,
-/// and the run stops.
+/// After this many calls in a row that the server did not answer, whether it
+/// failed or refused them, the run stops: the server is down or the candidate
+/// (its model, say) is wrong for every call. An answer starts the count over;
+/// an unreadable file neither adds to it nor starts it over.
 pub const STOP_AFTER_FAULTS: usize = 3;
 
 /// What a candidate's run found.
@@ -173,17 +175,17 @@ pub async fn try_candidate(
                     .production
                     .add(&call.said, call.first_output.as_deref().unwrap_or(""));
             }
-            Err(AsrError::Server(why)) => {
+            Err(AsrError::Server(why) | AsrError::Call(why)) => {
                 faults += 1;
                 tried.skipped.push((call.call_id, why.clone()));
                 if faults >= STOP_AFTER_FAULTS {
                     tried.stopped = Some(format!(
-                        "{STOP_AFTER_FAULTS} server faults in a row, the last: {why}"
+                        "{STOP_AFTER_FAULTS} calls in a row without an answer, the last: {why}"
                     ));
                     break;
                 }
             }
-            Err(AsrError::Call(why) | AsrError::Audio(why)) => {
+            Err(AsrError::Audio(why)) => {
                 tried.skipped.push((call.call_id, why));
             }
         }
