@@ -153,3 +153,20 @@ async fn a_new_password_ends_the_accounts_sessions(pool: PgPool) {
         Err(AccountError::NoSuch(_))
     ));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn password_sign_in_is_on_unless_switched_off(pool: PgPool) {
+    assert!(accounts::password_signin(&pool).await.unwrap());
+    accounts::set_password_signin(&pool, false).await.unwrap();
+    assert!(!accounts::password_signin(&pool).await.unwrap());
+    accounts::set_password_signin(&pool, true).await.unwrap();
+    assert!(accounts::password_signin(&pool).await.unwrap());
+    sqlx::query(
+        r#"INSERT INTO settings (key, value) VALUES ('auth.password_signin', '"x"')
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(accounts::password_signin(&pool).await.unwrap());
+}
