@@ -215,6 +215,18 @@ pub trait ExportPart {
     fn system(&self) -> Option<&str>;
 }
 
+impl<T: ExportPart> ExportPart for &T {
+    fn started_at(&self) -> DateTime<Utc> {
+        (**self).started_at()
+    }
+    fn talkgroup(&self) -> Option<i64> {
+        (**self).talkgroup()
+    }
+    fn system(&self) -> Option<&str> {
+        (**self).system()
+    }
+}
+
 impl ExportPart for crate::listing::Row {
     fn started_at(&self) -> DateTime<Utc> {
         self.started_at

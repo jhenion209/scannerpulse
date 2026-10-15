@@ -11,8 +11,11 @@ pub enum Cell {
     Number(f64),
 }
 
+/// The longest text a cell holds, in characters (Excel's limit).
+const MAX_CHARS: usize = 32_767;
+
 /// The workbook's bytes: a header row, then the rows.
-pub fn workbook(sheet_name: &str, header: &[&str], rows: &[Vec<Cell>]) -> Vec<u8> {
+pub fn workbook(sheet_name: &str, header: &[&str], rows: &[Vec<Cell>]) -> Result<Vec<u8>, String> {
     let mut sheet = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
          <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>",
@@ -24,7 +27,7 @@ pub fn workbook(sheet_name: &str, header: &[&str], rows: &[Vec<Cell>]) -> Vec<u8
             match cell {
                 Cell::Text(text) => {
                     sheet.push_str("<c t=\"inlineStr\"><is><t xml:space=\"preserve\">");
-                    sheet.push_str(&escape(text));
+                    sheet.push_str(&escape(&text.chars().take(MAX_CHARS).collect::<String>()));
                     sheet.push_str("</t></is></c>");
                 }
                 Cell::Number(n) if n.is_finite() => sheet.push_str(&format!("<c><v>{n}</v></c>")),
@@ -98,14 +101,14 @@ fn escape(text: &str) -> String {
 
 /// A zip of the parts, stored: local headers, the data, the central
 /// directory and its end record.
-fn zip(parts: &[(&str, String)]) -> Vec<u8> {
+fn zip(parts: &[(&str, String)]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for (name, data) in parts {
         let data = data.as_bytes();
         let crc = crc32fast::hash(data);
-        let offset = out.len() as u32;
-        let size = data.len() as u32;
+        let offset = u32_of(out.len())?;
+        let size = u32_of(data.len())?;
         let name = name.as_bytes();
         // Local file header.
         out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
@@ -131,14 +134,14 @@ fn zip(parts: &[(&str, String)]) -> Vec<u8> {
         central.extend_from_slice(&size.to_le_bytes());
         central.extend_from_slice(&size.to_le_bytes());
         central.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        central.extend_from_slice(&[0u8; 8]); // extra, comment, disk
-        central.extend_from_slice(&[0u8; 2]); // internal attributes
+        // Extra length, comment length, disk number and internal attributes.
+        central.extend_from_slice(&[0u8; 8]);
         central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
         central.extend_from_slice(&offset.to_le_bytes());
         central.extend_from_slice(name);
     }
-    let directory_at = out.len() as u32;
-    let directory_len = central.len() as u32;
+    let directory_at = u32_of(out.len())?;
+    let directory_len = u32_of(central.len())?;
     out.extend_from_slice(&central);
     out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
     out.extend_from_slice(&[0u8; 4]); // disk numbers
@@ -147,8 +150,14 @@ fn zip(parts: &[(&str, String)]) -> Vec<u8> {
     out.extend_from_slice(&directory_len.to_le_bytes());
     out.extend_from_slice(&directory_at.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    out
+    Ok(out)
 }
+
+/// A zip's 32-bit size or offset; a larger file cannot be stored.
+fn u32_of(n: usize) -> Result<u32, String> {
+    u32::try_from(n).map_err(|_| "the workbook is larger than 4 GiB".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cell, escape, workbook};
@@ -177,7 +186,7 @@ mod tests {
             vec![Cell::Text("=HYPERLINK(\"x\")".into()), Cell::Number(2.5)],
             vec![Cell::Text("a < b & \"c\"".into()), Cell::Number(f64::NAN)],
         ];
-        let data = workbook("Calls", &["Text", "Length (s)"], &rows);
+        let data = workbook("Calls", &["Text", "Length (s)"], &rows).unwrap();
         let parts = unzip(&data);
         let names: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
@@ -201,11 +210,63 @@ mod tests {
         assert!(sheet.contains("<c><v>2.5</v></c>"));
         assert!(sheet.contains("a &lt; b &amp; &quot;c&quot;"));
         assert!(sheet.contains("<row r=\"3\">"));
+        // Excel keeps at most 32,767 characters in a cell.
+        let long = workbook("Calls", &["T"], &[vec![Cell::Text("a".repeat(40_000))]]).unwrap();
+        let long_parts = unzip(&long);
+        let long_sheet = &long_parts[4].1;
+        assert!(long_sheet.contains(&format!(">{}</t>", "a".repeat(32_767))));
+        assert!(!long_sheet.contains(&"a".repeat(32_768)));
         // The end record is the last 22 bytes.
         assert_eq!(
             data[data.len() - 22..data.len() - 18],
             0x0605_4b50u32.to_le_bytes()
         );
+    }
+
+    fn u16_at(data: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes(data[at..at + 2].try_into().unwrap())
+    }
+
+    fn u32_at(data: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(data[at..at + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn the_central_directory_reads_back_as_a_zip_reader_reads_it() {
+        let rows = vec![vec![Cell::Text("x".into()), Cell::Number(1.0)]];
+        let data = workbook("Calls", &["A", "B"], &rows).unwrap();
+        let end = data.len() - 22;
+        assert_eq!(data[end..end + 4], 0x0605_4b50u32.to_le_bytes());
+        let count = u16_at(&data, end + 10) as usize;
+        let directory_len = u32_at(&data, end + 12) as usize;
+        let directory_at = u32_at(&data, end + 16) as usize;
+        assert_eq!(
+            directory_at + directory_len,
+            end,
+            "the directory ends at the end record"
+        );
+        let mut pos = directory_at;
+        for _ in 0..count {
+            assert_eq!(
+                data[pos..pos + 4],
+                0x0201_4b50u32.to_le_bytes(),
+                "a central entry"
+            );
+            let name_len = u16_at(&data, pos + 28) as usize;
+            let extra = u16_at(&data, pos + 30) as usize;
+            let comment = u16_at(&data, pos + 32) as usize;
+            let local = u32_at(&data, pos + 42) as usize;
+            let name = &data[pos + 46..pos + 46 + name_len];
+            assert_eq!(
+                data[local..local + 4],
+                0x0403_4b50u32.to_le_bytes(),
+                "a local header"
+            );
+            let local_name_len = u16_at(&data, local + 26) as usize;
+            assert_eq!(&data[local + 30..local + 30 + local_name_len], name);
+            pos += 46 + name_len + extra + comment;
+        }
+        assert_eq!(pos, end, "the walk ends at the end record");
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub async fn export(
     let zone = time_zone(&state).await?;
     let mut conn = state.pool.acquire().await?;
     let page = listing::page(&mut conn, &filter, false, None, MAX_ROWS, TEXT_LIMIT).await?;
+    drop(conn);
     let capped = page.next.is_some();
     let rows: Vec<Vec<Cell>> = page
         .rows
@@ -46,13 +47,8 @@ pub async fn export(
         })
         .collect();
     let oldest_first: Vec<&listing::Row> = page.rows.iter().rev().collect();
-    let name = export_name(
-        &oldest_first.into_iter().cloned().collect::<Vec<_>>(),
-        filter.from,
-        filter.until,
-        zone,
-        "xlsx",
-    );
+    let name = export_name(&oldest_first, filter.from, filter.until, zone, "xlsx");
+    drop(page);
     let data = tokio::task::spawn_blocking(move || {
         workbook(
             "Calls",
@@ -61,7 +57,8 @@ pub async fn export(
         )
     })
     .await
-    .map_err(|_| ApiError::BadRequest("the export failed".into()))?;
+    .map_err(|_| ApiError::BadRequest("the export failed".into()))?
+    .map_err(|message| ApiError::Limit(StatusCode::PAYLOAD_TOO_LARGE, message))?;
     let mut response = Response::new(Body::from(data));
     let headers = response.headers_mut();
     headers.insert(
