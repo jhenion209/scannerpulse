@@ -74,16 +74,25 @@ mod tests {
         }
     }
 
-    /// Calls given oldest first as (talkgroup, start); returned newest first.
+    /// Calls given oldest first as (talkgroup, start), each 2 s long;
+    /// returned newest first.
     fn page(calls: &[(Option<i64>, f64)]) -> Vec<Call> {
+        let calls: Vec<(Option<i64>, f64, f64)> =
+            calls.iter().map(|(t, start)| (*t, *start, 2.0)).collect();
+        timed(&calls)
+    }
+
+    /// Calls given oldest first as (talkgroup, start, length); returned
+    /// newest first.
+    fn timed(calls: &[(Option<i64>, f64, f64)]) -> Vec<Call> {
         let mut page: Vec<Call> = calls
             .iter()
             .enumerate()
-            .map(|(n, (talkgroup, start))| Call {
+            .map(|(n, (talkgroup, start, length))| Call {
                 id: n as u32 + 1,
                 talkgroup: *talkgroup,
                 start: *start,
-                length: 2.0,
+                length: *length,
             })
             .collect();
         page.reverse();
@@ -111,9 +120,66 @@ mod tests {
 
     #[test]
     fn the_newest_call_never_moves() {
-        let mut p = page(&[(Some(1), 0.0), (Some(2), 3.0), (Some(1), 6.0)]);
+        // Talkgroups 1 and 2 take turns; the oldest call moves up a slot,
+        // the newest stays first.
+        let mut p = page(&[
+            (Some(1), 0.0),
+            (Some(2), 3.0),
+            (Some(1), 6.0),
+            (Some(2), 9.0),
+            (Some(1), 12.0),
+        ]);
         smart_sort(&mut p);
-        assert_eq!(ids(&p), vec![3, 2, 1]);
+        assert_eq!(ids(&p), vec![5, 4, 2, 3, 1]);
+    }
+
+    #[test]
+    fn a_call_reaches_three_slots_ahead() {
+        // Only the reach of 3 brings 5 up past 4.
+        let mut p = timed(&[
+            (Some(1), 10.0, 2.0),
+            (Some(2), 50.0, 10.0),
+            (Some(2), 90.0, 10.0),
+            (Some(3), 121.0, 10.0),
+            (Some(1), 124.0, 2.0),
+            (Some(1), 127.0, 2.0),
+        ]);
+        smart_sort(&mut p);
+        assert_eq!(ids(&p), vec![6, 4, 5, 3, 2, 1]);
+    }
+
+    #[test]
+    fn the_pause_is_counted_from_the_end_of_the_nearer_call() {
+        // 3 starts 31 s after 2 starts, but 29 s after 2 ends.
+        let mut p = timed(&[
+            (Some(1), 31.0, 2.0),
+            (Some(2), 41.0, 2.0),
+            (Some(1), 72.0, 10.0),
+            (Some(1), 103.0, 10.0),
+        ]);
+        smart_sort(&mut p);
+        assert_eq!(ids(&p), vec![4, 2, 3, 1]);
+    }
+
+    #[test]
+    fn a_pause_of_exactly_the_gap_does_not_bring_calls_together() {
+        // 3 starts exactly 30 s after 2 ends: no swap; a little sooner swaps.
+        let mut p = timed(&[
+            (Some(1), 0.0, 2.0),
+            (Some(2), 3.0, 2.0),
+            (Some(1), 35.0, 2.0),
+            (Some(3), 40.0, 2.0),
+        ]);
+        smart_sort(&mut p);
+        assert_eq!(ids(&p), vec![4, 3, 2, 1]);
+        let mut p = timed(&[
+            (Some(1), 0.0, 2.0),
+            (Some(2), 3.0, 2.0),
+            (Some(1), 34.5, 2.0),
+            (Some(3), 40.0, 2.0),
+        ]);
+        smart_sort(&mut p);
+        assert_eq!(ids(&p), vec![4, 2, 3, 1]);
     }
 
     #[test]
