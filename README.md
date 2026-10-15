@@ -121,6 +121,11 @@ listen.
   - `/api/admin/viewers`: every open page of every host (its address,
     whether that address is local, its browser and whether an admin opened
     it), refreshed every 30 seconds; a page's row goes when it closes;
+  - `/api/admin/jobs` lists the jobs, `/api/admin/jobs/<id>` shows one and
+    `POST /api/admin/jobs/<id>/stop` stops it; `GET /api/admin/jobs/queue`
+    (`talkgroup_id`, `from`, `to`) counts the calls a queue job would take
+    and `POST` starts it; `POST /api/admin/jobs/asr-run` (`set`, `server`,
+    `model`, `prompt`) starts a candidate's run;
   - `/api/admin/accounts` lists and adds admins;
     `/api/admin/accounts/<login>/password`, `/disable` and `/enable` change
     one, as the `admin` command does;
@@ -140,6 +145,14 @@ listen.
 - `favorites list`, `favorites set NAME SYSTEM/NUMBER...` and
   `favorites remove NAME` manage the favorite lists; `viewers` lists the
   open pages.
+- `jobs list`, `jobs show ID` and `jobs stop ID` follow and stop the long
+  jobs, which the host holding the lease runs one at a time, a step at a
+  time: a stop takes effect between steps, and after a failover the other
+  host resumes a job where it was. `jobs queue [--talkgroup SYSTEM/NUMBER]
+  [--from DAY] [--to DAY] [--yes]` queues past calls for transcription (one
+  talkgroup's, or the backlog of every talkgroup whose transcription is on),
+  and `jobs asr-run --set NAME --server URL --model MODEL [--prompt-file
+  FILE]` is `asr run` as a job.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 

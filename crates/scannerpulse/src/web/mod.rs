@@ -10,6 +10,10 @@ pub mod client;
 mod edit;
 mod error;
 mod info;
+mod jobs;
+
+/// The jobs the admin page and `jobs list` show.
+pub use jobs::LISTED as JOBS_LISTED;
 pub mod live;
 pub mod oidc;
 mod sheet;
@@ -193,6 +197,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/settings", get(admin::settings_list))
         .route("/api/admin/viewers", get(viewers::list))
+        .route("/api/admin/jobs", get(jobs::list))
+        .route(
+            "/api/admin/jobs/queue",
+            get(jobs::queue_preview).post(jobs::queue_start),
+        )
+        .route("/api/admin/jobs/asr-run", post(jobs::asr_start))
+        .route("/api/admin/jobs/{id}", get(jobs::one))
+        .route("/api/admin/jobs/{id}/stop", post(jobs::stop))
         .route(
             "/api/admin/favorites/{name}",
             axum::routing::put(admin::favorites_set).delete(admin::favorites_remove),

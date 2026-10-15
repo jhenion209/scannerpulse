@@ -11,7 +11,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::{accounts, favorites, ingest, lease, settings, web};
+use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, web};
 use serde_json::json;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
@@ -41,6 +41,10 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse favorites set NAME SYSTEM/NUMBER...
        scannerpulse favorites remove NAME
        scannerpulse viewers
+       scannerpulse jobs list
+       scannerpulse jobs show|stop ID
+       scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
+       scannerpulse jobs asr-run --set NAME --server URL --model MODEL [--prompt-file FILE]
        scannerpulse --version
        scannerpulse --help
 
@@ -88,7 +92,16 @@ settings    list, set or remove the administrator's settings; a value is JSON
             (text in double quotes, a number, true or false, or a list) and
             is checked as the parts that read it check it
 favorites   list, set or remove the named favorite lists of talkgroups
-viewers     list the open pages of every web host";
+viewers     list the open pages of every web host
+jobs        the long jobs, which the host holding the lease runs one at a time:
+  list      the newest 50
+  show      one job and its progress
+  stop      stop a job (a running one stops after its current step)
+  queue     queue past calls for transcription: those of one talkgroup, or
+            without --talkgroup the backlog of every talkgroup whose
+            transcription is on; from DAY and through DAY (local days) when
+            given; asks first unless --yes
+  asr-run   asr run as a job: the set's labeled calls, one a step";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -113,6 +126,7 @@ enum Command {
     Settings(Settings),
     Favorites(Favorites),
     Viewers,
+    Jobs(Jobs),
     Version,
     Help,
 }
@@ -152,6 +166,59 @@ enum Admin {
     Enable(String),
     List,
     PasswordSignin(bool),
+}
+
+/// The jobs' commands.
+#[derive(Debug, PartialEq, Eq)]
+enum Jobs {
+    List,
+    Show(i64),
+    Stop(i64),
+    Queue {
+        talkgroup: Option<String>,
+        from: Option<String>,
+        to: Option<String>,
+        yes: bool,
+    },
+    AsrRun {
+        set: String,
+        server: String,
+        model: String,
+        prompt_file: Option<String>,
+    },
+}
+
+fn parse_jobs(args: &[&str]) -> Option<Jobs> {
+    let text = |found: &HashMap<&str, &str>, flag: &str| found.get(flag).map(|v| v.to_string());
+    match args {
+        ["list"] => Some(Jobs::List),
+        ["show", id] => id.parse().ok().map(Jobs::Show),
+        ["stop", id] => id.parse().ok().map(Jobs::Stop),
+        ["queue", rest @ ..] => {
+            let found = flags(rest, &[], &["--talkgroup", "--from", "--to"], &["--yes"])?;
+            Some(Jobs::Queue {
+                talkgroup: text(&found, "--talkgroup"),
+                from: text(&found, "--from"),
+                to: text(&found, "--to"),
+                yes: found.contains_key("--yes"),
+            })
+        }
+        ["asr-run", rest @ ..] => {
+            let found = flags(
+                rest,
+                &["--set", "--server", "--model"],
+                &["--prompt-file"],
+                &[],
+            )?;
+            Some(Jobs::AsrRun {
+                set: text(&found, "--set")?,
+                server: text(&found, "--server")?,
+                model: text(&found, "--model")?,
+                prompt_file: text(&found, "--prompt-file"),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// The favorite lists' commands.
@@ -318,6 +385,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["settings", rest @ ..] => parse_settings(rest).map(Command::Settings),
         ["favorites", rest @ ..] => parse_favorites(rest).map(Command::Favorites),
         ["viewers"] => Some(Command::Viewers),
+        ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -410,6 +478,13 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("favorites: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Jobs(command)) => match jobs_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("jobs: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -700,6 +775,122 @@ async fn favorites_command(command: Favorites) -> CommandResult {
         Favorites::Remove(name) => {
             favorites::remove(&mut conn, &name).await?;
             println!("{name} is removed");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Who started a job from the command line.
+fn command_line_user() -> String {
+    let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
+    format!("{user} on the command line")
+}
+
+fn job_line(job: &jobs::Job) -> String {
+    let progress = match job.total {
+        Some(total) => format!("{} of {total}", job.done),
+        None => job.done.to_string(),
+    };
+    format!(
+        "{}\t{}\t{}\t{progress}\t{}\t{}",
+        job.id, job.kind, job.state, job.started_by, job.message
+    )
+}
+
+async fn jobs_command(command: Jobs) -> CommandResult {
+    let mut conn = connect().await?;
+    match command {
+        Jobs::List => {
+            for job in jobs::list(&mut conn, web::JOBS_LISTED).await? {
+                println!("{}", job_line(&job));
+            }
+        }
+        Jobs::Show(id) => {
+            let job = jobs::get(&mut conn, id)
+                .await?
+                .ok_or(jobs::JobError::NoSuch(id))?;
+            println!("{}", serde_json::to_string_pretty(&job)?);
+        }
+        Jobs::Stop(id) => match jobs::stop(&mut conn, id, &command_line_user()).await? {
+            jobs::Stopped::Now => println!("job {id} is stopped"),
+            jobs::Stopped::AfterStep => println!("job {id} stops after its current step"),
+        },
+        Jobs::Queue {
+            talkgroup,
+            from,
+            to,
+            yes,
+        } => {
+            let talkgroup_id = match &talkgroup {
+                None => None,
+                Some(text) => {
+                    let (system, number) =
+                        talkgroup_name(text).ok_or("write the talkgroup as SYSTEM/NUMBER")?;
+                    let id: Option<i32> = sqlx::query_scalar(
+                        "SELECT t.id FROM talkgroups t JOIN systems s ON s.id = t.system_id \
+                         WHERE s.name = $1 AND t.number = $2",
+                    )
+                    .bind(system)
+                    .bind(number)
+                    .fetch_optional(&mut conn)
+                    .await?;
+                    Some(id.ok_or_else(|| format!("there is no talkgroup {text}"))?)
+                }
+            };
+            let day = |text: &Option<String>| -> Result<Option<NaiveDate>, String> {
+                text.as_deref()
+                    .map(|t| {
+                        NaiveDate::parse_from_str(t, "%Y-%m-%d")
+                            .map_err(|_| format!("{t} is not a day such as 2031-01-15"))
+                    })
+                    .transpose()
+            };
+            let past = jobs::queue_plan(&mut conn, talkgroup_id, day(&from)?, day(&to)?).await?;
+            let count = scannerpulse::queue::count_past(&mut conn, &past).await?;
+            let which = talkgroup
+                .as_deref()
+                .unwrap_or("the talkgroups whose transcription is on");
+            println!(
+                "{count} calls of {which} were never tried and are at least {} ms long",
+                past.min_ms
+            );
+            if count == 0 {
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !yes && !confirm(&format!("start a job to queue {count} calls? [y/N] "))? {
+                println!("no job was started");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (id, _) = jobs::start_queue(&mut conn, &past, &command_line_user()).await?;
+            println!("job {id} is started; `scannerpulse jobs show {id}` follows it");
+        }
+        Jobs::AsrRun {
+            set,
+            server,
+            model,
+            prompt_file,
+        } => {
+            let prompt = match prompt_file {
+                None => None,
+                Some(file) => Some(
+                    std::fs::read_to_string(&file)
+                        .map_err(|error| format!("{file}: {error}"))?
+                        .trim()
+                        .to_string(),
+                ),
+            };
+            let (id, count) = jobs::start_asr_run(
+                &mut conn,
+                &set,
+                &server,
+                &model,
+                prompt,
+                &command_line_user(),
+            )
+            .await?;
+            println!(
+                "job {id} is started: {count} labeled calls; `scannerpulse jobs show {id}` follows it"
+            );
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -1147,7 +1338,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Admin, Asr, Command, Favorites, Settings, parse, talkgroup_list};
+    use super::{Admin, Asr, Command, Favorites, Jobs, Settings, parse, talkgroup_list};
 
     #[test]
     fn db_update_runs_with_or_without_quiet() {
@@ -1376,6 +1567,46 @@ mod tests {
         );
         assert_eq!(parse(&["viewers"]), Some(Command::Viewers));
         assert_eq!(parse(&["viewers", "all"]), None);
+    }
+
+    #[test]
+    fn jobs_take_an_id_or_their_flags() {
+        assert_eq!(parse(&["jobs", "list"]), Some(Command::Jobs(Jobs::List)));
+        assert_eq!(
+            parse(&["jobs", "stop", "7"]),
+            Some(Command::Jobs(Jobs::Stop(7)))
+        );
+        assert_eq!(parse(&["jobs", "stop", "seven"]), None);
+        assert_eq!(
+            parse(&["jobs", "queue", "--yes"]),
+            Some(Command::Jobs(Jobs::Queue {
+                talkgroup: None,
+                from: None,
+                to: None,
+                yes: true
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "jobs",
+                "queue",
+                "--talkgroup",
+                "SYSA/7",
+                "--from",
+                "2031-01-01"
+            ]),
+            Some(Command::Jobs(Jobs::Queue {
+                talkgroup: Some("SYSA/7".into()),
+                from: Some("2031-01-01".into()),
+                to: None,
+                yes: false
+            }))
+        );
+        assert_eq!(
+            parse(&["jobs", "asr-run", "--set", "s1", "--server", "u"]),
+            None
+        );
+        assert_eq!(parse(&["jobs", "queue", "--day", "x"]), None);
     }
 
     #[test]

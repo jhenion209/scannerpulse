@@ -213,6 +213,48 @@ pub async fn start_queue(
     Ok((id, count))
 }
 
+/// The calls a queue job takes: those of one talkgroup, or with `None` the
+/// backlog of every talkgroup whose transcription is on; from the local day
+/// `from` and through the local day `to`, when given; at least the minimum
+/// length of the transcription settings, which must be on.
+pub async fn queue_plan(
+    conn: &mut PgConnection,
+    talkgroup_id: Option<i32>,
+    from: Option<chrono::NaiveDate>,
+    to: Option<chrono::NaiveDate>,
+) -> Result<crate::queue::Past, JobError> {
+    let refused = |error: crate::settings::SettingsError| JobError::Refused(error.to_string());
+    let zone = crate::settings::load(&mut *conn)
+        .await
+        .map_err(refused)?
+        .time_zone;
+    let transcription = crate::settings::load_transcription(&mut *conn)
+        .await
+        .map_err(refused)?
+        .ok_or_else(|| JobError::Refused("transcription is off: turn it on first".into()))?;
+    if let (Some(from), Some(to)) = (from, to) {
+        if to < from {
+            return Err(JobError::Refused(format!("{to} is before {from}")));
+        }
+    }
+    let start =
+        |day: chrono::NaiveDate| crate::backfill::start_of(day, zone).map_err(JobError::Refused);
+    let until = match to {
+        None => None,
+        Some(day) => {
+            Some(start(day.succ_opt().ok_or_else(|| {
+                JobError::Refused("the last day is too far".into())
+            })?)?)
+        }
+    };
+    Ok(crate::queue::Past {
+        talkgroup_id,
+        from: from.map(start).transpose()?,
+        until,
+        min_ms: transcription.min_duration_ms,
+    })
+}
+
 /// What one step of a job did.
 enum Outcome {
     /// There is more to do: the counts and the state to resume from.

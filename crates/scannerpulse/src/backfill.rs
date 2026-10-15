@@ -96,7 +96,7 @@ pub async fn run(
 
 /// The first instant of a local day. A day that starts in a spring gap starts
 /// at the gap's end.
-fn start_of(day: NaiveDate, zone: Tz) -> Result<chrono::DateTime<Utc>, String> {
+pub fn start_of(day: NaiveDate, zone: Tz) -> Result<chrono::DateTime<Utc>, String> {
     let midnight = day.and_time(NaiveTime::MIN);
     zone.from_local_datetime(&midnight)
         .earliest()
