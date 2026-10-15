@@ -20,6 +20,15 @@ listen.
   The rest of its configuration is in the database: the `time_zone` setting,
   the primary archive location and the enabled sources. Until a web interface
   exists, these are added with SQL.
+  When transcription is on, ingest also sends each new call of a talkgroup
+  that has transcription on, and at least the minimum length, to an
+  OpenAI-compatible transcription server (`/v1/audio/transcriptions`), newest
+  calls first. The `transcription.*` settings give the servers (a URL and how
+  many requests each takes at once), the model, the minimum length, and an
+  optional language, prompt and term list. A server that needs a key reads it
+  from `SCANNERPULSE_TRANSCRIPTION_API_KEY`; keys never go in the database.
+- `transcribe --talkgroup SYSTEM/NUMBER --from DAY --to DAY [--yes]` queues the
+  past calls of one talkgroup for transcription.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
