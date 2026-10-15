@@ -109,13 +109,30 @@ async fn an_open_page_is_a_viewer_until_it_closes(pool: PgPool) {
 async fn a_refresh_keeps_the_open_pages_and_clears_the_rest(pool: PgPool) {
     let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
     state.host = "web-a".into();
-    state.viewers.lock().unwrap().insert("open".into());
+    let page = viewers::Page {
+        address: "192.0.2.9".into(),
+        user_agent: String::new(),
+        admin: None,
+        connected_at: chrono::Utc::now(),
+    };
+    state
+        .viewers
+        .lock()
+        .unwrap()
+        .insert("open".into(), Some(page.clone()));
+    // A page whose row was lost (a failed write, or another host's pruning).
+    state
+        .viewers
+        .lock()
+        .unwrap()
+        .insert("lost".into(), Some(page));
     sqlx::query(
         "INSERT INTO viewers (id, host, address, user_agent, connected_at, seen_at) VALUES \
          ('open', 'web-a', '192.0.2.9', '', now(), now() - interval '60 seconds'), \
          ('ghost', 'web-a', '192.0.2.9', '', now(), now()), \
          ('other', 'web-b', '192.0.2.9', '', now(), now()), \
-         ('stopped', 'web-c', '192.0.2.9', '', now(), now() - interval '91 seconds')",
+         ('stopped', 'web-c', '192.0.2.9', '', now(), now() - interval '91 seconds'), \
+         ('opening', 'web-a', '192.0.2.9', '', now() + interval '1 hour', now())",
     )
     .execute(&pool)
     .await
@@ -128,8 +145,17 @@ async fn a_refresh_keeps_the_open_pages_and_clears_the_rest(pool: PgPool) {
     .await
     .unwrap();
     // This host's closed page and a stopped host's page are gone; the other
-    // host's page is that host's to keep.
-    assert_eq!(left, [("open".into(), true), ("other".into(), true)]);
+    // host's page is that host's to keep; a lost row is written again; a
+    // row written after the refresh began (a page opening meanwhile) stays.
+    assert_eq!(
+        left,
+        [
+            ("lost".into(), true),
+            ("open".into(), true),
+            ("opening".into(), true),
+            ("other".into(), true)
+        ]
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! pages. A live snapshot only: a page's row goes when the page closes.
 //! These writes are best effort and never hold up the live feed.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,15 +25,21 @@ pub const STALE_SECONDS: i32 = 90;
 /// The most of a browser's description that is kept.
 const USER_AGENT: usize = 512;
 
-/// The ids of the pages this host holds open.
-pub type Open = Arc<Mutex<HashSet<String>>>;
+/// What a page's row holds, once its first write has found it out.
+#[derive(Debug, Clone)]
+pub struct Page {
+    pub address: String,
+    pub user_agent: String,
+    pub admin: Option<String>,
+    pub connected_at: DateTime<Utc>,
+}
 
-fn open_ids(open: &Open) -> Vec<String> {
-    open.lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-        .cloned()
-        .collect()
+/// The pages this host holds open, by id: `None` until the page's first
+/// write has found out its address and admin.
+pub type Open = Arc<Mutex<HashMap<String, Option<Page>>>>;
+
+fn pages(open: &Open) -> std::sync::MutexGuard<'_, HashMap<String, Option<Page>>> {
+    open.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// An open page: its id, and the write that records its row.
@@ -46,11 +52,7 @@ pub struct Viewer {
 /// slow database never holds up the page's feed.
 pub fn opened(state: &AppState, peer: IpAddr, headers: HeaderMap) -> Viewer {
     let id = crate::sessions::random_hex(16);
-    state
-        .viewers
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(id.clone());
+    pages(&state.viewers).insert(id.clone(), None);
     let (task_state, task_id) = (state.clone(), id.clone());
     let written = tokio::spawn(async move {
         if let Err(error) = record(&task_state, &task_id, peer, &headers).await {
@@ -73,27 +75,31 @@ async fn record(state: &AppState, id: &str, peer: IpAddr, headers: &HeaderMap) -
         .chars()
         .take(USER_AGENT)
         .collect();
-    sqlx::query(
+    let connected_at: DateTime<Utc> = sqlx::query_scalar(
         "INSERT INTO viewers (id, host, address, user_agent, admin, connected_at, seen_at) \
-         VALUES ($1, $2, $3, $4, $5, now(), now())",
+         VALUES ($1, $2, $3, $4, $5, now(), now()) RETURNING connected_at",
     )
     .bind(id)
     .bind(&state.host)
     .bind(address.to_string())
     .bind(&user_agent)
-    .bind(admin)
-    .execute(&state.pool)
+    .bind(&admin)
+    .fetch_one(&state.pool)
     .await?;
+    if let Some(page) = pages(&state.viewers).get_mut(id) {
+        *page = Some(Page {
+            address: address.to_string(),
+            user_agent,
+            admin,
+            connected_at,
+        });
+    }
     Ok(())
 }
 
 /// Removes a closed page's row, once the write that recorded it is done.
 pub fn closed(state: &AppState, viewer: Viewer) {
-    state
-        .viewers
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&viewer.id);
+    pages(&state.viewers).remove(&viewer.id);
     let state = state.clone();
     tokio::spawn(async move {
         let _ = viewer.written.await;
@@ -107,18 +113,48 @@ pub fn closed(state: &AppState, viewer: Viewer) {
     });
 }
 
-/// Marks this host's open pages as seen, removes its rows of pages it no
-/// longer holds, and removes every row a stopped host left behind.
+/// Writes again the row of every page this host holds open, removes its
+/// rows of pages it no longer holds, and removes every row a stopped host
+/// left behind. Only rows written before the refresh began are removed: a
+/// page opened meanwhile keeps its row.
 pub async fn refresh(state: &AppState) -> sqlx::Result<()> {
-    let open = open_ids(&state.viewers);
-    sqlx::query("UPDATE viewers SET seen_at = now() WHERE host = $1 AND id = ANY($2)")
-        .bind(&state.host)
-        .bind(&open)
-        .execute(&state.pool)
+    let began: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&state.pool)
         .await?;
-    sqlx::query("DELETE FROM viewers WHERE host = $1 AND NOT (id = ANY($2))")
+    let (open, known): (Vec<String>, Vec<(String, Page)>) = {
+        let pages = pages(&state.viewers);
+        (
+            pages.keys().cloned().collect(),
+            pages
+                .iter()
+                .filter_map(|(id, page)| Some((id.clone(), page.clone()?)))
+                .collect(),
+        )
+    };
+    let ids: Vec<&str> = known.iter().map(|(id, _)| id.as_str()).collect();
+    let addresses: Vec<&str> = known.iter().map(|(_, p)| p.address.as_str()).collect();
+    let agents: Vec<&str> = known.iter().map(|(_, p)| p.user_agent.as_str()).collect();
+    let admins: Vec<Option<&str>> = known.iter().map(|(_, p)| p.admin.as_deref()).collect();
+    let since: Vec<DateTime<Utc>> = known.iter().map(|(_, p)| p.connected_at).collect();
+    sqlx::query(
+        "INSERT INTO viewers (id, host, address, user_agent, admin, connected_at, seen_at) \
+         SELECT u.id, $1, u.address, u.agent, u.admin, u.since, now() \
+         FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[]) \
+              AS u(id, address, agent, admin, since) \
+         ON CONFLICT (id) DO UPDATE SET seen_at = now()",
+    )
+    .bind(&state.host)
+    .bind(&ids)
+    .bind(&addresses)
+    .bind(&agents)
+    .bind(&admins)
+    .bind(&since)
+    .execute(&state.pool)
+    .await?;
+    sqlx::query("DELETE FROM viewers WHERE host = $1 AND NOT (id = ANY($2)) AND connected_at < $3")
         .bind(&state.host)
         .bind(&open)
+        .bind(began)
         .execute(&state.pool)
         .await?;
     sqlx::query("DELETE FROM viewers WHERE seen_at < now() - make_interval(secs => $1)")
