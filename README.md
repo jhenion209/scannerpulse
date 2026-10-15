@@ -97,6 +97,8 @@ listen.
     `/api/auth/methods` says which ways to sign in are on. Behind a proxy, list
     its addresses in the setting `web.trusted_proxies` (for example
     `["192.0.2.10"]`): only then is its `X-Forwarded-For` believed;
+  - `/api/admin/settings` lists the settings, and `PUT` or `DELETE`
+    `/api/admin/settings/<key>` (`value`) changes one, as `settings` does;
   - `/api/admin/accounts` lists and adds admins;
     `/api/admin/accounts/<login>/password`, `/disable` and `/enable` change
     one, as the `admin` command does;
@@ -107,6 +109,12 @@ listen.
   `password` ask for the password twice (at least 12 characters); a new
   password and a disabled account end that account's sessions; the last
   enabled account cannot be disabled. Passwords are kept as Argon2id hashes.
+- `settings list`, `settings set KEY JSON` and `settings unset KEY` show and
+  change the administrator's settings, such as `settings set time_zone
+  '"America/Chicago"'`. A change is checked as the part that reads the
+  setting checks it, so a bad value is refused before it is saved; a name no
+  part reads is refused too. The admin page's `/api/admin/settings` does the
+  same.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 

@@ -140,6 +140,11 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/accounts/{login}/disable",
             post(admin::accounts_disable),
         )
+        .route("/api/admin/settings", get(admin::settings_list))
+        .route(
+            "/api/admin/settings/{key}",
+            axum::routing::put(admin::settings_set).delete(admin::settings_unset),
+        )
         .route(
             "/api/admin/accounts/{login}/enable",
             post(admin::accounts_enable),

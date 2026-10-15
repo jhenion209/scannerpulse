@@ -34,6 +34,9 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse admin add|password|disable|enable NAME
        scannerpulse admin list
        scannerpulse admin password-signin on|off
+       scannerpulse settings list
+       scannerpulse settings set KEY JSON
+       scannerpulse settings unset KEY
        scannerpulse --version
        scannerpulse --help
 
@@ -73,7 +76,10 @@ admin       the admin accounts:
   list      list the accounts
   password-signin
             allow or refuse signing in with a password (on by default; the
-            command line can always turn it back on)";
+            command line can always turn it back on)
+settings    list, set or remove the administrator's settings; a value is JSON
+            (text in double quotes, a number, true or false, or a list) and
+            is checked as the parts that read it check it";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -95,6 +101,7 @@ enum Command {
     },
     Asr(Asr),
     Admin(Admin),
+    Settings(Settings),
     Version,
     Help,
 }
@@ -134,6 +141,23 @@ enum Admin {
     Enable(String),
     List,
     PasswordSignin(bool),
+}
+
+/// The settings' commands.
+#[derive(Debug, PartialEq, Eq)]
+enum Settings {
+    List,
+    Set(String, String),
+    Unset(String),
+}
+
+fn parse_settings(args: &[&str]) -> Option<Settings> {
+    match args {
+        ["list"] => Some(Settings::List),
+        ["set", key, value] => Some(Settings::Set(key.to_string(), value.to_string())),
+        ["unset", key] => Some(Settings::Unset(key.to_string())),
+        _ => None,
+    }
 }
 
 fn parse_admin(args: &[&str]) -> Option<Admin> {
@@ -260,6 +284,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         }),
         ["asr", rest @ ..] => parse_asr(rest).map(Command::Asr),
         ["admin", rest @ ..] => parse_admin(rest).map(Command::Admin),
+        ["settings", rest @ ..] => parse_settings(rest).map(Command::Settings),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -338,6 +363,13 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("admin: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Settings(command)) => match settings_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("settings: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -550,6 +582,32 @@ async fn admin(command: Admin) -> CommandResult {
         Admin::PasswordSignin(on) => {
             accounts::set_password_signin(&mut conn, on).await?;
             println!("password sign-in is {}", if on { "on" } else { "off" });
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn settings_command(command: Settings) -> CommandResult {
+    let mut conn = connect().await?;
+    match command {
+        Settings::List => {
+            let mut values: Vec<(String, serde_json::Value)> =
+                settings::all(&mut conn).await?.into_iter().collect();
+            values.sort_by(|a, b| a.0.cmp(&b.0));
+            for (key, value) in values {
+                println!("{key}\t{value}");
+            }
+        }
+        Settings::Set(key, text) => {
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+                format!("{text} is not JSON: write text in quotes, such as '\"UTC\"'")
+            })?;
+            settings::change(&mut conn, &key, Some(&value)).await?;
+            println!("{key} is {value}");
+        }
+        Settings::Unset(key) => {
+            settings::change(&mut conn, &key, None).await?;
+            println!("{key} is removed");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -977,7 +1035,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Admin, Asr, Command, parse, talkgroup_list};
+    use super::{Admin, Asr, Command, Settings, parse, talkgroup_list};
 
     #[test]
     fn db_update_runs_with_or_without_quiet() {
@@ -1167,6 +1225,27 @@ mod tests {
         assert_eq!(parse(&["admin", "add", "ann", "bob"]), None);
         assert_eq!(parse(&["admin", "password-signin", "yes"]), None);
         assert_eq!(parse(&["admin", "remove", "ann"]), None);
+    }
+
+    #[test]
+    fn settings_take_a_key_and_a_value() {
+        assert_eq!(
+            parse(&["settings", "list"]),
+            Some(Command::Settings(Settings::List))
+        );
+        assert_eq!(
+            parse(&["settings", "set", "time_zone", "\"UTC\""]),
+            Some(Command::Settings(Settings::Set(
+                "time_zone".into(),
+                "\"UTC\"".into()
+            )))
+        );
+        assert_eq!(
+            parse(&["settings", "unset", "time_zone"]),
+            Some(Command::Settings(Settings::Unset("time_zone".into())))
+        );
+        assert_eq!(parse(&["settings", "set", "time_zone"]), None);
+        assert_eq!(parse(&["settings"]), None);
     }
 
     #[test]

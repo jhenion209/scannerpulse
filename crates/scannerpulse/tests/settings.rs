@@ -296,3 +296,145 @@ async fn the_improvement_switches_are_read_from_the_table(pool: PgPool) -> sqlx:
     assert!(!read.labeler_list_public);
     Ok(())
 }
+
+// Changing a setting: `check` refuses what the reader would refuse.
+
+fn refused(key: &str, value: Option<Value>, stored: &[(&str, Value)]) -> bool {
+    settings::check(key, value.as_ref(), &values(stored)).is_err()
+}
+
+#[test]
+fn a_setting_no_part_reads_is_refused() {
+    let error =
+        settings::check("oidc.client_secret", Some(&json!("s")), &HashMap::new()).unwrap_err();
+    assert!(matches!(error, SettingsError::Unknown(_)), "{error}");
+}
+
+#[test]
+fn ingest_settings_are_checked_together() {
+    let zone = [("time_zone", json!("America/Chicago"))];
+    assert!(refused("time_zone", Some(json!("Mars/Olympus")), &[]));
+    assert!(!refused("time_zone", Some(json!("UTC")), &[]));
+    // The grace period's default is 900: a rescan of 900 is not below it.
+    assert!(refused("ingest.rescan_seconds", Some(json!(900)), &zone));
+    assert!(!refused("ingest.rescan_seconds", Some(json!(899)), &zone));
+    assert!(refused("ingest.rescan_seconds", Some(json!(0)), &zone));
+    // The others can be set before the zone, but the zone cannot be removed.
+    assert!(!refused("ingest.rescan_seconds", Some(json!(30)), &[]));
+    assert!(refused("ingest.rescan_seconds", Some(json!(900)), &[]));
+    assert!(refused("time_zone", None, &zone));
+}
+
+#[test]
+fn transcription_values_are_checked_even_while_it_is_off() {
+    assert!(refused(
+        "transcription.servers",
+        Some(json!([{"url": "ftp://x/"}])),
+        &[]
+    ));
+    assert!(refused(
+        "transcription.servers",
+        Some(json!([{"url": "http://u:p@x/"}])),
+        &[]
+    ));
+    assert!(!refused(
+        "transcription.servers",
+        Some(json!([{"url": "http://x:8000/v1/audio/transcriptions"}])),
+        &[]
+    ));
+    assert!(refused(
+        "transcription.language",
+        Some(json!("English")),
+        &[]
+    ));
+    assert!(!refused(
+        "transcription.prompt",
+        Some(json!("Fire dispatch.")),
+        &[]
+    ));
+    // Turning it on needs the servers, the model and the minimum length.
+    assert!(refused("transcription.enabled", Some(json!(true)), &[]));
+    let ready = [
+        ("transcription.servers", json!([{"url": "http://x:8000/"}])),
+        ("transcription.model", json!("model-x")),
+        ("transcription.min_duration_ms", json!(1000)),
+    ];
+    assert!(!refused("transcription.enabled", Some(json!(true)), &ready));
+    assert!(refused("transcription.enabled", Some(json!("yes")), &ready));
+    // While it is on, a needed value cannot be removed.
+    let mut on = ready.to_vec();
+    on.push(("transcription.enabled", json!(true)));
+    assert!(refused("transcription.model", None, &on));
+}
+
+#[test]
+fn the_web_services_settings_have_their_forms() {
+    assert!(!refused("maintenance.enabled", Some(json!(true)), &[]));
+    assert!(refused("maintenance.enabled", Some(json!("on")), &[]));
+    assert!(!refused(
+        "web.trusted_proxies",
+        Some(json!(["192.0.2.10", "fd00::2"])),
+        &[]
+    ));
+    assert!(refused(
+        "web.trusted_proxies",
+        Some(json!(["proxy.lan"])),
+        &[]
+    ));
+    assert!(refused(
+        "web.trusted_proxies",
+        Some(json!("192.0.2.10")),
+        &[]
+    ));
+    assert!(!refused(
+        "web.system_order",
+        Some(json!(["SYSB", "SYSA"])),
+        &[]
+    ));
+    assert!(refused("web.system_order", Some(json!([1, 2])), &[]));
+    assert!(!refused(
+        "purge.holding_path",
+        Some(json!("/srv/purged")),
+        &[]
+    ));
+    assert!(refused("purge.holding_path", Some(json!("purged")), &[]));
+    assert!(refused(
+        "purge.holding_path",
+        Some(json!("/srv/../etc")),
+        &[]
+    ));
+    assert!(!refused("auth.password_signin", None, &[]));
+    assert!(refused("labeler_list.public", Some(json!(1)), &[]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_refused_change_leaves_the_stored_value(pool: PgPool) {
+    let mut conn = pool.acquire().await.unwrap();
+    settings::change(&mut conn, "time_zone", Some(&json!("UTC")))
+        .await
+        .unwrap();
+    assert!(
+        settings::change(&mut conn, "time_zone", Some(&json!("Nowhere")))
+            .await
+            .is_err()
+    );
+    assert!(
+        settings::change(&mut conn, "time_zone", None)
+            .await
+            .is_err()
+    );
+    let stored = settings::all(&pool).await.unwrap();
+    assert_eq!(stored["time_zone"], json!("UTC"));
+    settings::change(&mut conn, "ingest.rescan_seconds", Some(&json!(20)))
+        .await
+        .unwrap();
+    settings::change(&mut conn, "ingest.rescan_seconds", None)
+        .await
+        .unwrap();
+    assert!(
+        !settings::all(&pool)
+            .await
+            .unwrap()
+            .contains_key("ingest.rescan_seconds")
+    );
+}

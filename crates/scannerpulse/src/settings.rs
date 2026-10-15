@@ -38,6 +38,8 @@ pub enum SettingsError {
         key: &'static str,
         why: String,
     },
+    /// No part of ScannerPulse reads a setting of this name.
+    Unknown(String),
     Database(sqlx::Error),
 }
 
@@ -47,6 +49,9 @@ impl fmt::Display for SettingsError {
             SettingsError::Missing(key) => write!(f, "the setting {key} is not set"),
             SettingsError::Invalid { key, why } => {
                 write!(f, "the setting {key} is not valid: {why}")
+            }
+            SettingsError::Unknown(key) => {
+                write!(f, "no part of ScannerPulse reads a setting {key:?}")
             }
             SettingsError::Database(error) => write!(f, "the settings could not be read: {error}"),
         }
@@ -361,4 +366,134 @@ fn flag(values: &HashMap<String, Value>, key: &'static str) -> Result<bool, Sett
             .as_bool()
             .ok_or_else(|| invalid(key, format!("{value} is not true or false"))),
     }
+}
+
+/// The settings that only the web service reads, each with its check.
+pub const WEB_KEYS: [&str; 5] = [
+    "maintenance.enabled",
+    "auth.password_signin",
+    "web.trusted_proxies",
+    "web.system_order",
+    "purge.holding_path",
+];
+
+/// Whether the settings would be valid with `key` set to `value`, or
+/// removed when `value` is `None`, given the other stored `values`: the same
+/// checks as the parts that read them. A group that has a switch is checked
+/// whole when its switch is on; while it is off, a value that is not set yet
+/// does not stop another from being saved, but a malformed one does.
+pub fn check(
+    key: &str,
+    value: Option<&Value>,
+    values: &HashMap<String, Value>,
+) -> Result<(), SettingsError> {
+    let mut after = values.clone();
+    match value {
+        Some(value) => after.insert(key.to_string(), value.clone()),
+        None => after.remove(key),
+    };
+    if KEYS.contains(&key) {
+        return match from_values(&after) {
+            // Ingest cannot start without a zone, but the others can be set first.
+            Err(SettingsError::Missing("time_zone")) if key != "time_zone" => {
+                after.insert("time_zone".into(), Value::from("UTC"));
+                from_values(&after).map(drop)
+            }
+            other => other.map(drop),
+        };
+    }
+    if TRANSCRIPTION_KEYS.contains(&key) {
+        let enabled = flag(&after, "transcription.enabled")?;
+        if enabled {
+            return transcription_from_values(&after).map(drop);
+        }
+        // Off: each value present must still be one transcription can use.
+        let mut trial = after;
+        trial.insert("transcription.enabled".into(), Value::Bool(true));
+        trial
+            .entry("transcription.servers".into())
+            .or_insert_with(|| serde_json::json!([{"url": "http://placeholder.invalid/"}]));
+        trial
+            .entry("transcription.model".into())
+            .or_insert_with(|| Value::from("placeholder"));
+        trial
+            .entry("transcription.min_duration_ms".into())
+            .or_insert_with(|| Value::from(0));
+        return transcription_from_values(&trial).map(drop);
+    }
+    if IMPROVEMENT_KEYS.contains(&key) {
+        return improvement_from_values(&after).map(drop);
+    }
+    let Some(&key) = WEB_KEYS.iter().find(|k| **k == key) else {
+        return Err(SettingsError::Unknown(key.to_string()));
+    };
+    let Some(value) = after.get(key) else {
+        return Ok(());
+    };
+    let ok = match key {
+        "maintenance.enabled" | "auth.password_signin" => value.is_boolean(),
+        "web.trusted_proxies" => value.as_array().is_some_and(|list| {
+            list.iter().all(|v| {
+                v.as_str()
+                    .is_some_and(|ip| ip.trim().parse::<std::net::IpAddr>().is_ok())
+            })
+        }),
+        "web.system_order" => value
+            .as_array()
+            .is_some_and(|list| list.iter().all(Value::is_string)),
+        _ => value
+            .as_str()
+            .is_some_and(|path| path.starts_with('/') && !path.split('/').any(|part| part == "..")),
+    };
+    if ok {
+        Ok(())
+    } else {
+        let what = match key {
+            "maintenance.enabled" | "auth.password_signin" => "true or false",
+            "web.trusted_proxies" => "a list of addresses such as [\"192.0.2.10\"]",
+            "web.system_order" => "a list of system names",
+            _ => "an absolute folder path without ..",
+        };
+        Err(invalid(key, format!("{value} is not {what}")))
+    }
+}
+
+/// Every stored setting, by name.
+pub async fn all(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<HashMap<String, Value>> {
+    let rows: Vec<(String, Value)> = sqlx::query_as("SELECT key, value FROM settings")
+        .fetch_all(db)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Sets `key` to `value`, or removes it when `value` is `None`, after
+/// `check`. Two changes at once are taken one after the other, so neither
+/// is checked against values the other is replacing.
+pub async fn change(
+    conn: &mut sqlx::PgConnection,
+    key: &str,
+    value: Option<&Value>,
+) -> Result<(), SettingsError> {
+    use sqlx::Connection;
+    let mut tx = conn.begin().await.map_err(SettingsError::Database)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('scannerpulse settings'))")
+        .execute(&mut *tx)
+        .await
+        .map_err(SettingsError::Database)?;
+    let values = all(&mut *tx).await.map_err(SettingsError::Database)?;
+    check(key, value, &values)?;
+    match value {
+        Some(value) => sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, now()) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        )
+        .bind(key)
+        .bind(value),
+        None => sqlx::query("DELETE FROM settings WHERE key = $1").bind(key),
+    }
+    .execute(&mut *tx)
+    .await
+    .map_err(SettingsError::Database)?;
+    tx.commit().await.map_err(SettingsError::Database)?;
+    Ok(())
 }

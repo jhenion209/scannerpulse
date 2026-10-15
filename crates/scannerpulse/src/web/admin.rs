@@ -104,3 +104,60 @@ pub async fn accounts_enable(
     record(&admin, format!("enabled {login}"));
     Ok(StatusCode::NO_CONTENT)
 }
+
+impl From<crate::settings::SettingsError> for ApiError {
+    fn from(error: crate::settings::SettingsError) -> ApiError {
+        use crate::settings::SettingsError;
+        match error {
+            SettingsError::Database(error) => ApiError::Database(error),
+            SettingsError::Unknown(_) => ApiError::Missing(error.to_string()),
+            SettingsError::Missing(_) | SettingsError::Invalid { .. } => {
+                ApiError::BadRequest(error.to_string())
+            }
+        }
+    }
+}
+
+/// Every stored setting, with the time it was changed.
+pub async fn settings_list(
+    _: Admin,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, Value, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT key, value, updated_at FROM settings ORDER BY key")
+            .fetch_all(&state.pool)
+            .await?;
+    Ok(Json(json!(
+        rows.into_iter()
+            .map(|(key, value, updated_at)| json!({"key": key, "value": value, "updated_at": updated_at}))
+            .collect::<Vec<_>>()
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewValue {
+    pub value: Value,
+}
+
+pub async fn settings_set(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(body): Json<NewValue>,
+) -> Result<StatusCode, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    crate::settings::change(&mut conn, &key, Some(&body.value)).await?;
+    record(&admin, format!("set {key} to {}", body.value));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn settings_unset(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    crate::settings::change(&mut conn, &key, None).await?;
+    record(&admin, format!("removed {key}"));
+    Ok(StatusCode::NO_CONTENT)
+}
