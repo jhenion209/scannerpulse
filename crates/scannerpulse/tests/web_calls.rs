@@ -118,6 +118,35 @@ async fn every_form_of_the_search_box_runs(pool: PgPool) {
     assert_eq!(ids(&all).len(), 4);
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn a_search_in_one_talkgroup_pages_through_its_matches_only(pool: PgPool) {
+    let a = talkgroup(&pool, "SYSA", 1).await;
+    let b = talkgroup(&pool, "SYSA", 2).await;
+    let mut want = Vec::new();
+    for minute in 0..12 {
+        want.push(call(&pool, a, at(minute), Some("engine responding")).await);
+        call(&pool, b, at(minute), Some("engine on scene")).await;
+        call(&pool, a, at(minute), Some("ladder only")).await;
+    }
+    // Two matches at the same instant: the id orders them.
+    want.push(call(&pool, a, at(11), Some("engine two")).await);
+    want.sort_by_key(|id| std::cmp::Reverse(*id));
+    for (order, want) in [
+        ("newest", want.clone()),
+        ("oldest", want.iter().rev().copied().collect()),
+    ] {
+        let base = format!("/api/calls?size=10&q=engine&talkgroups={a}&order={order}");
+        let (status, first) = get(&pool, &base).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["total"], 13, "{order}");
+        let next = first["next"].as_str().expect("a second page");
+        let (_, second) = get(&pool, &format!("{base}&after={next}")).await;
+        assert!(second["next"].is_null(), "{order}");
+        let seen: Vec<i64> = ids(&first).into_iter().chain(ids(&second)).collect();
+        assert_eq!(seen, want, "{order}");
+    }
+}
+
 fn urlencode(text: &str) -> String {
     text.bytes()
         .map(|b| match b {

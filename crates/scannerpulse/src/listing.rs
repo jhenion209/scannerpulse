@@ -89,7 +89,7 @@ fn text_query(filter: &Filter) -> Option<String> {
     filter.text.as_deref().and_then(crate::search::tsquery)
 }
 
-/// The FROM and WHERE that both the page and the count use.
+/// The FROM and WHERE that both the page and the count use without text.
 fn push_filter<'a>(q: &mut QueryBuilder<'a, Postgres>, filter: &'a Filter) {
     q.push(
         " FROM calls c \
@@ -113,10 +113,37 @@ fn push_filter<'a>(q: &mut QueryBuilder<'a, Postgres>, filter: &'a Filter) {
     if let Some(until) = filter.until {
         q.push(" AND c.started_at < ").push_bind(until);
     }
-    if let Some(query) = text_query(filter) {
-        q.push(" AND tr.search @@ to_tsquery('simple', ")
-            .push_bind(query)
-            .push(")");
+}
+
+/// With text, the matching transcripts are read first: each month's
+/// transcripts index gives them in order and the LIMIT stops the walk, where
+/// reading from the calls would visit every call. A transcript's `started_at`
+/// and `call_id` are its call's. The talkgroup and system filters look the
+/// call up for each transcript, so that the LIMIT counts matches only.
+fn push_transcripts<'a>(q: &mut QueryBuilder<'a, Postgres>, filter: &'a Filter, query: String) {
+    q.push(" FROM transcripts tr WHERE tr.search @@ to_tsquery('simple', ")
+        .push_bind(query)
+        .push(")");
+    if let Some(from) = filter.from {
+        q.push(" AND tr.started_at >= ").push_bind(from);
+    }
+    if let Some(until) = filter.until {
+        q.push(" AND tr.started_at < ").push_bind(until);
+    }
+    if !filter.talkgroups.is_empty() || filter.system.is_some() {
+        q.push(
+            " AND EXISTS (SELECT 1 FROM calls c JOIN talkgroups t ON t.id = c.talkgroup_id \
+             WHERE c.id = tr.call_id AND c.started_at = tr.started_at",
+        );
+        if !filter.talkgroups.is_empty() {
+            q.push(" AND c.talkgroup_id = ANY(")
+                .push_bind(&filter.talkgroups)
+                .push(")");
+        }
+        if let Some(system) = filter.system {
+            q.push(" AND t.system_id = ").push_bind(system);
+        }
+        q.push(")");
     }
 }
 
@@ -134,12 +161,39 @@ pub async fn page(
     } else {
         ("<", "DESC")
     };
+    const COLUMNS: &str = "SELECT c.id, c.started_at, c.duration_ms, c.talkgroup_id, \
+         t.number AS talkgroup, t.name AS talkgroup_name, s.name AS system, si.name AS site, \
+         c.radio_id, c.radio_alias, tr.text AS transcript, tr.origin";
     let build = || {
-        let mut q = QueryBuilder::new(
-            "SELECT c.id, c.started_at, c.duration_ms, c.talkgroup_id, t.number AS talkgroup, \
-                    t.name AS talkgroup_name, s.name AS system, si.name AS site, c.radio_id, \
-                    c.radio_alias, tr.text AS transcript, tr.origin",
-        );
+        if let Some(query) = text_query(filter) {
+            let mut q = QueryBuilder::new(
+                "WITH hits AS MATERIALIZED (SELECT tr.call_id, tr.started_at, tr.text, tr.origin",
+            );
+            push_transcripts(&mut q, filter, query);
+            if let Some(after) = after {
+                q.push(format!(" AND (tr.started_at, tr.call_id) {op} ("))
+                    .push_bind(after.started_at)
+                    .push(", ")
+                    .push_bind(after.id)
+                    .push(")");
+            }
+            q.push(format!(
+                " ORDER BY tr.started_at {dir}, tr.call_id {dir} LIMIT "
+            ))
+            .push_bind(size + 1)
+            .push(") ")
+            .push(COLUMNS)
+            .push(
+                " FROM hits tr \
+                 JOIN calls c ON c.id = tr.call_id AND c.started_at = tr.started_at \
+                 LEFT JOIN talkgroups t ON t.id = c.talkgroup_id \
+                 LEFT JOIN systems s ON s.id = t.system_id \
+                 LEFT JOIN sites si ON si.id = c.site_id",
+            )
+            .push(format!(" ORDER BY c.started_at {dir}, c.id {dir}"));
+            return q;
+        }
+        let mut q = QueryBuilder::new(COLUMNS);
         push_filter(&mut q, filter);
         if let Some(after) = after {
             q.push(format!(" AND (c.started_at, c.id) {op} ("))
@@ -189,7 +243,10 @@ pub async fn count(
 ) -> sqlx::Result<(i64, bool)> {
     let build = || {
         let mut q = QueryBuilder::new("SELECT count(*) FROM (SELECT 1");
-        push_filter(&mut q, filter);
+        match text_query(filter) {
+            Some(query) => push_transcripts(&mut q, filter, query),
+            None => push_filter(&mut q, filter),
+        }
         if let Some(cap) = cap {
             q.push(" LIMIT ").push_bind(cap + 1);
         }
