@@ -25,6 +25,15 @@ async fn failures(pool: &PgPool, kind: &str) -> Vec<String> {
         .unwrap()
 }
 
+/// What `sign_in_failures` keeps for a name: its lowercase hex SHA-256.
+async fn hashed(pool: &PgPool, name: &str) -> String {
+    sqlx::query_scalar("SELECT encode(sha256(convert_to($1, 'UTF8')), 'hex')")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn signing_in_sets_a_session_cookie(pool: PgPool) {
     admin(&pool, "ann", PASSWORD).await;
@@ -75,7 +84,18 @@ async fn a_wrong_password_and_an_unknown_name_answer_alike(pool: PgPool) {
     assert_eq!(wrong.status, 401);
     assert_eq!(wrong.body, unknown.body);
     assert!(wrong.headers.get("set-cookie").is_none());
-    assert_eq!(failures(&pool, "name").await, ["ann", "nobody"]);
+    assert_eq!(
+        failures(&pool, "name").await,
+        [hashed(&pool, "ann").await, hashed(&pool, "nobody").await]
+    );
+    // A submitted name (perhaps a mistyped password) is never stored as typed.
+    let plain: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sign_in_failures WHERE value IN ('ann', 'nobody')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(plain, 0);
     assert_eq!(failures(&pool, "address").await, ["198.51.100.7"; 2]);
     let me = send(&app, "GET", "/api/auth/me", &[], None).await;
     assert_eq!(me.status, 401);
@@ -115,7 +135,7 @@ async fn failures_spread_over_more_than_fifteen_minutes_lock_nothing(pool: PgPoo
     admin(&pool, "ann", PASSWORD).await;
     sqlx::query(
         "INSERT INTO sign_in_failures (kind, value, at) \
-         SELECT 'name', 'ann', now() - n * interval '4 minutes' FROM generate_series(0, 4) n",
+         SELECT 'name', encode(sha256(convert_to('ann', 'UTF8')), 'hex'), now() - n * interval '4 minutes' FROM generate_series(0, 4) n",
     )
     .execute(&pool)
     .await
@@ -398,7 +418,7 @@ async fn parallel_guesses_check_at_most_five_passwords(pool: PgPool) {
     }
     assert!(checked <= 5, "{checked} passwords were checked");
     let counted: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM sign_in_failures WHERE kind = 'name' AND value = 'ann'",
+        "SELECT count(*) FROM sign_in_failures WHERE kind = 'name' AND value = encode(sha256(convert_to('ann', 'UTF8')), 'hex')",
     )
     .fetch_one(&pool)
     .await

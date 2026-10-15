@@ -120,9 +120,22 @@ impl Kind {
     }
 }
 
+/// What is stored for a failure: an address as it is, a name only as the
+/// lowercase hex SHA-256 of its text, since a mistyped password may land in
+/// the name field. An unknown name is counted like any other.
+fn key(kind: Kind, value: &str) -> String {
+    match kind {
+        Kind::Address => value.to_string(),
+        Kind::Name => Sha256::digest(value.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    }
+}
+
 /// Whether the name or the address is locked: within the last
 /// `WINDOW_MINUTES` there was a failure that was at least the `FAILURES`th
-/// within `WINDOW_MINUTES`.
+/// within `WINDOW_MINUTES`. A name is looked up by its hash.
 pub async fn locked(db: impl sqlx::PgExecutor<'_>, kind: Kind, value: &str) -> sqlx::Result<bool> {
     sqlx::query_scalar(
         "SELECT EXISTS (\
@@ -134,22 +147,22 @@ pub async fn locked(db: impl sqlx::PgExecutor<'_>, kind: Kind, value: &str) -> s
                     AND g.at BETWEEN f.at - make_interval(mins => $3) AND f.at) >= $4)",
     )
     .bind(kind.as_str())
-    .bind(value)
+    .bind(key(kind, value))
     .bind(WINDOW_MINUTES)
     .bind(FAILURES)
     .fetch_one(db)
     .await
 }
 
-/// Counts a failed sign-in against the name and the address, and forgets
-/// failures older than a day.
+/// Counts a failed sign-in against the name (kept only as its SHA-256) and
+/// the address, and forgets failures older than a day.
 pub async fn failed(conn: &mut PgConnection, name: &str, address: &str) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO sign_in_failures (kind, value, at) \
          VALUES ('name', $1, now()), ('address', $2, now())",
     )
-    .bind(name)
-    .bind(address)
+    .bind(key(Kind::Name, name))
+    .bind(key(Kind::Address, address))
     .execute(&mut *conn)
     .await?;
     sqlx::query("DELETE FROM sign_in_failures WHERE at < now() - interval '1 day'")
