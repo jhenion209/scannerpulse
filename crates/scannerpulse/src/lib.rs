@@ -17,6 +17,7 @@ pub mod reader;
 pub mod search;
 pub mod servers;
 pub mod settings;
+pub mod smartsort;
 pub mod store;
 pub mod transcriber;
 pub mod transcripts;
