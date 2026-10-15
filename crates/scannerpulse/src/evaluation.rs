@@ -136,10 +136,14 @@ pub async fn draw(
         .map(|(_, _, months)| months.iter().map(|(_, n)| *n as usize).sum())
         .collect();
     let quotas = even_split(draw.calls, &totals);
-    // A person's save waits until this draw commits, so a set cannot gain a label between the check and the replacement.
-    sqlx::query("LOCK TABLE transcript_labels IN SHARE MODE")
-        .execute(&mut *tx)
-        .await?;
+    // A person's save of one of the set's calls waits until this draw commits, so the set cannot gain a label between the check and the replacement.
+    sqlx::query(
+        "SELECT 1 FROM calls c JOIN eval_calls e ON e.call_id = c.id AND e.started_at = c.started_at \
+         WHERE e.set_name = $1 FOR KEY SHARE OF c",
+    )
+    .bind(&draw.set)
+    .fetch_all(&mut *tx)
+    .await?;
     let labeled: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT (e.call_id, e.started_at)) FROM eval_calls e \
          JOIN transcript_labels l ON l.call_id = e.call_id AND l.started_at = e.started_at \
