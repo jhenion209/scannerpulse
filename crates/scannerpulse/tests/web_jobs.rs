@@ -148,6 +148,15 @@ async fn a_job_that_cannot_run_is_refused(pool: PgPool) {
     )
     .await;
     assert_eq!(backwards.status, 400);
+    let ancient = send(
+        &app,
+        "GET",
+        "/api/admin/jobs/queue?from=0001-01-01",
+        &[("cookie", cookie.as_str())],
+        None,
+    )
+    .await;
+    assert_eq!(ancient.status, 400);
     let asr = send(
         &app,
         "POST",

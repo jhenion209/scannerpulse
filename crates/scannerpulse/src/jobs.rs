@@ -99,6 +99,15 @@ impl From<sqlx::Error> for JobError {
     }
 }
 
+/// A settings failure as a job's: the database's stays one, the rest are
+/// reasons to refuse.
+fn from_settings(error: crate::settings::SettingsError) -> JobError {
+    match error {
+        crate::settings::SettingsError::Database(error) => JobError::Database(error),
+        other => JobError::Refused(other.to_string()),
+    }
+}
+
 /// Adds a job, queued behind any others; returns its id. `params` must
 /// already be checked by the kind's own function.
 pub async fn create(
@@ -244,14 +253,23 @@ pub async fn queue_plan(
     from: Option<chrono::NaiveDate>,
     to: Option<chrono::NaiveDate>,
 ) -> Result<crate::queue::Past, JobError> {
-    let refused = |error: crate::settings::SettingsError| JobError::Refused(error.to_string());
+    use chrono::Datelike;
+    if [from, to]
+        .into_iter()
+        .flatten()
+        .any(|day| !(1970..=9999).contains(&day.year()))
+    {
+        return Err(JobError::Refused(
+            "days must be between 1970 and 9999".into(),
+        ));
+    }
     let zone = crate::settings::load(&mut *conn)
         .await
-        .map_err(refused)?
+        .map_err(from_settings)?
         .time_zone;
     let transcription = crate::settings::load_transcription(&mut *conn)
         .await
-        .map_err(refused)?
+        .map_err(from_settings)?
         .ok_or_else(|| JobError::Refused("transcription is off: turn it on first".into()))?;
     if let (Some(from), Some(to)) = (from, to) {
         if to < from {
@@ -447,7 +465,7 @@ pub async fn start_asr_run(
 ) -> Result<(i64, i64), JobError> {
     let improvement = crate::settings::load_improvement(&mut *conn)
         .await
-        .map_err(|error| JobError::Refused(error.to_string()))?;
+        .map_err(from_settings)?;
     if !improvement.enabled {
         return Err(JobError::Refused(
             "the improvement module is off (improvement_module.enabled)".into(),
@@ -469,7 +487,7 @@ pub async fn start_asr_run(
     }
     let production = crate::settings::load_transcription(&mut *conn)
         .await
-        .map_err(|error| JobError::Refused(error.to_string()))?;
+        .map_err(from_settings)?;
     let run = AsrRun {
         set: set.to_string(),
         server: server.to_string(),
