@@ -15,6 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
@@ -74,6 +75,9 @@ pub struct Filer {
     db_limit: Duration,
     /// Files waiting for a retry, by row id, and when they may be tried.
     retry_at: HashMap<i64, Instant>,
+    /// The shortest call that is queued for transcription; below 0 while
+    /// transcription is off.
+    transcribe_from: Option<Arc<AtomicI32>>,
 }
 
 impl Filer {
@@ -94,7 +98,16 @@ impl Filer {
             missing_grace,
             db_limit: DEFAULT_DB_LIMIT,
             retry_at: HashMap::new(),
+            transcribe_from: None,
         }
+    }
+
+    /// Queues the filed calls for transcription by `rule`: the shortest call
+    /// that is queued, in milliseconds, or below 0 while transcription is off.
+    /// The talkgroup's own switch is read when the call is recorded.
+    pub fn with_transcription(mut self, rule: Arc<AtomicI32>) -> Filer {
+        self.transcribe_from = Some(rule);
+        self
     }
 
     /// Sets the limit on each database call (default 30 s); a call that takes
@@ -253,6 +266,11 @@ impl Filer {
             source_id: row.source_id,
             location_id: self.location.id,
             rel_path: rel,
+            transcribe_from_ms: self
+                .transcribe_from
+                .as_ref()
+                .map(|rule| rule.load(Ordering::SeqCst))
+                .filter(|from| *from >= 0),
         };
         let recorded = tokio::time::timeout(self.db_limit, async {
             let mut conn = self.pool.acquire().await?;

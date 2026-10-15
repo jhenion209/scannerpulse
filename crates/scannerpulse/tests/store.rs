@@ -253,6 +253,7 @@ async fn recording_a_call_marks_its_file_done_and_announces_it(pool: PgPool) -> 
         source_id: source,
         location_id: location,
         rel_path: "2031-01-15/127-Alpha Fire/a.mp3",
+        transcribe_from_ms: None,
     };
     let (id, started_at) = store::record(&mut conn, HOLDER, file, &new).await.unwrap();
     assert_eq!(started_at, call.started_at);
@@ -318,6 +319,7 @@ async fn without_the_lease_nothing_is_recorded(pool: PgPool) -> sqlx::Result<()>
         source_id: source,
         location_id: location,
         rel_path: "2031-01-15/127-Alpha Fire/a.mp3",
+        transcribe_from_ms: None,
     };
     let mut conn = pool.acquire().await?;
     // No lease row; another holder; an expired lease.
@@ -392,5 +394,58 @@ async fn only_old_rows_of_filed_files_are_pruned(pool: PgPool) -> sqlx::Result<(
             .fetch_all(&pool)
             .await?;
     assert_eq!(left, ["new.mp3", "wait.mp3"]);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorded_call_is_queued_when_long_enough_and_its_talkgroup_is_on(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (location, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    common::hold_lease(&pool, HOLDER).await;
+    // SYSA/127 with transcription on, as the admin page would leave it.
+    let system: i32 = sqlx::query_scalar("INSERT INTO systems (name) VALUES ('SYSA') RETURNING id")
+        .fetch_one(&pool)
+        .await?;
+    sqlx::query("INSERT INTO talkgroups (system_id, number, name, transcribe) VALUES ($1, 127, 'Alpha Fire', true)")
+        .bind(system)
+        .execute(&pool)
+        .await?;
+    let call = file_call(alpha()); // 1008 ms long
+    store::ensure_partition(&pool, call.started_at).await?;
+    let record = async |n: usize, from: Option<i32>| -> bool {
+        let rel = format!("2031-01-15/127-Alpha Fire/{n}.mp3");
+        store::upsert_seen(&pool, source, &[seen(&rel, 5)])
+            .await
+            .unwrap();
+        let file = row_id(&pool, &rel).await;
+        let new = NewCall {
+            call: &call,
+            source_id: source,
+            location_id: location,
+            rel_path: &rel,
+            transcribe_from_ms: from,
+        };
+        let mut conn = pool.acquire().await.unwrap();
+        let (id, _) = store::record(&mut conn, HOLDER, file, &new).await.unwrap();
+        let queued: Option<String> =
+            sqlx::query_scalar("SELECT state FROM transcription_queue WHERE call_id = $1")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        queued.is_some()
+    };
+    assert!(record(0, Some(1000)).await, "long enough");
+    assert!(record(1, Some(1008)).await, "exactly the minimum");
+    assert!(!record(2, Some(1009)).await, "too short");
+    assert!(!record(3, None).await, "transcription off");
+    sqlx::query("UPDATE talkgroups SET transcribe = false")
+        .execute(&pool)
+        .await?;
+    assert!(
+        !record(4, Some(1000)).await,
+        "the talkgroup's transcription off"
+    );
     Ok(())
 }

@@ -208,6 +208,7 @@ async fn a_frozen_holder_cannot_record_once_its_lease_is_gone(pool: PgPool) -> s
         source_id: source,
         location_id: location,
         rel_path: "2031-01-15/Unknown/20310115_120000_x.mp3",
+        transcribe_from_ms: None,
     };
     let err = store::record(&mut ca, frozen.holder(), row, &new)
         .await

@@ -238,6 +238,7 @@ async fn filed_but_left_in_source(site: &Site) -> sqlx::Result<(PathBuf, i64)> {
         source_id: site.source_row.id,
         location_id: site.location.id,
         rel_path: &rel,
+        transcribe_from_ms: None,
     };
     let mut conn = site.pool.acquire().await?;
     let (id, _) = store::record(&mut conn, HOLDER, row, &new).await.unwrap();

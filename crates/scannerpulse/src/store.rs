@@ -352,6 +352,9 @@ pub struct NewCall<'a> {
     pub location_id: i16,
     /// The path in the archive, relative to the location's root.
     pub rel_path: &'a str,
+    /// Queue the call for transcription when it is at least this long and its
+    /// talkgroup has transcription on; `None` while transcription is off.
+    pub transcribe_from_ms: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -405,8 +408,9 @@ pub async fn fenced<'c>(
 }
 
 /// Step 3 of filing, in one fenced transaction: looks up the system, site and
-/// talkgroup, records the call, marks the ingest row `row_id` done, and
-/// announces the call on `scannerpulse_calls`. Returns the call's id and start.
+/// talkgroup, records the call, marks the ingest row `row_id` done, queues the
+/// call for transcription when `new` says so, and announces the call on
+/// `scannerpulse_calls`. Returns the call's id and start.
 pub async fn record(
     conn: &mut PgConnection,
     holder: &str,
@@ -436,6 +440,19 @@ pub async fn record(
     .fetch_one(&mut *tx)
     .await?;
     mark_done(&mut *tx, row_id, (id, call.started_at)).await?;
+    if let (Some(from_ms), Some(talkgroup)) = (new.transcribe_from_ms, talkgroup_id) {
+        if call.duration_ms >= from_ms {
+            sqlx::query(
+                "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+                 SELECT $1, $2, now(), now(), 'queued' FROM talkgroups WHERE id = $3 AND transcribe",
+            )
+            .bind(id)
+            .bind(call.started_at)
+            .bind(talkgroup)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
     sqlx::query("SELECT pg_notify('scannerpulse_calls', $1)")
         .bind(id.to_string())
         .execute(&mut *tx)
