@@ -9,6 +9,7 @@ pub mod localtime;
 pub mod log;
 pub mod mp3;
 pub mod reader;
+pub mod servers;
 pub mod settings;
 pub mod store;
 pub mod watcher;
