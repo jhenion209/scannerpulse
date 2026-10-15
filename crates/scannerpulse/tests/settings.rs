@@ -195,11 +195,41 @@ fn a_bad_server_list_is_refused() {
 }
 
 #[test]
+fn a_key_in_a_server_entry_is_refused_and_not_repeated() {
+    for servers in [
+        json!([{"url": "http://asr-1/v1?api_key=leak-4417"}]),
+        json!([{"url": "http://asr-1/v1#leak-4417"}]),
+        json!([{"url": "http://asr-1/v1", "api_key": "leak-4417"}]),
+        json!([{"url": "http://asr-1/v1", "weight": "leak-4417"}]),
+    ] {
+        let values = on(&[("transcription.servers", servers.clone())]);
+        let error = settings::transcription_from_values(&values).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SettingsError::Invalid {
+                    key: "transcription.servers",
+                    ..
+                }
+            ),
+            "{servers}"
+        );
+        assert!(!error.to_string().contains("leak-4417"), "{error}");
+    }
+}
+
+#[test]
 fn a_server_url_is_http_or_https_without_credentials() {
     assert!(settings::server_url_ok(
         "http://asr-1:8000/v1/audio/transcriptions"
     ));
-    for url in ["ftp://x", "http://user:key@x/", "http://user@x/"] {
+    for url in [
+        "ftp://x",
+        "http://user:key@x/",
+        "http://user@x/",
+        "http://x/?api_key=k",
+        "http://x/#k",
+    ] {
         assert!(!settings::server_url_ok(url), "{url}");
     }
 }

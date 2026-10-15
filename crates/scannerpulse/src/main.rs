@@ -987,7 +987,7 @@ async fn asr_run(
     prompt_file: Option<&str>,
 ) -> CommandResult {
     if !settings::server_url_ok(server) {
-        return Err("--server must be an http:// or https:// URL without a user name or password; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY".into());
+        return Err("--server must be an http:// or https:// URL without a user name, password, query or fragment; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY".into());
     }
     let prompt = match prompt_file {
         None => None,

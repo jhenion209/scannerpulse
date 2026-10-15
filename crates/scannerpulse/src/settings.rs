@@ -267,11 +267,16 @@ fn text(
     }
 }
 
-/// A transcription server's URL: http or https, and no user name or password
-/// in it, because settings are kept in the database and a key is not.
+/// A transcription server's URL: http or https, and no user name, password,
+/// query or fragment in it, because settings are kept in the database and a
+/// key is not.
 pub fn server_url_ok(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|u| {
-        matches!(u.scheme(), "http" | "https") && u.username().is_empty() && u.password().is_none()
+        matches!(u.scheme(), "http" | "https")
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none()
     })
 }
 
@@ -287,7 +292,21 @@ fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError
         return Err(invalid(KEY, "the list is empty".into()));
     }
     let mut servers: Vec<Server> = Vec::new();
-    for entry in list {
+    for (index, entry) in list.iter().enumerate() {
+        // Name the entry by position: its text may hold a key, and a refusal
+        // is shown and logged.
+        let at = index + 1;
+        if entry
+            .as_object()
+            .is_some_and(|fields| fields.keys().any(|k| k != "url" && k != "weight"))
+        {
+            return Err(invalid(
+                KEY,
+                format!(
+                    "server {at} has a field other than url and weight; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY"
+                ),
+            ));
+        }
         let url = entry
             .get("url")
             .and_then(Value::as_str)
@@ -297,7 +316,7 @@ fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError
                 invalid(
                     KEY,
                     format!(
-                        "{entry} has no http:// or https:// url without a user name or password; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY"
+                        "server {at} has no http:// or https:// url without a user name, password, query or fragment; a key goes in SCANNERPULSE_TRANSCRIPTION_API_KEY"
                     ),
                 )
             })?;
@@ -310,7 +329,7 @@ fn servers(values: &HashMap<String, Value>) -> Result<Vec<Server>, SettingsError
                 .ok_or_else(|| {
                     invalid(
                         KEY,
-                        format!("{entry} has a weight that is not a whole number from 1 to 64"),
+                        format!("server {at} has a weight that is not a whole number from 1 to 64"),
                     )
                 })?,
         };
