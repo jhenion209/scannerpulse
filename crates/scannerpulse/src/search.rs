@@ -14,6 +14,11 @@
 
 /// More terms than a person types; it bounds the query's size.
 const MAX_TERMS: usize = 20;
+/// The most words the whole query holds: one term the column splits, such
+/// as `a-a-a-...`, is one word per piece.
+const MAX_WORDS: usize = 32;
+/// A longer word is cut to this many characters.
+const MAX_WORD_CHARS: usize = 100;
 
 /// The query for `to_tsquery('simple', ...)`, or `None` when the text holds
 /// nothing to search for. Every word is a quoted lexeme, so no text of the
@@ -21,6 +26,7 @@ const MAX_TERMS: usize = 20;
 pub fn tsquery(text: &str) -> Option<String> {
     let mut groups: Vec<Vec<String>> = vec![Vec::new()];
     let mut negate = false;
+    let mut words = MAX_WORDS;
     for token in tokens(text).into_iter().take(MAX_TERMS) {
         match token.as_str() {
             "OR" => {
@@ -40,8 +46,8 @@ pub fn tsquery(text: &str) -> Option<String> {
             _ => (false, token.as_str()),
         };
         let term = match body.strip_prefix('"') {
-            Some(rest) => phrase(rest.strip_suffix('"').unwrap_or(rest)),
-            None => word(body),
+            Some(rest) => phrase(rest.strip_suffix('"').unwrap_or(rest), &mut words),
+            None => word(body, &mut words),
         };
         if let Some(term) = term {
             let group = groups.last_mut().expect("there is always a group");
@@ -84,12 +90,22 @@ fn tokens(text: &str) -> Vec<String> {
 }
 
 /// The pieces of `text` that the search column keeps: runs of letters and
-/// digits, in lowercase.
-fn pieces(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+/// digits, in lowercase, at most `words` of them, each cut to
+/// `MAX_WORD_CHARS`; `words` is lowered by those taken.
+fn pieces(text: &str, words: &mut usize) -> Vec<String> {
+    let pieces: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|p| !p.is_empty())
-        .map(str::to_lowercase)
-        .collect()
+        .take(*words)
+        .map(|p| {
+            p.chars()
+                .take(MAX_WORD_CHARS)
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .collect();
+    *words -= pieces.len();
+    pieces
 }
 
 fn lexeme(piece: &str) -> String {
@@ -98,12 +114,12 @@ fn lexeme(piece: &str) -> String {
 
 /// A word, or a prefix when it ends with `*`; a word the column would split
 /// is all its pieces.
-fn word(text: &str) -> Option<String> {
+fn word(text: &str, words: &mut usize) -> Option<String> {
     let (body, prefix) = match text.strip_suffix('*') {
         Some(body) => (body, true),
         None => (text, false),
     };
-    let pieces = pieces(body);
+    let pieces = pieces(body, words);
     let last = pieces.len().checked_sub(1)?;
     let terms: Vec<String> = pieces
         .iter()
@@ -123,8 +139,8 @@ fn word(text: &str) -> Option<String> {
     })
 }
 
-fn phrase(text: &str) -> Option<String> {
-    let pieces = pieces(text);
+fn phrase(text: &str, words: &mut usize) -> Option<String> {
+    let pieces = pieces(text, words);
     match pieces.len() {
         0 => None,
         1 => Some(lexeme(&pieces[0])),
@@ -202,5 +218,34 @@ mod tests {
         assert_eq!(q("O'Brien*").as_deref(), Some("(('o' & 'brien':*))"));
         let long = "w ".repeat(500);
         assert_eq!(q(&long).unwrap().matches("'w'").count(), 20);
+    }
+
+    #[test]
+    fn the_query_holds_a_bounded_number_of_words_of_bounded_length() {
+        // One token the column splits into 30,000 words.
+        let split = "a-".repeat(30_000);
+        assert_eq!(q(&split).unwrap().matches("'a'").count(), 32);
+        let long = "b".repeat(60_000);
+        assert_eq!(q(&long).unwrap(), format!("('{}')", "b".repeat(100)));
+        let phrase = format!("\"{}\"", "c ".repeat(30_000));
+        assert_eq!(q(&phrase).unwrap().matches("'c'").count(), 32);
+    }
+
+    #[test]
+    fn query_syntax_typed_in_the_box_is_only_text() {
+        assert_eq!(
+            q("fire & smoke | (x) <-> y:*").as_deref(),
+            Some("('fire' & 'smoke' & 'x' & 'y':*)")
+        );
+        assert_eq!(
+            q("NOT \"shots fired\" engine").as_deref(),
+            Some("(!('shots' <-> 'fired') & 'engine')")
+        );
+        assert_eq!(
+            q("engine -med-4").as_deref(),
+            Some("('engine' & !('med' & '4'))")
+        );
+        assert_eq!(q("a OR -b").as_deref(), Some("('a')"));
+        assert_eq!(q("NOT AND x"), None);
     }
 }

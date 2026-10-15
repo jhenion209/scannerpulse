@@ -188,6 +188,16 @@ async fn a_bad_parameter_is_refused_with_its_reason(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_search_of_one_endless_word_runs(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    let hit = call(&pool, tg, at(1), Some("a a a")).await;
+    let uri = format!("/api/calls?q={}", "a-".repeat(30_000));
+    let (status, answer) = get(&pool, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(ids(&answer), vec![hit]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn every_read_of_the_list_stops_at_the_time_limit(pool: PgPool) {
     let tg = talkgroup(&pool, "SYSA", 1).await;
     call(&pool, tg, at(0), None).await;
