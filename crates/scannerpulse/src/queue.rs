@@ -270,18 +270,23 @@ pub async fn retry(db: impl PgExecutor<'_>, call: (i64, DateTime<Utc>)) -> sqlx:
     Ok(done.rows_affected() == 1)
 }
 
-/// What `count_past` and `queue_past` take: the past calls of a talkgroup that
-/// were never tried, from `from` until before `until`, at least `min_ms` long.
-#[derive(Debug, Clone, Copy)]
+/// What `count_past` and `queue_past` take: the past calls that were never
+/// tried, at least `min_ms` long, of one talkgroup, or with no talkgroup of
+/// every talkgroup whose transcription is on (the backlog); from `from`, and
+/// until before `until`, when they are set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Past {
-    pub talkgroup_id: i32,
-    pub from: DateTime<Utc>,
-    pub until: DateTime<Utc>,
+    pub talkgroup_id: Option<i32>,
+    pub from: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
     pub min_ms: i32,
 }
 
 const PAST: &str = "FROM calls c \
-     WHERE c.talkgroup_id = $1 AND c.started_at >= $2 AND c.started_at < $3 \
+     WHERE (c.talkgroup_id = $1 \
+            OR ($1::int IS NULL AND c.talkgroup_id IN (SELECT id FROM talkgroups WHERE transcribe))) \
+       AND ($2::timestamptz IS NULL OR c.started_at >= $2) \
+       AND ($3::timestamptz IS NULL OR c.started_at < $3) \
        AND c.transcript_state = 'untried' AND c.duration_ms >= $4 \
        AND NOT EXISTS (SELECT 1 FROM transcription_queue q \
                        WHERE q.call_id = c.id AND q.started_at = c.started_at)";

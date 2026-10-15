@@ -280,7 +280,9 @@ fn lock<T>(counts: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Result<(), String> {
     tokio::pin!(stop);
     let pool = PgPoolOptions::new()
-        .max_connections(4)
+        // The filer, the watcher, the transcriber, the summary and the job
+        // runner each hold one at times.
+        .max_connections(6)
         .acquire_timeout(RETRY)
         // A connection given back after a cancelled call is pinged before it
         // goes back to the pool, with no limit of its own: on a dead socket it
@@ -394,6 +396,16 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
                 heard.clone(),
                 lease.clone(),
                 settings.done_rows_kept_days,
+                stop_rx.clone(),
+            )),
+        ),
+        (
+            "jobs",
+            tokio::spawn(job_loop(
+                pool.clone(),
+                config.host.clone(),
+                lease.clone(),
+                healthy.clone(),
                 stop_rx.clone(),
             )),
         ),
@@ -581,6 +593,46 @@ async fn file_loop(
             }
         }
         if wait(&mut stop, Duration::from_secs(1)).await {
+            break;
+        }
+    }
+}
+
+/// The job runner: while this host holds the lease, steps the job at the head
+/// of the line, one step after another; a stop asked for takes effect
+/// between steps, and a job left running by another host resumes here.
+async fn job_loop(
+    pool: PgPool,
+    host: String,
+    lease: Arc<Lease>,
+    healthy: Arc<AtomicBool>,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        if *stop.borrow() {
+            break;
+        }
+        if lease.should_work() && healthy.load(Ordering::SeqCst) {
+            match crate::jobs::step(&pool, &host, crate::jobs::QUEUE_BATCH).await {
+                Ok(Some((id, state))) => {
+                    if state != "running" {
+                        log::info(format!("job {id} is {state}"));
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn(format!(
+                        "jobs paused: the database failed ({error}); trying again in 5 s"
+                    ));
+                    if wait(&mut stop, RETRY).await {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+        if wait(&mut stop, Duration::from_secs(2)).await {
             break;
         }
     }

@@ -164,3 +164,152 @@ pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped,
         },
     }
 }
+
+/// The calls a queue job queues in one step.
+pub const QUEUE_BATCH: i64 = 1000;
+
+/// Adds a job that queues `past`'s calls for transcription; returns its id
+/// and the number of calls it will queue.
+pub async fn start_queue(
+    conn: &mut PgConnection,
+    past: &crate::queue::Past,
+    started_by: &str,
+) -> Result<(i64, i64), JobError> {
+    if let Some(talkgroup) = past.talkgroup_id {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM talkgroups WHERE id = $1)")
+                .bind(talkgroup)
+                .fetch_one(&mut *conn)
+                .await?;
+        if !exists {
+            return Err(JobError::Refused(format!(
+                "there is no talkgroup {talkgroup}"
+            )));
+        }
+    }
+    let count = crate::queue::count_past(&mut *conn, past).await?;
+    let params = serde_json::to_value(past).expect("a Past is plain data");
+    let id = create(&mut *conn, Kind::Queue, &params, Some(count), started_by).await?;
+    Ok((id, count))
+}
+
+/// What one step of a job did.
+enum Outcome {
+    /// There is more to do: the counts and the state to resume from.
+    More {
+        done: i64,
+        total: Option<i64>,
+        work: Value,
+        message: String,
+    },
+    Done(i64, String),
+    Failed(String),
+    /// A stop was asked for: the job ends where its last step left it.
+    Stopped,
+}
+
+/// Runs one step of the job at the head of the line. Returns that job's id
+/// and its state after the step; `None` when no job waits, or when another
+/// host is stepping the head of the line (jobs run one at a time). The step
+/// and the record of it are one transaction: a step that fails part way
+/// changes nothing, and is tried again.
+pub async fn step(
+    pool: &sqlx::PgPool,
+    host: &str,
+    batch: i64,
+) -> sqlx::Result<Option<(i64, String)>> {
+    use sqlx::Connection;
+    let mut conn = pool.acquire().await?;
+    let mut tx = conn.begin().await?;
+    let job: Option<Job> = sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM jobs \
+         WHERE id = (SELECT min(id) FROM jobs WHERE state IN ('queued', 'running')) \
+         FOR UPDATE SKIP LOCKED"
+    ))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(job) = job else {
+        return Ok(None);
+    };
+    let outcome = if job.stop_requested {
+        Outcome::Stopped
+    } else {
+        match Kind::parse(&job.kind) {
+            Some(Kind::Queue) => queue_step(&mut tx, &job, batch).await?,
+            _ => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
+        }
+    };
+    let (state, done, total, work, message) = match outcome {
+        Outcome::Stopped => (
+            "stopped",
+            job.done,
+            job.total,
+            job.work.clone(),
+            format!("stopped by request after {}", progress(job.done, job.total)),
+        ),
+        Outcome::Failed(why) => ("failed", job.done, job.total, job.work.clone(), why),
+        Outcome::Done(done, message) => (
+            "done",
+            done,
+            job.total.map(|_| done),
+            job.work.clone(),
+            message,
+        ),
+        Outcome::More {
+            done,
+            total,
+            work,
+            message,
+        } => ("running", done, total, work, message),
+    };
+    sqlx::query(
+        "UPDATE jobs SET state = $2, done = $3, total = $4, work = $5, message = $6, host = $7, \
+           started_at = COALESCE(started_at, now()), updated_at = now(), \
+           finished_at = CASE WHEN $2 = 'running' THEN NULL ELSE now() END \
+         WHERE id = $1",
+    )
+    .bind(job.id)
+    .bind(state)
+    .bind(done)
+    .bind(total)
+    .bind(&work)
+    .bind(&message)
+    .bind(host)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some((job.id, state.to_string())))
+}
+
+fn progress(done: i64, total: Option<i64>) -> String {
+    match total {
+        Some(total) => format!("{done} of {total}"),
+        None => done.to_string(),
+    }
+}
+
+/// Queues the next `batch` calls, newest first, from where the last step
+/// stopped (`work.before`).
+async fn queue_step(conn: &mut PgConnection, job: &Job, batch: i64) -> sqlx::Result<Outcome> {
+    let Ok(past) = serde_json::from_value::<crate::queue::Past>(job.params.clone()) else {
+        return Ok(Outcome::Failed(format!(
+            "the job's parameters are not a queue's: {}",
+            job.params
+        )));
+    };
+    let before = job
+        .work
+        .get("before")
+        .and_then(|v| serde_json::from_value::<DateTime<Utc>>(v.clone()).ok());
+    let (n, oldest) = crate::queue::queue_past(&mut *conn, &past, batch, before).await?;
+    let done = job.done + i64::try_from(n).unwrap_or(0);
+    if n == 0 {
+        return Ok(Outcome::Done(done, format!("queued {done} calls")));
+    }
+    Ok(Outcome::More {
+        done,
+        total: job.total.map(|total| total.max(done)),
+        work: serde_json::json!({ "before": oldest }),
+        message: format!("queued {}", progress(done, job.total.map(|t| t.max(done)))),
+    })
+}

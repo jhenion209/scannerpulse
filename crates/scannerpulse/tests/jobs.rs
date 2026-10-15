@@ -1,4 +1,8 @@
+mod common;
+
+use chrono::{Duration, TimeZone, Utc};
 use scannerpulse::jobs::{self, JobError, Kind, Stopped};
+use scannerpulse::queue::Past;
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -69,5 +73,166 @@ async fn stopping_a_waiting_job_ends_it_and_a_running_one_after_its_step(pool: P
     assert!(matches!(
         jobs::stop(&mut conn, 999_999, "bob").await,
         Err(JobError::NoSuch(_))
+    ));
+}
+
+/// Five untried calls of a talkgroup (transcription on or off), a minute apart.
+async fn calls(pool: &PgPool, number: i64, on: bool) -> i32 {
+    let talkgroup = common::talkgroup(pool, "SYSA", number).await;
+    sqlx::query("UPDATE talkgroups SET transcribe = $2 WHERE id = $1")
+        .bind(talkgroup)
+        .bind(on)
+        .execute(pool)
+        .await
+        .unwrap();
+    let at = Utc.with_ymd_and_hms(2031, 1, 15, 12, 0, 0).unwrap();
+    for n in 0..5 {
+        common::call(pool, talkgroup, at + Duration::minutes(n), None).await;
+    }
+    talkgroup
+}
+
+async fn queued(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM transcription_queue")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn past(talkgroup: Option<i32>) -> Past {
+    Past {
+        talkgroup_id: talkgroup,
+        from: None,
+        until: None,
+        min_ms: 1000,
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_queue_job_queues_in_steps_until_it_is_done(pool: PgPool) {
+    let talkgroup = calls(&pool, 7, false).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, count) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, 5);
+    let mut states = Vec::new();
+    while let Some((stepped, state)) = jobs::step(&pool, "host-a", 2).await.unwrap() {
+        assert_eq!(stepped, id);
+        states.push(state);
+    }
+    assert_eq!(states, ["running", "running", "running", "done"]);
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!((job.done, job.total), (5, Some(5)));
+    assert_eq!(job.host.as_deref(), Some("host-a"));
+    assert!(job.started_at.is_some() && job.finished_at.is_some());
+    assert_eq!(job.message, "queued 5 calls");
+    assert_eq!(queued(&pool).await, 5);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_backlog_takes_only_the_talkgroups_that_are_on(pool: PgPool) {
+    calls(&pool, 7, true).await;
+    calls(&pool, 8, false).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (_, count) = jobs::start_queue(&mut conn, &past(None), "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, 5);
+    while jobs::step(&pool, "host-a", 1000).await.unwrap().is_some() {}
+    assert_eq!(queued(&pool).await, 5);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stop_takes_effect_after_the_current_step(pool: PgPool) {
+    let talkgroup = calls(&pool, 7, false).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, _) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
+        .await
+        .unwrap();
+    jobs::step(&pool, "host-a", 2).await.unwrap();
+    assert_eq!(
+        jobs::stop(&mut conn, id, "bob").await.unwrap(),
+        Stopped::AfterStep
+    );
+    assert_eq!(
+        jobs::step(&pool, "host-a", 2).await.unwrap(),
+        Some((id, "stopped".into()))
+    );
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!(job.done, 2);
+    assert!(job.message.contains("2 of 5"), "{}", job.message);
+    assert_eq!(queued(&pool).await, 2);
+    assert_eq!(jobs::step(&pool, "host-a", 2).await.unwrap(), None);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_job_another_host_is_stepping_is_left_alone(pool: PgPool) {
+    use sqlx::Connection;
+    let talkgroup = calls(&pool, 7, false).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, _) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
+        .await
+        .unwrap();
+    // Another host holds the job's row, as it does during its step.
+    let mut other = pool.acquire().await.unwrap();
+    let mut tx = other.begin().await.unwrap();
+    sqlx::query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    // Nor does this host start the next job instead: one at a time.
+    jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
+        .await
+        .unwrap();
+    assert_eq!(jobs::step(&pool, "host-b", 2).await.unwrap(), None);
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        jobs::step(&pool, "host-b", 2).await.unwrap(),
+        Some((id, "running".into()))
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_job_resumes_on_another_host_where_it_was(pool: PgPool) {
+    let talkgroup = calls(&pool, 7, false).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, _) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
+        .await
+        .unwrap();
+    jobs::step(&pool, "host-a", 2).await.unwrap();
+    // host-a stops holding the lease; host-b takes over.
+    while jobs::step(&pool, "host-b", 2).await.unwrap().is_some() {}
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!(
+        (job.state.as_str(), job.done, job.host.as_deref()),
+        ("done", 5, Some("host-b"))
+    );
+    assert_eq!(queued(&pool).await, 5);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_job_of_an_unknown_kind_fails(pool: PgPool) {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO jobs (kind, started_by) VALUES ('purge', 'ann') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        jobs::step(&pool, "host-a", 2).await.unwrap(),
+        Some((id, "failed".into()))
+    );
+    let job = jobs::get(&pool, id).await.unwrap().unwrap();
+    assert!(job.message.contains("purge"), "{}", job.message);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_queue_job_for_no_such_talkgroup_is_refused(pool: PgPool) {
+    let mut conn = pool.acquire().await.unwrap();
+    assert!(matches!(
+        jobs::start_queue(&mut conn, &past(Some(424_242)), "ann").await,
+        Err(JobError::Refused(_))
     ));
 }

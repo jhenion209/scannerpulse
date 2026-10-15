@@ -55,9 +55,12 @@ pub async fn plan(
         ));
     };
     let past = Past {
-        talkgroup_id,
-        from: start_of(ask.from, zone)?,
-        until: start_of(ask.to.succ_opt().ok_or("the last day is too far")?, zone)?,
+        talkgroup_id: Some(talkgroup_id),
+        from: Some(start_of(ask.from, zone)?),
+        until: Some(start_of(
+            ask.to.succ_opt().ok_or("the last day is too far")?,
+            zone,
+        )?),
         min_ms,
     };
     let count = queue::count_past(&mut *conn, &past)

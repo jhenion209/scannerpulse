@@ -309,9 +309,9 @@ async fn past_calls_are_counted_and_queued_in_batches(pool: PgPool) -> sqlx::Res
         .execute(&pool)
         .await?;
     let past = Past {
-        talkgroup_id: talkgroup,
-        from: utc("2031-01-15T00:00:00Z"),
-        until: utc("2031-01-16T00:00:00Z"),
+        talkgroup_id: Some(talkgroup),
+        from: Some(utc("2031-01-15T00:00:00Z")),
+        until: Some(utc("2031-01-16T00:00:00Z")),
         min_ms: 1000,
     };
     assert_eq!(queue::count_past(&pool, &past).await?, 1);
