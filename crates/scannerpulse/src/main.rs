@@ -715,6 +715,8 @@ async fn asr_run(
     println!("candidate: {}", tried.candidate.summary());
     println!("production, same calls: {}", tried.production.summary());
     println!("{seconds:.2} s per call");
+    // The run may have outlasted the connection.
+    *conn = connect().await?;
     // Production's speed is known from a kept run with its server and model.
     let earlier = accuracy::runs(&mut *conn, set).await?;
     let production_run = production.as_ref().and_then(|p| {
