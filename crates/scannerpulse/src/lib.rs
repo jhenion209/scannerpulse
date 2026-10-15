@@ -10,6 +10,7 @@ pub mod favorites;
 pub mod filer;
 pub mod health;
 pub mod ingest;
+pub mod jobs;
 pub mod lease;
 pub mod listing;
 pub mod localtime;
