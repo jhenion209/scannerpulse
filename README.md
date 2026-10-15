@@ -79,7 +79,8 @@ listen.
     labelers' list is public);
   - `PATCH /api/calls/<id>/transcript` (`text`): anyone may correct a
     transcript; the machine's first output is kept beside it, with the
-    admin's name when an admin saves it. A text has at most 4,000 characters
+    admin's name when an admin saves it (only when the request carries the
+    `X-CSRF-Token` header; without it the save is a visitor's). A text has at most 4,000 characters
     and no `<`, `>` or control character other than a new line; one address
     may save 30 times a minute per host; saving pauses while the setting
     `maintenance.enabled` is true;
@@ -106,7 +107,9 @@ listen.
     set and the host has `SCANNERPULSE_OIDC_CLIENT_SECRET`; the secret never
     goes in the database. The ID token's signature, issuer, audience, expiry
     and nonce are checked, and its `groups` claim must hold the admin group
-    at every sign-in. The first sign-in creates the account; an existing
+    at every sign-in; an OIDC session ends 12 hours after signing in,
+    whatever its use, so the group is checked again at least that often. The
+    first sign-in creates the account; an existing
     account of the same name is never taken over. Password sign-in stays
     the way in when the provider is down, and `admin password-signin off`
     turns it off once OIDC works;
