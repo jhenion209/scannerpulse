@@ -173,6 +173,56 @@ async fn a_body_that_is_not_json_is_refused_in_json(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn an_export_by_filter_of_more_than_200_calls_is_refused(pool: PgPool) {
+    let tg = common::talkgroup(&pool, "SYSA", 127).await;
+    for i in 0..201 {
+        common::call(&pool, tg, at(0) + chrono::Duration::seconds(i), None).await;
+    }
+    let (status, _, body) = send(&pool, post(serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(String::from_utf8_lossy(&body).contains("more than 200"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_export_by_ids_ignores_the_filter(pool: PgPool) {
+    let (_root, ids) = calls_with_files(&pool, 2, 1, &[]).await;
+    let (status, _, _) = send(
+        &pool,
+        post(serde_json::json!({"ids": ids, "from": "garbage"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, headers, _) = send(
+        &pool,
+        post(serde_json::json!({"ids": [ids[1]], "from": "2031-01-01T00:00:00Z"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let disposition = headers["content-disposition"].to_str().unwrap();
+    assert!(
+        disposition.contains("20310301_120100-20310301_120100_ScannerPulse"),
+        "the chosen calls' own range: {disposition}"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unknown_ids_count_as_missing_and_no_audio_at_all_is_refused(pool: PgPool) {
+    let (_root, ids) = calls_with_files(&pool, 2, 1, &[1]).await;
+    let (status, headers, _) = send(
+        &pool,
+        post(serde_json::json!({"ids": [ids[0], ids[1], 999999]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-export-missing"], "2");
+    let (status, _, body) = send(&pool, post(serde_json::json!({"ids": [ids[1], 999999]}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(answer["error"], "not found");
+    assert_eq!(answer["detail"], "none of the 2 calls' audio could be read");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn an_export_of_too_much_audio_is_refused_before_it_is_read(pool: PgPool) {
     let (root, ids) = calls_with_files(&pool, 2, 1, &[]).await;
     for i in 0..2 {

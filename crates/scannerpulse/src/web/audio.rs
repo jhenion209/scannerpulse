@@ -74,8 +74,9 @@ struct Part {
 }
 
 /// `POST /api/export/audio`: the calls, oldest first, joined into one mp3.
-/// A list of ids ignores the filter. A call whose file cannot be read is left
-/// out, and the `X-Export-Missing` header counts them.
+/// A list of ids ignores the filter. A call whose file cannot be read, or an
+/// id that matches no call, is left out, and the `X-Export-Missing` header
+/// counts them; when none can be read the answer is 404.
 pub async fn export(
     State(state): State<AppState>,
     Json(ask): Json<ExportAsk>,
@@ -86,13 +87,22 @@ pub async fn export(
             "two exports are running; try again shortly".into(),
         )
     })?;
-    let filter = super::calls::filter(&ask.filter)?;
-    let parts = match &ask.ids {
-        Some(ids) => by_ids(&state, ids).await?,
-        None => by_filter(&state, &filter).await?,
+    let (parts, asked, from, until) = match &ask.ids {
+        Some(ids) => {
+            let parts = by_ids(&state, ids).await?;
+            let asked = ids.iter().collect::<std::collections::HashSet<_>>().len();
+            (parts, asked, None, None)
+        }
+        None => {
+            let filter = super::calls::filter(&ask.filter)?;
+            let parts = by_filter(&state, &filter).await?;
+            let asked = parts.len();
+            (parts, asked, filter.from, filter.until)
+        }
     };
+    let unknown = asked - parts.len();
     let zone = time_zone(&state).await?;
-    let name = export_name(&parts, filter.from, filter.until, zone, "mp3");
+    let name = export_name(&parts, from, until, zone, "mp3");
     let files: Vec<PathBuf> = parts
         .iter()
         .map(|p| PathBuf::from(&p.root).join(&p.rel_path))
@@ -104,6 +114,12 @@ pub async fn export(
     })
     .await
     .map_err(|error| ApiError::Internal(format!("the audio export failed: {error}")))??;
+    if joined.is_empty() {
+        return Err(ApiError::Missing(format!(
+            "none of the {asked} calls' audio could be read"
+        )));
+    }
+    let missing = missing + unknown;
     let mut response = Response::new(Body::from(joined));
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/mpeg"));
@@ -197,7 +213,9 @@ fn join(files: &[PathBuf]) -> Result<(Vec<u8>, usize), ApiError> {
 
 /// `20310301_120000-20310301_130000_ScannerPulse_TG-7-SYSA,9-SYSB.mp3`: the
 /// time range first, in the site's zone, so exports sort with the calls'
-/// own files; the filter's range when it has one, else the calls' own.
+/// own files; the filter's range when it has one, else the calls' own. It
+/// lists `NAME_TALKGROUPS` talkgroups and counts the others, and is cut to
+/// `NAME_BYTES`, so it fits a file system's name and a proxy's header.
 pub fn export_name(
     parts: &[impl ExportPart],
     from: Option<DateTime<Utc>>,
@@ -224,10 +242,25 @@ pub fn export_name(
     let tg = if talkgroups.is_empty() {
         String::new()
     } else {
-        format!("_TG-{}", talkgroups.join(","))
+        let mut shown = talkgroups[..talkgroups.len().min(NAME_TALKGROUPS)].join(",");
+        if talkgroups.len() > NAME_TALKGROUPS {
+            shown.push_str(&format!(",+{}", talkgroups.len() - NAME_TALKGROUPS));
+        }
+        format!("_TG-{shown}")
     };
-    format!("{range}ScannerPulse{tg}.{ext}")
+    let mut stem = format!("{range}ScannerPulse{tg}");
+    let mut end = stem.len().min(NAME_BYTES - ext.len() - 1);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    stem.truncate(end);
+    format!("{stem}.{ext}")
 }
+
+/// The most talkgroups an export's name lists.
+const NAME_TALKGROUPS: usize = 5;
+/// The longest export name, in bytes.
+const NAME_BYTES: usize = 200;
 
 /// What an export's name needs of a call.
 pub trait ExportPart {
@@ -338,6 +371,26 @@ mod tests {
             export_name(&[] as &[P], None, None, chrono_tz::UTC, "xlsx"),
             "ScannerPulse.xlsx"
         );
+    }
+
+    #[test]
+    fn the_name_shows_a_few_talkgroups_and_stays_short() {
+        let a = Utc.with_ymd_and_hms(2031, 7, 1, 17, 0, 0).unwrap();
+        let many: Vec<P> = (1..=12).map(|n| P(a, Some(n), Some("SYSA"))).collect();
+        assert_eq!(
+            export_name(&many, None, None, chrono_tz::UTC, "xlsx"),
+            "20310701_170000-20310701_170000_ScannerPulse_TG-1-SYSA,2-SYSA,3-SYSA,4-SYSA,5-SYSA,+7.xlsx"
+        );
+        let long: &'static str = "S".repeat(300).leak();
+        let name = export_name(
+            &[P(a, Some(1), Some(long))],
+            None,
+            None,
+            chrono_tz::UTC,
+            "mp3",
+        );
+        assert!(name.len() <= 200, "{}", name.len());
+        assert!(name.ends_with(".mp3"), "{name}");
     }
 
     #[test]
