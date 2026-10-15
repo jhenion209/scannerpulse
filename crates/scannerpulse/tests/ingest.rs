@@ -268,13 +268,10 @@ async fn a_filed_call_of_a_talkgroup_with_transcription_on_is_transcribed(
 
     fs::write(source.path().join(NAME), charlie()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
-    let (text, state): (String, String) = loop {
-        let found = sqlx::query_as(
-            "SELECT t.text, c.transcript_state FROM transcripts t \
-             JOIN calls c ON c.id = t.call_id AND c.started_at = t.started_at",
-        )
-        .fetch_optional(&pool)
-        .await?;
+    let text: String = loop {
+        let found = sqlx::query_scalar("SELECT text FROM transcripts")
+            .fetch_optional(&pool)
+            .await?;
         if let Some(found) = found {
             break found;
         }
@@ -284,6 +281,9 @@ async fn a_filed_call_of_a_talkgroup_with_transcription_on_is_transcribed(
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
+    let state: String = sqlx::query_scalar("SELECT transcript_state FROM calls")
+        .fetch_one(&pool)
+        .await?;
     assert_eq!(
         (text.as_str(), state.as_str()),
         ("Charlie Ops copies.", "text")
