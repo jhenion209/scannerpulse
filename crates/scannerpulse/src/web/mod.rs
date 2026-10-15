@@ -73,6 +73,8 @@ pub struct AppState {
     pub exact_counts: Arc<tokio::sync::Semaphore>,
     /// The host's live feed: every open page listens to it.
     pub live: live::Feed,
+    /// Becomes `true` when the host stops; every open live page then closes.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
     /// The exports that may run at once on this host.
     pub exports: Arc<tokio::sync::Semaphore>,
     /// The filter choices, with the time they were read.
@@ -88,6 +90,7 @@ impl AppState {
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             exports: Arc::new(tokio::sync::Semaphore::new(EXPORTS)),
             live: live::feed(),
+            shutdown: tokio::sync::watch::channel(false).0,
         }
     }
 }
@@ -121,6 +124,7 @@ pub async fn run(
         .connect_lazy_with(config.database.clone());
     let state = AppState::new(pool, config.database);
     live::spawn(state.pool.clone(), state.live.clone());
+    let stop_live = state.shutdown.clone();
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("cannot listen on {}: {error}", config.listen))?;
@@ -129,7 +133,12 @@ pub async fn run(
         listener,
         router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown)
+    // Graceful shutdown waits for open connections, and a live page never
+    // ends by itself: it is told to close first.
+    .with_graceful_shutdown(async move {
+        shutdown.await;
+        stop_live.send_replace(true);
+    })
     .await
     .map_err(|error| error.to_string())
 }

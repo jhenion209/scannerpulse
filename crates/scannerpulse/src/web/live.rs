@@ -62,25 +62,30 @@ pub fn feed() -> Feed {
 }
 
 /// Listens for the host's feed until the process ends; a lost connection is
-/// opened again after a pause, and the pages are told to read again.
+/// opened again after a pause. Once it is listening again the pages are told
+/// to read again, so nothing sent while it was down is missed.
 pub fn spawn(pool: PgPool, feed: Feed) {
     tokio::spawn(async move {
+        let mut lost = false;
         loop {
-            if let Err(error) = listen(&pool, &feed).await {
+            if let Err(error) = listen(&pool, &feed, lost).await {
                 crate::log::error(format!("live feed: {error}"));
+                lost = true;
             }
-            let _ = feed.send(Arc::new(Event::Resync));
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 }
 
-async fn listen(pool: &PgPool, feed: &Feed) -> sqlx::Result<()> {
+async fn listen(pool: &PgPool, feed: &Feed, lost: bool) -> sqlx::Result<()> {
     let mut listener = PgListener::connect_with(pool).await?;
     listener.ignore_pool_close_event(true);
     listener
         .listen_all(["scannerpulse_calls", "scannerpulse_transcripts"])
         .await?;
+    if lost {
+        let _ = feed.send(Arc::new(Event::Resync));
+    }
     loop {
         // `try_recv` gives `None` when the connection was lost: notifications
         // sent meanwhile are gone, so the pages must read again.
@@ -159,6 +164,9 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
     };
     // Listen before catching up, so nothing falls between the two.
     let mut events = state.live.subscribe();
+    let mut stop = state.shutdown.subscribe();
+    // The calls sent by the catch-up that may still arrive live: each is
+    // skipped once, then forgotten, so the set is at most `CATCH_UP` long.
     let mut sent: HashSet<i64> = HashSet::new();
     if let Some(since) = params.since {
         let missed: sqlx::Result<Vec<Row>> =
@@ -191,7 +199,7 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
                     Err(broadcast::error::RecvError::Closed) => return,
                 };
                 if let Event::Call { call } = &*event {
-                    if !sent.insert(call.id) {
+                    if sent.remove(&call.id) {
                         continue;
                     }
                 }
@@ -203,6 +211,10 @@ async fn serve(state: AppState, params: LiveParams, mut ws: WebSocket) {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
                 Some(Ok(_)) => {}
             },
+            _ = stop.changed() => {
+                let _ = ws.send(Message::Close(None)).await;
+                return;
+            }
         }
     }
 }

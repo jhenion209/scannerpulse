@@ -105,3 +105,34 @@ async fn a_page_that_reconnects_gets_the_calls_it_missed_first(pool: PgPool) {
     let heard = first_call(&pool, &mut ws, later).await;
     assert_eq!(heard["call"]["id"], later);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_page_hears_new_calls_again_once_the_lost_listener_is_back(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let url = serve(&pool).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{url}?talkgroups={tg}"))
+        .await
+        .unwrap();
+    let before = call(&pool, tg, at(0), None).await;
+    first_call(&pool, &mut ws, before).await;
+    // Only this database's listening sessions: the other tests have their own.
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE query ILIKE 'LISTEN%' AND datname = current_database() AND pid <> pg_backend_pid()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Stale messages may still arrive before the resync: skip them.
+    loop {
+        if next(&mut ws).await["type"] == "resync" {
+            break;
+        }
+    }
+    // The page reads again once it is told to, so a call notified now must
+    // reach it at once, without a retry.
+    let later = call(&pool, tg, at(1), None).await;
+    notify(&pool, "scannerpulse_calls", later).await;
+    assert_eq!(next(&mut ws).await["call"]["id"], later);
+}
