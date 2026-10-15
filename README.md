@@ -210,6 +210,10 @@ listen.
   that goes is typed exactly, a job moves its calls to the other in steps,
   then its favorites, removes it, and corrects the moved calls' files to
   the other's number and name, as `talkgroup correct` does.
+  The talkgroup that goes is deleted; if the recorder still sends its
+  number, ingest adds it again as a new talkgroup with the recorder's name
+  (rename or remove it in the recorder's talkgroup list first). Its
+  transcription switch goes with it; the other keeps its own.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
   each host) gives the calls per five minutes of the 120 days before today,
   in the site's time zone, as weekday and weekend profiles (calls a day),

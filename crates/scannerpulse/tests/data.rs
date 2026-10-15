@@ -714,3 +714,60 @@ async fn an_admin_merges_with_the_name_of_the_talkgroup_that_goes(pool: PgPool) 
     .await;
     assert_eq!(started.status, 201);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_merge_into_a_talkgroup_that_went_fails_and_frees_the_line(pool: PgPool) {
+    let a = common::talkgroup(&pool, "SYSA", 1).await;
+    let b = common::talkgroup(&pool, "SYSA", 2).await;
+    let c = common::talkgroup(&pool, "SYSA", 3).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (first, _) = scannerpulse::data::start_merge(&mut conn, a, b, "Group 1", "ann")
+        .await
+        .unwrap();
+    let (second, _) = scannerpulse::data::start_merge(&mut conn, c, a, "Group 3", "ann")
+        .await
+        .unwrap();
+    let (third, _) = scannerpulse::data::start_correct(&mut conn, b, "Group 2", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let state = |id| {
+        let pool = pool.clone();
+        async move { scannerpulse::jobs::get(&pool, id).await.unwrap().unwrap() }
+    };
+    assert_eq!(state(first).await.state, "done");
+    let failed = state(second).await;
+    assert_eq!(failed.state, "failed");
+    assert!(failed.message.contains("is gone"), "{}", failed.message);
+    assert_eq!(state(third).await.state, "done");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stopped_merge_leaves_the_talkgroup_marked_from_its_first_move(pool: PgPool) {
+    let from = common::talkgroup(&pool, "SYSA", 1).await;
+    let into = common::talkgroup(&pool, "SYSA", 2).await;
+    common::call(
+        &pool,
+        from,
+        Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap(),
+        None,
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, _) = scannerpulse::data::start_merge(&mut conn, from, into, "Group 1", "ann")
+        .await
+        .unwrap();
+    assert!(names(&pool, into).await.2);
+    let context = scannerpulse::jobs::Context::new(None);
+    let step = scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    assert_eq!(step, Some((job, "running".to_string())));
+    scannerpulse::jobs::stop(&mut conn, job, "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "stopped");
+    assert!(!names(&pool, into).await.2, "marked from the first move");
+}

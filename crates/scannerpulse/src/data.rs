@@ -608,6 +608,25 @@ struct MergeWork {
     files: FileWork,
 }
 
+/// Marks `into`'s files as not corrected; if it has no name its files carry
+/// yet, they carry `from_name`.
+async fn mark_uncorrected(
+    conn: &mut PgConnection,
+    into: i32,
+    from_name: Option<String>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE talkgroups SET files_correct = false, \
+           files_name = CASE WHEN coalesce(files_name, '') = '' THEN $2 ELSE files_name END \
+         WHERE id = $1",
+    )
+    .bind(into)
+    .bind(from_name)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
     let Ok(params) = serde_json::from_value::<Merge>(job.params.clone()) else {
         return Ok(Outcome::Failed(
@@ -625,6 +644,23 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         };
         return Ok(step.outcome(serde_json::to_value(&work).expect("plain data")));
     }
+    if named(&mut *conn, params.into).await?.is_none() {
+        return Ok(Outcome::Failed(format!(
+            "talkgroup {} is gone; nothing more was moved",
+            params.into
+        )));
+    }
+    let from_name: Option<String> = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
+        .bind(params.from)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if from_name.is_none() && work.calls_moved == 0 {
+        return Ok(Outcome::Failed(format!(
+            "talkgroup {} is gone",
+            params.from
+        )));
+    }
+    let first = work.calls_moved == 0;
     let moved = sqlx::query(
         "UPDATE calls SET talkgroup_id = $2 WHERE (id, started_at) IN \
            (SELECT id, started_at FROM calls WHERE talkgroup_id = $1 LIMIT $3)",
@@ -637,6 +673,11 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     .rows_affected() as i64;
     work.calls_moved += moved;
     if moved > 0 {
+        // The moved files carry the other name from the first move on, so a
+        // stop here still leaves the talkgroup marked.
+        if first {
+            mark_uncorrected(conn, params.into, from_name).await?;
+        }
         return Ok(Outcome::More {
             done: work.calls_moved,
             total: job.total.map(|total| total.max(work.calls_moved)),
@@ -645,10 +686,6 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         });
     }
     // Every call has moved: the favorites follow, and the talkgroup goes.
-    let from_name: Option<String> = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
-        .bind(params.from)
-        .fetch_optional(&mut *conn)
-        .await?;
     sqlx::query(
         "INSERT INTO favorite_talkgroups (favorite_id, talkgroup_id) \
          SELECT favorite_id, $2 FROM favorite_talkgroups WHERE talkgroup_id = $1 \
@@ -667,15 +704,7 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         .execute(&mut *conn)
         .await?;
     if work.calls_moved > 0 {
-        sqlx::query(
-            "UPDATE talkgroups SET files_correct = false, \
-               files_name = CASE WHEN coalesce(files_name, '') = '' THEN $2 ELSE files_name END \
-             WHERE id = $1",
-        )
-        .bind(params.into)
-        .bind(from_name)
-        .execute(&mut *conn)
-        .await?;
+        mark_uncorrected(conn, params.into, from_name).await?;
     }
     let to_correct: i64 = match named(&mut *conn, params.into).await? {
         Some(into) => {
