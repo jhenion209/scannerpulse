@@ -461,6 +461,10 @@ pub fn check(
         return improvement_from_values(&after).map(drop);
     }
     let Some(&key) = WEB_KEYS.iter().find(|k| **k == key) else {
+        // A row no part reads (left by SQL or an older version) may be cleared.
+        if value.is_none() {
+            return Ok(());
+        }
         return Err(SettingsError::Unknown(key.to_string()));
     };
     let Some(value) = after.get(key) else {

@@ -503,3 +503,19 @@ fn the_oidc_settings_have_their_forms() {
     ));
     assert!(refused("oidc.client_id", Some(json!(" ")), &[]));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stored_setting_no_part_reads_can_be_removed(pool: PgPool) {
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('no.such', '1')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    assert!(
+        settings::change(&mut conn, "no.such", Some(&json!(1)))
+            .await
+            .is_err()
+    );
+    settings::change(&mut conn, "no.such", None).await.unwrap();
+    assert!(!settings::all(&pool).await.unwrap().contains_key("no.such"));
+}
