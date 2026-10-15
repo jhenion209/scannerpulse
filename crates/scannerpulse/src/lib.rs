@@ -25,6 +25,7 @@ pub mod transcripts;
 pub mod watcher;
 pub mod web;
 pub mod wer;
+pub mod xlsx;
 
 /// The schema, applied by `scannerpulse db-update`.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

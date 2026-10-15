@@ -6,6 +6,7 @@ mod audio;
 mod calls;
 mod error;
 mod info;
+mod sheet;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -100,6 +101,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/labels/todo", get(info::labels_todo))
         .route("/audio/{id}", get(audio::one))
         .route("/api/export/audio", post(audio::export))
+        .route("/api/export/xlsx", get(sheet::export))
         .with_state(state)
 }
 

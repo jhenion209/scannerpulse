@@ -89,7 +89,7 @@ pub async fn export(
         None => by_filter(&state, &filter).await?,
     };
     let zone = time_zone(&state).await?;
-    let name = export_name(&parts, filter.from, filter.until, zone);
+    let name = export_name(&parts, filter.from, filter.until, zone, "mp3");
     let files: Vec<PathBuf> = parts
         .iter()
         .map(|p| PathBuf::from(&p.root).join(&p.rel_path))
@@ -147,7 +147,7 @@ async fn by_filter(state: &AppState, filter: &Filter) -> Result<Vec<Part>, ApiEr
     by_ids(state, &ids).await
 }
 
-async fn time_zone(state: &AppState) -> Result<Tz, ApiError> {
+pub(super) async fn time_zone(state: &AppState) -> Result<Tz, ApiError> {
     let value: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT value FROM settings WHERE key = 'time_zone'")
             .fetch_optional(&state.pool)
@@ -182,6 +182,7 @@ pub fn export_name(
     from: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
     zone: Tz,
+    ext: &str,
 ) -> String {
     let stamp = |t: DateTime<Utc>| t.with_timezone(&zone).format("%Y%m%d_%H%M%S").to_string();
     let first = from.or_else(|| parts.first().map(|p| p.started_at()));
@@ -204,7 +205,7 @@ pub fn export_name(
     } else {
         format!("_TG-{}", talkgroups.join(","))
     };
-    format!("{range}ScannerPulse{tg}.mp3")
+    format!("{range}ScannerPulse{tg}.{ext}")
 }
 
 /// What an export's name needs of a call.
@@ -212,6 +213,18 @@ pub trait ExportPart {
     fn started_at(&self) -> DateTime<Utc>;
     fn talkgroup(&self) -> Option<i64>;
     fn system(&self) -> Option<&str>;
+}
+
+impl ExportPart for crate::listing::Row {
+    fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
+    }
+    fn talkgroup(&self) -> Option<i64> {
+        self.talkgroup
+    }
+    fn system(&self) -> Option<&str> {
+        self.system.as_deref()
+    }
 }
 
 impl ExportPart for Part {
@@ -280,16 +293,17 @@ mod tests {
         ];
         let zone: chrono_tz::Tz = "America/New_York".parse().unwrap();
         assert_eq!(
-            export_name(&parts, None, None, zone),
+            export_name(&parts, None, None, zone, "mp3"),
             "20310701_130000-20310701_143000_ScannerPulse_TG-7-SYSA,9-SYSB.mp3"
         );
         let from = Utc.with_ymd_and_hms(2031, 7, 1, 16, 0, 0).unwrap();
         assert!(
-            export_name(&parts, Some(from), None, chrono_tz::UTC).starts_with("20310701_160000-")
+            export_name(&parts, Some(from), None, chrono_tz::UTC, "xlsx")
+                .starts_with("20310701_160000-")
         );
         assert_eq!(
-            export_name(&[] as &[P], None, None, chrono_tz::UTC),
-            "ScannerPulse.mp3"
+            export_name(&[] as &[P], None, None, chrono_tz::UTC, "xlsx"),
+            "ScannerPulse.xlsx"
         );
     }
 
