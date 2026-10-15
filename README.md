@@ -43,6 +43,23 @@ listen.
   talkgroup): `UPDATE talkgroups SET transcribe = true WHERE ...`.
 - `transcribe --talkgroup SYSTEM/NUMBER --from DAY --to DAY [--yes]` queues the
   past calls of one talkgroup for transcription.
+- `asr sample|todo|report|run` measure transcription against the text people
+  saved, when the setting `improvement_module.enabled` is true:
+  - `asr sample --set NAME --talkgroups FILE --calls N --days N
+    [--min-seconds S] [--seed N] [--yes]` draws an evaluation set from the
+    talkgroups listed in FILE (one `SYSTEM/NUMBER` a line), as evenly as their
+    calls allow across the talkgroups and the months of the last N days. Only
+    calls the machine has transcribed are drawn. A set that people have
+    labeled is never replaced, so its scores stay comparable.
+  - `asr todo --set NAME` lists the set's calls that have no person's text yet.
+  - `asr report --set NAME` gives the word error rate of production's first
+    output against the people's texts, over all the calls together, and how
+    many calls labeled silent got text; then the set's kept runs.
+  - `asr run --set NAME --server URL --model MODEL [--prompt-file FILE]`
+    transcribes the set's labeled calls with a candidate, one at a time,
+    without saving any transcript, and keeps its word error rate and seconds
+    per call beside production's. It stops when the server fails three calls
+    in a row.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
