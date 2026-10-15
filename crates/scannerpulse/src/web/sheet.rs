@@ -7,7 +7,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 
 use super::audio::{attachment, export_name, time_zone};
-use super::calls::{ListParams, TEXT_LIMIT};
+use super::calls::{ListParams, READ_LIMIT};
 use super::{ApiError, AppState};
 use crate::listing;
 use crate::xlsx::{Cell, workbook};
@@ -29,7 +29,7 @@ pub async fn export(
     let filter = super::calls::filter(&params)?;
     let zone = time_zone(&state).await?;
     let mut conn = state.pool.acquire().await?;
-    let page = listing::page(&mut conn, &filter, false, None, MAX_ROWS, TEXT_LIMIT).await?;
+    let page = listing::page(&mut conn, &filter, false, None, MAX_ROWS, READ_LIMIT).await?;
     drop(conn);
     let capped = page.next.is_some();
     let rows: Vec<Vec<Cell>> = page

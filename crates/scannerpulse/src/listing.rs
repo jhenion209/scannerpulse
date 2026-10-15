@@ -120,14 +120,14 @@ fn push_filter<'a>(q: &mut QueryBuilder<'a, Postgres>, filter: &'a Filter) {
     }
 }
 
-/// One page of the list. A search with text runs under `text_limit`.
+/// One page of the list, read under the time limit `limit`.
 pub async fn page(
     conn: &mut PgConnection,
     filter: &Filter,
     oldest_first: bool,
     after: Option<Cursor>,
     size: i64,
-    text_limit: std::time::Duration,
+    limit: std::time::Duration,
 ) -> sqlx::Result<Page> {
     let (op, dir) = if oldest_first {
         (">", "ASC")
@@ -152,10 +152,9 @@ pub async fn page(
             .push_bind(size + 1);
         q
     };
-    let text = text_query(filter).is_some();
     let mut rows: Vec<Row> = Vec::new();
     for attempt in 0..2 {
-        let mut tx = begin(conn, text, text_limit).await?;
+        let mut tx = begin(conn, limit).await?;
         let mut q = build();
         match q.build_query_as().fetch_all(&mut *tx).await {
             Ok(found) => {
@@ -179,13 +178,14 @@ pub async fn page(
     Ok(Page { rows, next })
 }
 
-/// How many calls the filter matches, up to `cap` (`None`: all). Returns the
-/// count and whether it stopped at the cap.
+/// How many calls the filter matches, up to `cap` (`None`: all), read under
+/// the time limit `limit`. Returns the count and whether it stopped at the
+/// cap.
 pub async fn count(
     conn: &mut PgConnection,
     filter: &Filter,
     cap: Option<i64>,
-    text_limit: std::time::Duration,
+    limit: std::time::Duration,
 ) -> sqlx::Result<(i64, bool)> {
     let build = || {
         let mut q = QueryBuilder::new("SELECT count(*) FROM (SELECT 1");
@@ -196,10 +196,9 @@ pub async fn count(
         q.push(") matched");
         q
     };
-    let text = text_query(filter).is_some();
     let mut n = 0i64;
     for attempt in 0..2 {
-        let mut tx = begin(conn, text, text_limit).await?;
+        let mut tx = begin(conn, limit).await?;
         let mut q = build();
         match q.build_query_scalar().fetch_one(&mut *tx).await {
             Ok(found) => {
@@ -217,22 +216,20 @@ pub async fn count(
     })
 }
 
-/// A transaction for one read; a search with text gets a statement time
-/// limit. A read is tried once more when it was a deadlock's victim: ingest
+/// A transaction for one read, with a statement time limit: the list is
+/// public, and any filter can be slow on a large archive. A read is tried
+/// once more when it was a deadlock's victim: ingest
 /// can create a month's partitions while it reads.
 async fn begin(
     conn: &mut PgConnection,
-    text: bool,
     limit: std::time::Duration,
 ) -> sqlx::Result<sqlx::Transaction<'_, Postgres>> {
     use sqlx::Connection;
     let mut tx = conn.begin().await?;
-    if text {
-        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-            .bind(format!("{}ms", limit.as_millis()))
-            .execute(&mut *tx)
-            .await?;
-    }
+    sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+        .bind(format!("{}ms", limit.as_millis()))
+        .execute(&mut *tx)
+        .await?;
     Ok(tx)
 }
 

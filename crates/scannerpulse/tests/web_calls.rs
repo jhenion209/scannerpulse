@@ -186,3 +186,38 @@ async fn a_bad_parameter_is_refused_with_its_reason(pool: PgPool) {
         assert!(!answer["detail"].as_str().unwrap().is_empty(), "{uri}");
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn every_read_of_the_list_stops_at_the_time_limit(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    call(&pool, tg, at(0), None).await;
+    // A lock makes the reads wait; their limit must end the wait.
+    let mut locker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE calls IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let limit = Duration::from_millis(300);
+    let everything = Filter::default();
+    let code = |error: sqlx::Error| {
+        error
+            .as_database_error()
+            .and_then(|e| e.code())
+            .map(|c| c.to_string())
+    };
+    let page = tokio::time::timeout(
+        Duration::from_secs(10),
+        listing::page(&mut conn, &everything, false, None, 10, limit),
+    )
+    .await
+    .expect("the page stops at its limit");
+    assert_eq!(code(page.unwrap_err()).as_deref(), Some("57014"));
+    let count = tokio::time::timeout(
+        Duration::from_secs(10),
+        listing::count(&mut conn, &everything, None, limit),
+    )
+    .await
+    .expect("the count stops at its limit");
+    assert_eq!(code(count.unwrap_err()).as_deref(), Some("57014"));
+}

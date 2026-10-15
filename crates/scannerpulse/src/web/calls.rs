@@ -12,8 +12,8 @@ use crate::listing::{self, Cursor, Filter, PAGE_SIZES, Row};
 
 /// A count stops here unless the request asks for the exact count.
 pub const COUNT_CAP: i64 = 10_000;
-/// The longest a search with text may take.
-pub const TEXT_LIMIT: Duration = Duration::from_secs(30);
+/// The longest one read of the list or its count may take.
+pub const READ_LIMIT: Duration = Duration::from_secs(30);
 /// Exact counts that may run at once per host; another gets the capped count.
 pub const EXACT_COUNTS: usize = 2;
 
@@ -97,7 +97,7 @@ pub async fn list(
         ),
     };
     let mut conn = state.pool.acquire().await?;
-    let mut page = listing::page(&mut conn, &filter, oldest_first, after, size, TEXT_LIMIT).await?;
+    let mut page = listing::page(&mut conn, &filter, oldest_first, after, size, READ_LIMIT).await?;
     if params.smart {
         crate::smartsort::smart_sort(&mut page.rows);
     }
@@ -116,7 +116,7 @@ pub async fn list(
         } else {
             Some(COUNT_CAP)
         };
-        let (n, capped) = listing::count(&mut conn, &filter, cap, TEXT_LIMIT).await?;
+        let (n, capped) = listing::count(&mut conn, &filter, cap, READ_LIMIT).await?;
         (Some(n), capped)
     };
     Ok(Json(ListAnswer {

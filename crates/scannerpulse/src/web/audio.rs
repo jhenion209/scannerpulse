@@ -12,7 +12,7 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use tower::ServiceExt;
 
-use super::calls::{ListParams, TEXT_LIMIT};
+use super::calls::{ListParams, READ_LIMIT};
 use super::{ApiError, AppState};
 use crate::listing::{self, Filter};
 
@@ -132,7 +132,7 @@ async fn by_ids(state: &AppState, ids: &[i64]) -> Result<Vec<Part>, ApiError> {
 async fn by_filter(state: &AppState, filter: &Filter) -> Result<Vec<Part>, ApiError> {
     let mut conn = state.pool.acquire().await?;
     let (n, capped) =
-        listing::count(&mut conn, filter, Some(MAX_EXPORT_CALLS as i64), TEXT_LIMIT).await?;
+        listing::count(&mut conn, filter, Some(MAX_EXPORT_CALLS as i64), READ_LIMIT).await?;
     if capped {
         return Err(ApiError::Limit(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -142,7 +142,7 @@ async fn by_filter(state: &AppState, filter: &Filter) -> Result<Vec<Part>, ApiEr
     if n == 0 {
         return Err(ApiError::BadRequest("no call matches".into()));
     }
-    let page = listing::page(&mut conn, filter, true, None, 500, TEXT_LIMIT).await?;
+    let page = listing::page(&mut conn, filter, true, None, 500, READ_LIMIT).await?;
     let ids: Vec<i64> = page.rows.iter().map(|r| r.id).collect();
     by_ids(state, &ids).await
 }

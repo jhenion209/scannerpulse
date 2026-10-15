@@ -70,7 +70,8 @@ listen.
     `OR`, `-word` or `NOT word`, `prefix*`), `order` (`newest` or `oldest`),
     `size` (10, 25, 50, 100, 250 or 500), `after` (the `next` cursor of the
     previous page), `smart=true` (SmartSort) and `exact=true`; a count stops
-    at 10,000 unless it is exact, and a search with text has 30 seconds;
+    at 10,000 unless it is exact, and each read of a page or a count has
+    30 seconds;
   - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, `/api/status`, and
     `/api/labels/todo?set=NAME` when the labelers' list is public;
   - `/audio/<id>`: a call's file, with byte ranges;
