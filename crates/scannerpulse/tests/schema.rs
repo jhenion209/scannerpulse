@@ -570,3 +570,74 @@ async fn a_queued_call_leaves_the_queue_with_its_call(pool: PgPool) -> sqlx::Res
     assert_eq!(left, 0, "the queue row must go when its call is deleted");
     Ok(())
 }
+
+// Migration 0005: the web service.
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_oidc_account_has_both_issuer_and_subject(pool: PgPool) -> sqlx::Result<()> {
+    let err =
+        sqlx::query("INSERT INTO admins (login, oidc_issuer) VALUES ('ann', 'https://id.test')")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert!(err.to_string().contains("admins_oidc_pair"), "{err}");
+    sqlx::query(
+        "INSERT INTO admins (login, oidc_issuer, oidc_subject) VALUES ('ann', 'https://id.test', 's1')",
+    )
+    .execute(&pool)
+    .await?;
+    let err = sqlx::query(
+        "INSERT INTO admins (login, oidc_issuer, oidc_subject) VALUES ('bob', 'https://id.test', 's1')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("admins_oidc_issuer_oidc_subject_key"),
+        "{err}"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn deleting_an_admin_removes_its_sessions(pool: PgPool) -> sqlx::Result<()> {
+    let admin: i64 = sqlx::query_scalar("INSERT INTO admins (login) VALUES ('ann') RETURNING id")
+        .fetch_one(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO sessions (token_hash, admin_id, csrf, created_at, last_seen) \
+         VALUES ('\\x01', $1, 'c', now(), now())",
+    )
+    .bind(admin)
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM admins").execute(&pool).await?;
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_job_starts_queued_and_takes_only_known_states(pool: PgPool) -> sqlx::Result<()> {
+    let state: String = sqlx::query_scalar(
+        "INSERT INTO jobs (kind, started_by) VALUES ('purge', 'ann') RETURNING state",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, "queued");
+    let err = sqlx::query("UPDATE jobs SET state = 'paused'")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("jobs_state"), "{err}");
+    let (talkgroup, _, _) = seed(&pool).await?;
+    let correct: bool = sqlx::query_scalar("SELECT files_correct FROM talkgroups WHERE id = $1")
+        .bind(talkgroup)
+        .fetch_one(&pool)
+        .await?;
+    assert!(correct, "a talkgroup's files start correct");
+    Ok(())
+}
