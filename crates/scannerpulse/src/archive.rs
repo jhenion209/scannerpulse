@@ -14,6 +14,12 @@ use sha2::{Digest, Sha256};
 
 pub type Digest32 = [u8; 32];
 
+/// Held by every writer of the archive in this process, from choosing a
+/// file's name to giving the file that name: the filer and the jobs both
+/// run on the lease holder, and two of them must never take one free name.
+pub static WRITES: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// The folder of a talkgroup, `<number>-<name>` with any `/` in the name made
 /// `_`; `Unknown` for a call without a talkgroup.
 pub fn folder(talkgroup: Option<(i64, &str)>) -> String {

@@ -493,3 +493,52 @@ async fn an_admin_starts_a_correction_with_its_name_typed(pool: PgPool) {
     .await;
     assert_eq!(missing.status, 400);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_file_that_cannot_be_read_is_refused_and_the_job_ends(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let old_dir = "2031-03-01/127-Alpha Fire";
+    let (good, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        &format!("{old_dir}/20310301_120000SYSA.mp3"),
+        Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+        at(0),
+    )
+    .await;
+    // A directory where the file should be: reading it fails, even as root.
+    let bad_rel = format!("{old_dir}/20310301_120500SYSA.mp3");
+    let (bad, _) = filed(&pool, places, &root, &bad_rel, None, at(5)).await;
+    std::fs::create_dir_all(root.join(&bad_rel)).unwrap();
+
+    let mut conn = pool.acquire().await.unwrap();
+    talkgroups::rename(&mut conn, talkgroup, "Alpha / Fire")
+        .await
+        .unwrap();
+    let (job, count) =
+        scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha / Fire", "ann")
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+    run_jobs(&pool).await;
+
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done");
+    assert!(
+        ended
+            .message
+            .contains("1 files of SYSA/127 corrected; 1 refused"),
+        "{}",
+        ended.message
+    );
+    assert!(
+        rel_of(&pool, good)
+            .await
+            .starts_with("2031-03-01/127-Alpha _ Fire/")
+    );
+    assert_eq!(rel_of(&pool, bad).await, bad_rel);
+}

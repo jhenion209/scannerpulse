@@ -58,6 +58,18 @@ pub async fn named(db: impl sqlx::PgExecutor<'_>, id: i32) -> sqlx::Result<Optio
     .await
 }
 
+/// The talkgroup, locked for the step's transaction, so that a rename waits
+/// for the step.
+async fn named_locked(conn: &mut PgConnection, id: i32) -> sqlx::Result<Option<Named>> {
+    sqlx::query_as(
+        "SELECT t.id, s.name AS system, t.number, t.name \
+         FROM talkgroups t JOIN systems s ON s.id = t.system_id WHERE t.id = $1 FOR SHARE OF t",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
 async fn existing(conn: &mut PgConnection, id: i32) -> Result<Named, JobError> {
     named(&mut *conn, id)
         .await?
@@ -196,9 +208,10 @@ async fn remove_gone(
             continue;
         }
         let path = root.join(&file.rel_path);
-        match std::fs::remove_file(&path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(io_error(error)),
-            _ => {}
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                crate::log::warn(format!("cannot remove {}: {error}", path.display()));
+            }
         }
         if let Some(dir) = path.parent() {
             // Only an empty folder goes.
@@ -277,16 +290,22 @@ async fn correct_one(
     let data = match std::fs::read(&old) {
         Ok(data) => data,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Handled::Missing),
-        Err(error) => return Err(io_error(error)),
+        Err(error) => {
+            return Ok(Handled::Refused(format!("{}: {error}", call.rel_path)));
+        }
     };
-    let mtime = std::fs::metadata(&old)
-        .and_then(|meta| meta.modified())
-        .map_err(io_error)?;
+    let mtime = match std::fs::metadata(&old).and_then(|meta| meta.modified()) {
+        Ok(mtime) => mtime,
+        Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
+    };
     let retagged = match crate::retag::retag(name, &data, to) {
         Ok(retagged) => retagged,
         Err(why) => return Ok(Handled::Refused(format!("{}: {why}", call.rel_path))),
     };
     let dir = format!("{day}/{folder}");
+    // The name is chosen and given under the lock, so that the filer, which
+    // takes the same one, never takes it too.
+    let writing = archive::WRITES.lock().await;
     let (rel, copy) = free_rel(
         conn,
         root,
@@ -297,18 +316,28 @@ async fn correct_one(
     )
     .await?;
     let path = root.join(&rel);
+    let refused = |error: io::Error| Handled::Refused(format!("{}: {error}", call.rel_path));
     if !copy {
         let digest = archive::sha256(&retagged.data);
-        archive::write_part(&path, &retagged.data, &digest).map_err(io_error)?;
-        archive::finish_part(&path).map_err(io_error)?;
+        if let Err(error) = archive::write_part(&path, &retagged.data, &digest) {
+            return Ok(refused(error));
+        }
+        // After this the new file is an orphan if the step fails: the next
+        // attempt finds it as an exact copy and reuses it.
+        if let Err(error) = archive::finish_part(&path) {
+            return Ok(refused(error));
+        }
     }
     // A later import reads a time in the repeated hour with the file's
     // modification time, so the new file keeps the old one's.
-    std::fs::File::options()
+    if let Err(error) = std::fs::File::options()
         .write(true)
         .open(&path)
         .and_then(|file| file.set_modified(mtime))
-        .map_err(io_error)?;
+    {
+        return Ok(refused(error));
+    }
+    drop(writing);
     let moved = sqlx::query(
         "UPDATE calls SET rel_path = $4 WHERE id = $1 AND started_at = $2 AND rel_path = $3",
     )
@@ -357,7 +386,7 @@ async fn correct_files(
     let roots = roots(conn).await?;
     remove_gone(conn, &roots, &work.remove).await?;
     work.remove.clear();
-    let Some(talkgroup) = named(&mut *conn, talkgroup_id).await? else {
+    let Some(talkgroup) = named_locked(&mut *conn, talkgroup_id).await? else {
         return Ok(Outcome::Failed(format!("talkgroup {talkgroup_id} is gone")));
     };
     let folder = talkgroup.folder();
@@ -383,6 +412,12 @@ async fn correct_files(
     let to = talkgroup.talkgroup();
     for call in &batch {
         if let Some(root) = roots.get(&call.location_id) {
+            if !root.is_dir() {
+                return Err(io_error(io::Error::other(format!(
+                    "the location {} is not there",
+                    root.display()
+                ))));
+            }
             match correct_one(conn, root, call, &to, &folder).await? {
                 Handled::Moved(gone) => {
                     work.moved += 1;
@@ -430,9 +465,12 @@ async fn finish_correction(
     .fetch_one(&mut *conn)
     .await?;
     if left == 0 {
-        sqlx::query("UPDATE talkgroups SET files_correct = true, files_name = NULL WHERE id = $1")
-            .bind(talkgroup.id)
-            .execute(&mut *conn)
+        sqlx::query(
+            "UPDATE talkgroups SET files_correct = true, files_name = NULL WHERE id = $1 AND name = $2",
+        )
+        .bind(talkgroup.id)
+        .bind(&talkgroup.name)
+        .execute(&mut *conn)
             .await?;
     }
     let mut message = format!(

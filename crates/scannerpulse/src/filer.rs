@@ -182,6 +182,7 @@ impl Filer {
             };
         let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
         let digest = archive::sha256(&data);
+        let writing = archive::WRITES.lock().await;
         let place = match archive::place(&self.location.root, dir, name, data.len() as u64, &digest)
         {
             Ok(place) => place,
@@ -226,6 +227,7 @@ impl Filer {
                 rel
             }
         };
+        drop(writing);
         let id = match self.record(row, &call, &rel).await? {
             Ok(id) => id,
             Err(outcome) => return Ok(outcome),
