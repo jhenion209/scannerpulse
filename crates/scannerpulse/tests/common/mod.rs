@@ -336,3 +336,22 @@ pub async fn insert_call(
     .unwrap();
     (call, talkgroup)
 }
+
+/// Turns transcription on with one server and the given limits.
+pub async fn set_transcription(pool: &PgPool, url: &str, min_ms: i32, timeout_seconds: u64) {
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES \
+         ('transcription.enabled', 'true'), \
+         ('transcription.servers', jsonb_build_array(jsonb_build_object('url', $1::text, 'weight', 2))), \
+         ('transcription.model', '\"model-x\"'), \
+         ('transcription.min_duration_ms', to_jsonb($2::int)), \
+         ('transcription.request_timeout_seconds', to_jsonb($3::bigint)) \
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(url)
+    .bind(min_ms)
+    .bind(timeout_seconds as i64)
+    .execute(pool)
+    .await
+    .unwrap();
+}

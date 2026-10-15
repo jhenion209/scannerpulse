@@ -32,6 +32,7 @@ fn config(pool: &PgPool) -> Config {
         },
         stable_for: Duration::from_millis(300),
         db_limit: Duration::from_secs(30),
+        api_key: None,
     }
 }
 
@@ -241,4 +242,85 @@ async fn a_stop_ends_ingest_while_the_database_never_answers(pool: PgPool) -> sq
         .expect("ingest did not end within 3 s of the stop");
     assert_eq!(result.unwrap(), Ok(()));
     Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_filed_call_of_a_talkgroup_with_transcription_on_is_transcribed(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::seed_places(&pool, root.path(), source.path()).await;
+    set_zone(&pool).await;
+    let server = common::FakeAsr::start(vec![common::Answer::Text("Charlie Ops copies.")]);
+    common::set_transcription(&pool, &server.url, 1000, 5).await;
+    // SYSC/330 with transcription on before its first call.
+    let system: i32 = sqlx::query_scalar("INSERT INTO systems (name) VALUES ('SYSC') RETURNING id")
+        .fetch_one(&pool)
+        .await?;
+    sqlx::query("INSERT INTO talkgroups (system_id, number, name, transcribe) VALUES ($1, 330, 'Charlie Ops', true)")
+        .bind(system)
+        .execute(&pool)
+        .await?;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let daemon = tokio::spawn(ingest::run(config(&pool), async {
+        let _ = stopped.await;
+    }));
+
+    fs::write(source.path().join(NAME), charlie()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (text, state): (String, String) = loop {
+        let found = sqlx::query_as(
+            "SELECT t.text, c.transcript_state FROM transcripts t \
+             JOIN calls c ON c.id = t.call_id AND c.started_at = t.started_at",
+        )
+        .fetch_optional(&pool)
+        .await?;
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the call was not transcribed within 20 s"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        (text.as_str(), state.as_str()),
+        ("Charlie Ops copies.", "text")
+    );
+    assert!(server.requests()[0].contains("model-x"));
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM transcription_queue")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(left, 0);
+
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("ingest did not stop within 10 s")
+        .unwrap()
+        .unwrap();
+    Ok(())
+}
+
+#[test]
+fn the_transcription_summary_names_every_count() {
+    let mut heard = ingest::Heard {
+        text: 3,
+        no_speech: 1,
+        kept: 0,
+        retry: 2,
+        failed: 1,
+        server_failures: 4,
+    };
+    assert_eq!(
+        heard.line("q"),
+        "transcription: 3 transcribed, 1 no speech, 2 to try again, 1 failed, 4 server failures; q"
+    );
+    heard.kept = 1;
+    assert!(
+        heard
+            .line("q")
+            .contains("1 no speech, 1 kept a person's text, 2 to try again")
+    );
 }

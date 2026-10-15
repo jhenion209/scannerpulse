@@ -1,11 +1,11 @@
-//! `scannerpulse ingest`: the watcher on every host, the filer on the lease
-//! holder only, the lease and path health, and a summary in the journal every
-//! minute. A database outage pauses the work, which is tried again every 5 s;
+//! `scannerpulse ingest`: the watcher on every host, the filer and the
+//! transcriber on the lease holder only, the lease and path health, and a
+//! summary in the journal every minute. A database outage pauses the work, which is tried again every 5 s;
 //! only a setup error stops the process.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,13 +15,16 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
+use crate::asr::Client;
 use crate::filer::{Filer, Outcome};
 use crate::health::{self, Health, HealthTimings};
 use crate::lease::{Lease, Timings};
 use crate::localtime::TimeHow;
 use crate::log;
-use crate::settings::{self, IngestSettings, SettingsError};
+use crate::queue;
+use crate::settings::{self, IngestSettings, SettingsError, Transcription};
 use crate::store::{self, Location, Source, Waiting, limited};
+use crate::transcriber::{self, Transcriber};
 use crate::watcher::{self, Batch, Watcher};
 
 /// How long ingest waits before it tries the database again.
@@ -40,6 +43,10 @@ pub const ROUND_LIMIT: Duration = Duration::from_secs(3);
 
 /// The default limit on every call through the pool.
 pub const DB_LIMIT: Duration = Duration::from_secs(30);
+
+/// How often the transcription settings are read again, so that a change on
+/// the admin page takes effect without a restart.
+pub const SETTINGS_EVERY: Duration = Duration::from_secs(60);
 
 /// How long a stop waits for the filer before it releases the lease anyway.
 pub const STOP_FILER_LIMIT: Duration = Duration::from_secs(20);
@@ -61,13 +68,16 @@ pub struct Config {
     /// The limit on every call through the pool: a call that takes longer
     /// counts as a database error.
     pub db_limit: Duration,
+    /// The key of the transcription servers, for servers that need one.
+    pub api_key: Option<String>,
 }
 
 impl Config {
     /// The host's settings from the environment, until a host configuration
     /// file takes their place: DATABASE_URL (the password in the file that
     /// PGPASSFILE names), SCANNERPULSE_HOST (default: the system's host name)
-    /// and SCANNERPULSE_PREFERRED (`true` on one host of a pair).
+    /// and SCANNERPULSE_PREFERRED (`true` on one host of a pair), and
+    /// SCANNERPULSE_TRANSCRIPTION_API_KEY for servers that need a key.
     pub fn from_env() -> Result<Config, String> {
         let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set")?;
         let database = url
@@ -99,12 +109,16 @@ impl Config {
             health: HealthTimings::default(),
             stable_for: watcher::STABLE_FOR,
             db_limit: DB_LIMIT,
+            api_key: std::env::var("SCANNERPULSE_TRANSCRIPTION_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty()),
         })
     }
 }
 
 struct Setup {
     settings: IngestSettings,
+    transcription: Option<Transcription>,
     location: Location,
     sources: Vec<Source>,
 }
@@ -122,6 +136,13 @@ async fn setup(pool: &PgPool, limit: Duration) -> Result<Setup, SetupError> {
         Ok(Err(error)) => return Err(SetupError::Fatal(error.to_string())),
         Err(_) => return Err(SetupError::Database(store::timed_out(limit))),
     };
+    let transcription = match tokio::time::timeout(limit, settings::load_transcription(pool)).await
+    {
+        Ok(Ok(transcription)) => transcription,
+        Ok(Err(SettingsError::Database(error))) => return Err(SetupError::Database(error)),
+        Ok(Err(error)) => return Err(SetupError::Fatal(error.to_string())),
+        Err(_) => return Err(SetupError::Database(store::timed_out(limit))),
+    };
     let location = limited(limit, store::primary_location(pool))
         .await
         .map_err(SetupError::Database)?
@@ -134,6 +155,7 @@ async fn setup(pool: &PgPool, limit: Duration) -> Result<Setup, SetupError> {
     }
     Ok(Setup {
         settings,
+        transcription,
         location,
         sources,
     })
@@ -190,10 +212,63 @@ impl Minute {
     }
 }
 
+/// What the transcriber did in one summary period.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Heard {
+    pub text: u64,
+    pub no_speech: u64,
+    /// Results not written because a person's text was there.
+    pub kept: u64,
+    /// Calls that failed and are tried again later.
+    pub retry: u64,
+    /// Calls that failed for good.
+    pub failed: u64,
+    /// Requests that a server failed.
+    pub server_failures: u64,
+}
+
+impl Heard {
+    /// Counts one call's outcome.
+    pub fn add(&mut self, outcome: &transcriber::Outcome) {
+        use crate::queue::Written;
+        use transcriber::Outcome as T;
+        match outcome {
+            T::Written(_, Written::Text) => self.text += 1,
+            T::Written(_, Written::NoSpeech) => self.no_speech += 1,
+            T::Written(_, Written::KeptHuman) => self.kept += 1,
+            T::Retry { .. } => self.retry += 1,
+            T::Failed { .. } => self.failed += 1,
+            T::ServerDown { .. } => self.server_failures += 1,
+            T::LeaseLost(_) => {}
+        }
+    }
+
+    /// The summary line; `queue` is the queue in numbers.
+    pub fn line(&self, queue: &str) -> String {
+        let Heard {
+            text,
+            no_speech,
+            kept,
+            retry,
+            failed,
+            server_failures,
+        } = self;
+        let kept = if *kept > 0 {
+            format!(", {kept} kept a person's text")
+        } else {
+            String::new()
+        };
+        format!(
+            "transcription: {text} transcribed, {no_speech} no speech{kept}, {retry} to try again, \
+             {failed} failed, {server_failures} server failures; {queue}"
+        )
+    }
+}
+
 type Counts = Mutex<Minute>;
 
-fn lock(counts: &Counts) -> std::sync::MutexGuard<'_, Minute> {
-    // Plain numbers: a panic elsewhere cannot leave them half written.
+/// Plain numbers: a panic elsewhere cannot leave them half written.
+fn lock<T>(counts: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     counts
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -243,6 +318,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
     };
     let Setup {
         settings,
+        transcription,
         location,
         sources,
     } = setup;
@@ -256,6 +332,13 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
     let healthy = Arc::new(AtomicBool::new(true));
     let busy = Arc::new(AtomicBool::new(false));
     let counts = Arc::new(Counts::default());
+    let heard = Arc::new(Mutex::new(Heard::default()));
+    let rule = Arc::new(AtomicI32::new(
+        transcription.as_ref().map_or(-1, |t| t.min_duration_ms),
+    ));
+    if transcription.is_none() {
+        log::info("transcription is off");
+    }
     let source_paths: Vec<&Path> = sources.iter().map(|s| s.path.as_path()).collect();
     let health = Health::new(
         &location.root,
@@ -272,7 +355,15 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         settings.time_zone,
         settings.missing_source_grace,
     )
+    .with_db_limit(config.db_limit)
+    .with_transcription(rule.clone());
+    let mut transcriber = Transcriber::new(
+        pool.clone(),
+        lease.clone(),
+        Client::new(config.api_key.clone()),
+    )
     .with_db_limit(config.db_limit);
+    transcriber.set(transcription);
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let (release_tx, release_rx) = watch::channel(false);
@@ -300,8 +391,22 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
                 pool.clone(),
                 config.db_limit,
                 counts.clone(),
+                heard.clone(),
                 lease.clone(),
                 settings.done_rows_kept_days,
+                stop_rx.clone(),
+            )),
+        ),
+        (
+            "transcriber",
+            tokio::spawn(transcribe_loop(
+                transcriber,
+                pool.clone(),
+                config.db_limit,
+                rule,
+                lease.clone(),
+                healthy.clone(),
+                heard,
                 stop_rx.clone(),
             )),
         ),
@@ -612,6 +717,7 @@ async fn summary_loop(
     pool: PgPool,
     db_limit: Duration,
     counts: Arc<Counts>,
+    heard: Arc<Mutex<Heard>>,
     lease: Arc<Lease>,
     kept_days: u32,
     mut stop: watch::Receiver<bool>,
@@ -630,6 +736,15 @@ async fn summary_loop(
         };
         let role = if lease.held() { "holder" } else { "standby" };
         log::info(minute.line(role, &files));
+        let heard = std::mem::take(&mut *lock(&heard));
+        let queue = match limited(db_limit, queue::counts(&pool)).await {
+            Ok(q) => format!(
+                "{} queued in the last minute; the queue holds {} ({} due), {} failed",
+                q.last_minute, q.queued, q.due, q.failed
+            ),
+            Err(error) => format!("the queue cannot be read: {error}"),
+        };
+        log::info(heard.line(&queue));
         if lease.held() && pruned.is_none_or(|at| at.elapsed() >= PRUNE_EVERY) {
             match limited(db_limit, store::prune_done(&pool, kept_days)).await {
                 Ok(n) => log::debug(format!("pruned {n} rows of filed files")),
@@ -639,5 +754,117 @@ async fn summary_loop(
             }
             pruned = Some(Instant::now());
         }
+    }
+}
+
+/// The transcriber's loop: reads the settings again every minute, sends due
+/// calls while this host holds the lease and is healthy, and writes each
+/// result. At a stop the requests in flight end; their calls stay queued.
+#[allow(clippy::too_many_arguments)]
+async fn transcribe_loop(
+    mut transcriber: Transcriber,
+    pool: PgPool,
+    db_limit: Duration,
+    rule: Arc<AtomicI32>,
+    lease: Arc<Lease>,
+    healthy: Arc<AtomicBool>,
+    heard: Arc<Mutex<Heard>>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut read_at = Instant::now();
+    loop {
+        if *stop.borrow() {
+            break;
+        }
+        if read_at.elapsed() >= SETTINGS_EVERY {
+            read_at = Instant::now();
+            match tokio::time::timeout(db_limit, settings::load_transcription(&pool)).await {
+                Ok(Ok(new)) if new.as_ref() != transcriber.settings() => {
+                    log::info(if new.is_some() {
+                        "the transcription settings changed"
+                    } else {
+                        "transcription is off"
+                    });
+                    rule.store(
+                        new.as_ref().map_or(-1, |t| t.min_duration_ms),
+                        Ordering::SeqCst,
+                    );
+                    transcriber.set(new);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::warn(format!("{error}; the last settings stay")),
+                Err(_) => {
+                    log::warn("the transcription settings cannot be read; the last ones stay")
+                }
+            }
+        }
+        if let Some(states) = transcriber.take_server_change() {
+            for state in &states {
+                if let Some(cooling) = state.cooling_for {
+                    log::warn(format!(
+                        "transcription server {} cools down for {} s: {}",
+                        state.url,
+                        cooling.as_secs(),
+                        state.last_error.as_deref().unwrap_or("")
+                    ));
+                }
+            }
+            if let Err(error) = limited(db_limit, queue::save_servers(&pool, &states)).await {
+                log::warn(format!("the servers' state cannot be saved: {error}"));
+            }
+        }
+        if lease.should_work() && healthy.load(Ordering::SeqCst) {
+            if let Err(error) = transcriber.fill().await {
+                log::warn(format!(
+                    "transcription paused: the database failed ({error}); trying again in 5 s"
+                ));
+                if wait(&mut stop, RETRY).await {
+                    break;
+                }
+                continue;
+            }
+        }
+        if transcriber.busy() == 0 {
+            if wait(&mut stop, Duration::from_secs(1)).await {
+                break;
+            }
+            continue;
+        }
+        let done = tokio::select! {
+            done = transcriber.next_done() => done,
+            _ = stop.changed() => None,
+            _ = sleep(Duration::from_secs(1)) => None,
+        };
+        if let Some(done) = done {
+            match transcriber.settle(done).await {
+                Ok(outcome) => {
+                    lock(&heard).add(&outcome);
+                    describe(&outcome);
+                }
+                Err(error) => log::warn(format!(
+                    "a transcript could not be written ({error}); the call stays queued"
+                )),
+            }
+        }
+    }
+    transcriber.abort();
+}
+
+fn describe(outcome: &transcriber::Outcome) {
+    use transcriber::Outcome as T;
+    match outcome {
+        T::Written(call, written) => log::debug(format!("call {call}: {written:?}")),
+        T::Retry { call, error } => log::info(format!("call {call} is tried again later: {error}")),
+        T::Failed { call, error } => log::warn(format!("call {call} failed for good: {error}")),
+        T::ServerDown {
+            call,
+            server,
+            error,
+        } => log::debug(format!(
+            "call {call} stays queued: {server} failed: {error}"
+        )),
+        T::LeaseLost(call) => log::info(format!(
+            "the lease was lost while transcribing; call {call} stays queued"
+        )),
     }
 }
