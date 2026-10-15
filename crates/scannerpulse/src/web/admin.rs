@@ -118,6 +118,11 @@ impl From<crate::settings::SettingsError> for ApiError {
     }
 }
 
+/// `GET /api/admin/status`: the Status tab.
+pub async fn status(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(crate::status::read(&state.pool).await?))
+}
+
 /// `POST /api/admin/rescan`: every running ingest lists its sources at once.
 pub async fn rescan(admin: Admin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     crate::ingest::request_rescan(&state.pool).await?;

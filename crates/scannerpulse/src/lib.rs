@@ -23,6 +23,7 @@ pub mod servers;
 pub mod sessions;
 pub mod settings;
 pub mod smartsort;
+pub mod status;
 pub mod store;
 pub mod transcriber;
 pub mod transcripts;

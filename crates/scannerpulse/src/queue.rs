@@ -213,7 +213,7 @@ pub async fn defer(
 }
 
 /// The queue in numbers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 pub struct Counts {
     pub queued: i64,
     /// Queued calls whose next try is due.
@@ -236,7 +236,7 @@ pub async fn counts(db: impl PgExecutor<'_>) -> sqlx::Result<Counts> {
 }
 
 /// A call whose transcription failed for good.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 pub struct Failed {
     pub call_id: i64,
     pub started_at: DateTime<Utc>,
@@ -369,7 +369,7 @@ pub async fn save_servers(db: &PgPool, states: &[ServerState]) -> sqlx::Result<(
 }
 
 /// A server as last saved.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, serde::Serialize)]
 pub struct StoredServer {
     pub url: String,
     pub cooling_until: Option<DateTime<Utc>>,

@@ -42,6 +42,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse favorites remove NAME
        scannerpulse viewers
        scannerpulse rescan
+       scannerpulse status
        scannerpulse jobs list
        scannerpulse jobs show|stop ID
        scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
@@ -95,6 +96,8 @@ settings    list, set or remove the administrator's settings; a value is JSON
 favorites   list, set or remove the named favorite lists of talkgroups
 viewers     list the open pages of every web host
 rescan      ask every running ingest to list its sources now
+status      the admin page's Status tab, as JSON: the lease, ingest's files,
+            the queue, the servers, the database, the checks after a failover
 jobs        the long jobs, which the host holding the lease runs one at a time:
   list      the newest 50
   show      one job and its progress
@@ -130,6 +133,7 @@ enum Command {
     Viewers,
     Jobs(Jobs),
     Rescan,
+    Status,
     Version,
     Help,
 }
@@ -390,6 +394,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["viewers"] => Some(Command::Viewers),
         ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
         ["rescan"] => Some(Command::Rescan),
+        ["status"] => Some(Command::Status),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
@@ -489,6 +494,13 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("jobs: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Status) => match status_command().await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("status: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -797,6 +809,18 @@ async fn favorites_command(command: Favorites) -> CommandResult {
             println!("{name} is removed");
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn status_command() -> CommandResult {
+    let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set")?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(CONNECT_TIMEOUT)
+        .connect(&url)
+        .await?;
+    let status = scannerpulse::status::read(&pool).await?;
+    println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(ExitCode::SUCCESS)
 }
 

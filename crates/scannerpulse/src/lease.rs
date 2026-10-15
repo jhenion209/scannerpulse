@@ -290,7 +290,7 @@ impl Fence for Lease {
 }
 
 /// A heartbeat, for `scannerpulse lease` and the admin page.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Heartbeat {
     pub host: String,
     /// Seconds since it was last renewed.
@@ -300,7 +300,7 @@ pub struct Heartbeat {
 }
 
 /// The lease as the database holds it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Status {
     /// The holder, empty after a clean release; `None` when ingest never ran.
     pub holder: Option<String>,

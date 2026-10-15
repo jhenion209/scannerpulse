@@ -198,6 +198,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/settings", get(admin::settings_list))
         .route("/api/admin/viewers", get(viewers::list))
         .route("/api/admin/rescan", post(admin::rescan))
+        .route("/api/admin/status", get(admin::status))
         .route("/api/admin/jobs", get(jobs::list))
         .route(
             "/api/admin/jobs/queue",

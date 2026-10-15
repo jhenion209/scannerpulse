@@ -158,6 +158,12 @@ listen.
   the lease is kept, so the archive or a source can be serviced; the public
   edit answers 503. `rescan` (or `POST /api/admin/rescan`) asks every
   running ingest to list its sources at once.
+- `status` (and `/api/admin/status`) gives the admin page's Status tab as
+  JSON: the lease and each host's heartbeat, ingest's waiting and rejected
+  files, the transcription queue and its failed calls, the servers, the
+  newest calls, estimated totals, whether the database is the primary and
+  its standbys, and the checks to make after a failover (stuck jobs, failed
+  calls, calls filed twice, files left in a source).
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
