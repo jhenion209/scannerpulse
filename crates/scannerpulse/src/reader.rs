@@ -253,13 +253,13 @@ fn comment_field(comment: Option<&str>, field: &Regex) -> Option<String> {
 }
 
 /// `<number>"<name>"` at the start of the ID3 title.
-fn title_talkgroup(title: &str) -> Option<Talkgroup> {
+pub(crate) fn title_talkgroup(title: &str) -> Option<Talkgroup> {
     let found = TITLE_TALKGROUP.captures(title.trim())?;
     talkgroup(&found[1], found[2].trim())
 }
 
 /// A channel token, `<number>"<name>"` or `<number>-<name>`.
-fn channel(value: &str) -> Option<Talkgroup> {
+pub(crate) fn channel(value: &str) -> Option<Talkgroup> {
     let found = CHANNEL.captures(value.trim().trim_matches('_'))?;
     talkgroup(&found[1], found[2].trim().trim_matches('"'))
 }
