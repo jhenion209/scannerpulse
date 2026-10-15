@@ -48,8 +48,19 @@ async fn pages_follow_each_other_without_a_gap_or_a_repeat(pool: PgPool) {
         }
     }
     assert_eq!(seen, newest_first);
-    let (_, oldest) = get(&pool, "/api/calls?size=10&order=oldest").await;
-    assert_eq!(ids(&oldest)[0], made[0]);
+    let mut oldest = Vec::new();
+    let mut uri = "/api/calls?size=10&order=oldest".to_string();
+    loop {
+        let (status, answer) = get(&pool, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        oldest.extend(ids(&answer));
+        match answer["next"].as_str() {
+            Some(next) => uri = format!("/api/calls?size=10&order=oldest&after={next}"),
+            None => break,
+        }
+    }
+    let oldest_first: Vec<i64> = newest_first.iter().rev().copied().collect();
+    assert_eq!(oldest, oldest_first);
 }
 
 #[sqlx::test(migrations = "./migrations")]
