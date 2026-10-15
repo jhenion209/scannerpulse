@@ -219,6 +219,10 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/talkgroups/{id}/correct",
             get(data::correct_preview).post(data::correct_start),
         )
+        .route(
+            "/api/admin/talkgroups/{id}/merge",
+            get(data::merge_preview).post(data::merge_start),
+        )
         .route("/api/admin/asr/sets", get(transcription::sets))
         .route("/api/admin/asr/report", get(transcription::report))
         .route("/api/admin/jobs", get(jobs::list))

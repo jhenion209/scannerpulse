@@ -48,6 +48,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
        scannerpulse talkgroups uncorrected
        scannerpulse talkgroup correct SYSTEM/NUMBER [--confirm NAME]
+       scannerpulse talkgroup merge SYSTEM/NUMBER --into SYSTEM/NUMBER [--confirm NAME]
        scannerpulse queue retry-failed
        scannerpulse status
        scannerpulse report traffic
@@ -112,7 +113,10 @@ talkgroup   turn a talkgroup's transcription on or off (its new calls only;
             talkgroup (its files keep the old name until they are corrected;
             the recorder's next file of it brings the recorder's name back);
             correct a talkgroup's files (folder, file name and title) after a
-            rename, as a job, once its name is typed (or given by --confirm)
+            rename, as a job, once its name is typed (or given by --confirm);
+            merge a talkgroup into another of its system (its calls and
+            favorites move, it goes, and the files are corrected), as a job,
+            once the name of the talkgroup that goes is typed
 queue       retry-failed: put every failed call back in the queue
 report      traffic: calls per 5 minutes over the last 120 days, as weekday and
             weekend profiles, and the quietest hours (for maintenance)
@@ -177,6 +181,11 @@ enum Command {
 enum Data {
     Correct {
         talkgroup: String,
+        confirm: Option<String>,
+    },
+    Merge {
+        talkgroup: String,
+        into: String,
         confirm: Option<String>,
     },
 }
@@ -445,6 +454,14 @@ fn parse(args: &[&str]) -> Option<Command> {
             let found = flags(rest, &[], &["--confirm"], &[])?;
             Some(Command::Data(Data::Correct {
                 talkgroup: talkgroup.to_string(),
+                confirm: found.get("--confirm").map(|c| c.to_string()),
+            }))
+        }
+        ["talkgroup", "merge", talkgroup, rest @ ..] => {
+            let found = flags(rest, &["--into"], &["--confirm"], &[])?;
+            Some(Command::Data(Data::Merge {
+                talkgroup: talkgroup.to_string(),
+                into: found["--into"].to_string(),
                 confirm: found.get("--confirm").map(|c| c.to_string()),
             }))
         }
@@ -1021,6 +1038,26 @@ async fn data_command(command: Data) -> CommandResult {
             let (job, count) =
                 scannerpulse::data::start_correct(&mut conn, id, &confirm, &by).await?;
             (job, format!("correct {count} files"))
+        }
+        Data::Merge {
+            talkgroup,
+            into,
+            confirm,
+        } => {
+            let from = talkgroup_id(&mut conn, &talkgroup).await?;
+            let to = talkgroup_id(&mut conn, &into).await?;
+            let preview = scannerpulse::data::merge_preview(&mut conn, from, to).await?;
+            println!(
+                "{talkgroup} {:?} goes into {into} {:?}: {} calls move, then their files are corrected",
+                preview.from.name, preview.into.name, preview.calls
+            );
+            let confirm = typed(
+                confirm,
+                "type the name of the talkgroup that goes, to start: ",
+            )?;
+            let (job, count) =
+                scannerpulse::data::start_merge(&mut conn, from, to, &confirm, &by).await?;
+            (job, format!("merge {count} calls into {into}"))
         }
     };
     println!("job {job} is started: {what}; `scannerpulse jobs show {job}` follows it");
@@ -1942,6 +1979,15 @@ mod tests {
             }))
         );
         assert_eq!(parse(&["talkgroup", "correct", "SYSA/7", "--yes"]), None);
+        assert_eq!(
+            parse(&["talkgroup", "merge", "SYSA/7", "--into", "SYSA/8"]),
+            Some(Command::Data(Data::Merge {
+                talkgroup: "SYSA/7".into(),
+                into: "SYSA/8".into(),
+                confirm: None
+            }))
+        );
+        assert_eq!(parse(&["talkgroup", "merge", "SYSA/7"]), None);
         assert_eq!(
             parse(&["talkgroups", "uncorrected"]),
             Some(Command::Uncorrected)

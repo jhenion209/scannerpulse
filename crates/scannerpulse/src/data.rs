@@ -1,5 +1,6 @@
 //! The Data tab's jobs, which move archived files: the correction of a
-//! talkgroup's files after a rename. A file is written under its new name,
+//! talkgroup's files after a rename, and the merge of a talkgroup into
+//! another of its system. A file is written under its new name,
 //! read back and compared, and its call's row moved to it, in the step's
 //! transaction; the old file is removed only by the next step, once that
 //! record is committed, so a stop, a crash or a failover never leaves a row
@@ -378,21 +379,57 @@ pub(crate) async fn correct_step(conn: &mut PgConnection, job: &Job) -> sqlx::Re
             "the job's parameters are not a correction's".into(),
         ));
     };
-    correct_files(conn, job, params.talkgroup_id).await
+    let mut work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
+    let step = correct_files(conn, params.talkgroup_id, &mut work, job.done, job.total).await?;
+    Ok(step.outcome(serde_json::to_value(&work).expect("plain data")))
 }
 
-/// One step of correcting the files of `talkgroup_id`.
+/// What a step of correcting files did.
+enum FileStep {
+    More {
+        done: i64,
+        total: Option<i64>,
+        message: String,
+    },
+    Done(i64, String),
+    Failed(String),
+}
+
+impl FileStep {
+    fn outcome(self, work: serde_json::Value) -> Outcome {
+        match self {
+            FileStep::More {
+                done,
+                total,
+                message,
+            } => Outcome::More {
+                done,
+                total,
+                work,
+                message,
+            },
+            FileStep::Done(done, message) => Outcome::Done(done, message),
+            FileStep::Failed(why) => Outcome::Failed(why),
+        }
+    }
+}
+
+/// One step of correcting the files of `talkgroup_id`, with `done` of
+/// `total` calls examined before it.
 async fn correct_files(
     conn: &mut PgConnection,
-    job: &Job,
     talkgroup_id: i32,
-) -> sqlx::Result<Outcome> {
-    let mut work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
+    work: &mut FileWork,
+    done: i64,
+    total: Option<i64>,
+) -> sqlx::Result<FileStep> {
     let roots = roots(conn).await?;
     remove_gone(conn, &roots, &work.remove).await?;
     work.remove.clear();
     let Some(talkgroup) = named_locked(&mut *conn, talkgroup_id).await? else {
-        return Ok(Outcome::Failed(format!("talkgroup {talkgroup_id} is gone")));
+        return Ok(FileStep::Failed(format!(
+            "talkgroup {talkgroup_id} is gone"
+        )));
     };
     let folder = talkgroup.folder();
     let (after_at, after_id) = work.after.unzip();
@@ -412,7 +449,8 @@ async fn correct_files(
     .fetch_all(&mut *conn)
     .await?;
     if batch.is_empty() {
-        return finish_correction(conn, job, &talkgroup, &folder, &work).await;
+        let message = finish_correction(conn, &talkgroup, &folder, work).await?;
+        return Ok(FileStep::Done(done, message));
     }
     let to = talkgroup.talkgroup();
     for call in &batch {
@@ -437,9 +475,9 @@ async fn correct_files(
         }
         work.after = Some((call.started_at, call.id));
     }
-    let done = job.done + batch.len() as i64;
-    let total = job.total.map(|total| total.max(done));
-    Ok(Outcome::More {
+    let done = done + batch.len() as i64;
+    let total = total.map(|total| total.max(done));
+    Ok(FileStep::More {
         done,
         total,
         message: format!(
@@ -449,19 +487,17 @@ async fn correct_files(
             work.refused,
             work.missing
         ),
-        work: serde_json::to_value(&work).expect("plain data"),
     })
 }
 
 /// The last step: the talkgroup's files are marked correct when no call of
-/// it is left in another folder.
+/// it is left in another folder. Returns the job's last message.
 async fn finish_correction(
     conn: &mut PgConnection,
-    job: &Job,
     talkgroup: &Named,
     folder: &str,
     work: &FileWork,
-) -> sqlx::Result<Outcome> {
+) -> sqlx::Result<String> {
     let left: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM calls WHERE talkgroup_id = $1 AND split_part(rel_path, '/', 2) <> $2",
     )
@@ -493,5 +529,181 @@ async fn finish_correction(
     if let Some(why) = &work.last_refusal {
         message.push_str(&format!("; the last refusal: {why}"));
     }
-    Ok(Outcome::Done(job.done, message))
+    Ok(message)
+}
+
+/// The calls one step of a merge moves to the other talkgroup.
+pub const MERGE_CALLS_PER_STEP: i64 = 5000;
+
+/// What a merge would do: `from`'s calls go to `into`, then their files are
+/// corrected.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergePreview {
+    pub from: Named,
+    pub into: Named,
+    pub calls: i64,
+}
+
+pub async fn merge_preview(
+    conn: &mut PgConnection,
+    from: i32,
+    into: i32,
+) -> Result<MergePreview, JobError> {
+    if from == into {
+        return Err(JobError::Refused(
+            "a talkgroup cannot merge into itself".into(),
+        ));
+    }
+    let from = existing(conn, from).await?;
+    let into = existing(conn, into).await?;
+    if from.system != into.system {
+        return Err(JobError::Refused(format!(
+            "{} and {} are of different systems",
+            from.written(),
+            into.written()
+        )));
+    }
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM calls WHERE talkgroup_id = $1")
+        .bind(from.id)
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(MergePreview { from, into, calls })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Merge {
+    from: i32,
+    into: i32,
+}
+
+/// Adds a job that merges `from` into `into`, once `from`'s name is typed
+/// exactly: `from` goes. Returns its id and the number of calls it moves.
+pub async fn start_merge(
+    conn: &mut PgConnection,
+    from: i32,
+    into: i32,
+    confirm: &str,
+    started_by: &str,
+) -> Result<(i64, i64), JobError> {
+    let preview = merge_preview(conn, from, into).await?;
+    confirmed(&preview.from, confirm)?;
+    let params = serde_json::to_value(Merge { from, into }).expect("plain data");
+    let job = jobs::create(
+        &mut *conn,
+        Kind::Merge,
+        &params,
+        Some(preview.calls),
+        started_by,
+    )
+    .await?;
+    Ok((job, preview.calls))
+}
+
+/// A merge's state between steps: moving the calls, then correcting files.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MergeWork {
+    correcting: bool,
+    calls_moved: i64,
+    #[serde(flatten)]
+    files: FileWork,
+}
+
+pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
+    let Ok(params) = serde_json::from_value::<Merge>(job.params.clone()) else {
+        return Ok(Outcome::Failed(
+            "the job's parameters are not a merge's".into(),
+        ));
+    };
+    let mut work: MergeWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
+    if work.correcting {
+        let step = correct_files(conn, params.into, &mut work.files, job.done, job.total).await?;
+        let step = match step {
+            FileStep::Done(done, message) => {
+                FileStep::Done(done, format!("{} calls moved; {message}", work.calls_moved))
+            }
+            other => other,
+        };
+        return Ok(step.outcome(serde_json::to_value(&work).expect("plain data")));
+    }
+    let moved = sqlx::query(
+        "UPDATE calls SET talkgroup_id = $2 WHERE (id, started_at) IN \
+           (SELECT id, started_at FROM calls WHERE talkgroup_id = $1 LIMIT $3)",
+    )
+    .bind(params.from)
+    .bind(params.into)
+    .bind(MERGE_CALLS_PER_STEP)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected() as i64;
+    work.calls_moved += moved;
+    if moved > 0 {
+        return Ok(Outcome::More {
+            done: work.calls_moved,
+            total: job.total.map(|total| total.max(work.calls_moved)),
+            message: format!("{} calls moved", work.calls_moved),
+            work: serde_json::to_value(&work).expect("plain data"),
+        });
+    }
+    // Every call has moved: the favorites follow, and the talkgroup goes.
+    let from_name: Option<String> = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
+        .bind(params.from)
+        .fetch_optional(&mut *conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO favorite_talkgroups (favorite_id, talkgroup_id) \
+         SELECT favorite_id, $2 FROM favorite_talkgroups WHERE talkgroup_id = $1 \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(params.from)
+    .bind(params.into)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM favorite_talkgroups WHERE talkgroup_id = $1")
+        .bind(params.from)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM talkgroups WHERE id = $1")
+        .bind(params.from)
+        .execute(&mut *conn)
+        .await?;
+    if work.calls_moved > 0 {
+        sqlx::query(
+            "UPDATE talkgroups SET files_correct = false, \
+               files_name = CASE WHEN coalesce(files_name, '') = '' THEN $2 ELSE files_name END \
+             WHERE id = $1",
+        )
+        .bind(params.into)
+        .bind(from_name)
+        .execute(&mut *conn)
+        .await?;
+    }
+    let to_correct: i64 = match named(&mut *conn, params.into).await? {
+        Some(into) => {
+            sqlx::query_scalar(
+                "SELECT count(*) FROM calls c JOIN locations l ON l.id = c.location_id \
+             WHERE c.talkgroup_id = $1 AND l.mode = 'managed' \
+               AND split_part(c.rel_path, '/', 2) <> $2",
+            )
+            .bind(into.id)
+            .bind(into.folder())
+            .fetch_one(&mut *conn)
+            .await?
+        }
+        None => {
+            return Ok(Outcome::Failed(format!(
+                "talkgroup {} is gone",
+                params.into
+            )));
+        }
+    };
+    work.correcting = true;
+    Ok(Outcome::More {
+        done: 0,
+        total: Some(to_correct),
+        message: format!(
+            "{} calls moved; correcting {to_correct} files",
+            work.calls_moved
+        ),
+        work: serde_json::to_value(&work).expect("plain data"),
+    })
 }

@@ -578,3 +578,139 @@ async fn a_name_too_long_for_a_file_name_is_refused(pool: PgPool) {
     assert!(ended.message.contains("1 refused"), "{}", ended.message);
     assert_eq!(rel_of(&pool, call).await, rel);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_merge_moves_the_calls_and_favorites_then_corrects_the_files(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let mut calls = Vec::new();
+    let mut from = 0;
+    for minute in 0..3 {
+        let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+        let name = format!("{}SYSA.mp3", at.format("%Y%m%d_%H%M%S"));
+        let (call, id) = filed(
+            &pool,
+            places,
+            &root,
+            &format!("2031-03-01/127-Alpha Fire/{name}"),
+            Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+            at,
+        )
+        .await;
+        calls.push((call, name));
+        from = id;
+    }
+    let into = common::talkgroup(&pool, "SYSA", 128).await;
+    sqlx::query("INSERT INTO favorites (id, name) VALUES (1, 'one'), (2, 'both')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (favorite, talkgroup) in [(1, from), (2, from), (2, into)] {
+        sqlx::query("INSERT INTO favorite_talkgroups (favorite_id, talkgroup_id) VALUES ($1, $2)")
+            .bind(favorite as i64)
+            .bind(talkgroup)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    let other_system = common::talkgroup(&pool, "SYSB", 9).await;
+    assert!(
+        scannerpulse::data::merge_preview(&mut conn, from, other_system)
+            .await
+            .is_err()
+    );
+    assert!(
+        scannerpulse::data::merge_preview(&mut conn, from, from)
+            .await
+            .is_err()
+    );
+    let preview = scannerpulse::data::merge_preview(&mut conn, from, into)
+        .await
+        .unwrap();
+    assert_eq!(preview.calls, 3);
+    assert!(
+        scannerpulse::data::start_merge(&mut conn, from, into, "Group 128", "ann")
+            .await
+            .is_err(),
+        "the name of the talkgroup that stays does not confirm"
+    );
+    let (job, _) = scannerpulse::data::start_merge(&mut conn, from, into, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+    assert!(
+        ended
+            .message
+            .starts_with("3 calls moved; 3 files of SYSA/128 corrected"),
+        "{}",
+        ended.message
+    );
+    for (call, name) in &calls {
+        let rel = rel_of(&pool, *call).await;
+        assert_eq!(rel, format!("2031-03-01/128-Group 128/{name}"));
+        let data = std::fs::read(root.join(&rel)).unwrap();
+        assert_eq!(
+            scannerpulse::reader::tags(&data).title.as_deref(),
+            Some("128\"Group 128\"")
+        );
+    }
+    assert!(!root.join("2031-03-01/127-Alpha Fire").exists());
+    let gone: bool =
+        sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM talkgroups WHERE id = $1)")
+            .bind(from)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(gone);
+    let favorites: Vec<(i64, i32)> =
+        sqlx::query_as("SELECT favorite_id, talkgroup_id FROM favorite_talkgroups ORDER BY 1, 2")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(favorites, [(1, into), (2, into)]);
+    assert!(names(&pool, into).await.2, "the files are correct again");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_merges_with_the_name_of_the_talkgroup_that_goes(pool: PgPool) {
+    let seven = common::talkgroup(&pool, "SYSA", 7).await;
+    let eight = common::talkgroup(&pool, "SYSA", 8).await;
+    let app = app(&pool);
+    admin(&pool, "ann", PASSWORD).await;
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let change = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let uri = format!("/api/admin/talkgroups/{seven}/merge");
+    let preview = send(
+        &app,
+        "GET",
+        &format!("{uri}?into={eight}"),
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(preview.status, 200);
+    assert_eq!(preview.body["into"]["name"], "Group 8");
+    let wrong = send(
+        &app,
+        "POST",
+        &uri,
+        &change,
+        Some(json!({"into": eight, "confirm": "Group 8"})),
+    )
+    .await;
+    assert_eq!(wrong.status, 400);
+    let started = send(
+        &app,
+        "POST",
+        &uri,
+        &change,
+        Some(json!({"into": eight, "confirm": "Group 7"})),
+    )
+    .await;
+    assert_eq!(started.status, 201);
+}

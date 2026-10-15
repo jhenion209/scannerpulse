@@ -2,7 +2,7 @@
 //! still carry an old name, and the jobs that correct, merge and purge.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -98,6 +98,55 @@ pub async fn correct_start(
     record(
         &admin,
         format!("started job {job}: correct {count} files of talkgroup {id}"),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": job, "count": count})),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergeTo {
+    pub into: i32,
+}
+
+/// `GET /api/admin/talkgroups/<id>/merge?into=<id>`: what merging the
+/// talkgroup into another would move.
+pub async fn merge_preview(
+    _: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Query(ask): Query<MergeTo>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    Ok(Json(json!(
+        crate::data::merge_preview(&mut conn, id, ask.into).await?
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergeAsk {
+    pub into: i32,
+    pub confirm: String,
+}
+
+/// `POST /api/admin/talkgroups/<id>/merge`: starts the merge job; the
+/// talkgroup that goes is confirmed by its name.
+pub async fn merge_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(body): Json<MergeAsk>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (job, count) =
+        crate::data::start_merge(&mut conn, id, body.into, &body.confirm, &admin.0.login).await?;
+    record(
+        &admin,
+        format!(
+            "started job {job}: merge talkgroup {id} into {} ({count} calls)",
+            body.into
+        ),
     );
     Ok((
         StatusCode::CREATED,

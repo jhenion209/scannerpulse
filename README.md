@@ -203,6 +203,13 @@ listen.
   `/` or `_` in a file name without a title) is refused and stays; files in
   read-only locations stay too. The talkgroup leaves the list when none of
   its calls is left in another folder.
+- `talkgroup merge SYSTEM/NUMBER --into SYSTEM/NUMBER [--confirm NAME]`
+  (and `GET /api/admin/talkgroups/<id>/merge?into=<id>`, then `POST` with
+  `into` and `confirm`) joins two talkgroups of one system, for example two
+  entries that the number does not join. Once the name of the talkgroup
+  that goes is typed exactly, a job moves its calls to the other in steps,
+  then its favorites, removes it, and corrects the moved calls' files to
+  the other's number and name, as `talkgroup correct` does.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
   each host) gives the calls per five minutes of the 120 days before today,
   in the site's time zone, as weekday and weekend profiles (calls a day),
