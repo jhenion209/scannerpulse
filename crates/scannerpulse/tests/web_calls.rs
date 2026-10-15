@@ -147,6 +147,25 @@ async fn a_search_in_one_talkgroup_pages_through_its_matches_only(pool: PgPool) 
     }
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn a_search_in_one_system_finds_its_matches_only(pool: PgPool) {
+    let a = talkgroup(&pool, "SYSA", 1).await;
+    let b = talkgroup(&pool, "SYSB", 1).await;
+    let first = call(&pool, a, at(1), Some("engine responding")).await;
+    call(&pool, b, at(2), Some("engine on scene")).await;
+    call(&pool, a, at(3), Some("ladder only")).await;
+    let second = call(&pool, a, at(4), Some("engine two")).await;
+    call(&pool, b, at(5), Some("engine clear")).await;
+    let system: i32 = sqlx::query_scalar("SELECT id FROM systems WHERE name = 'SYSA'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (status, answer) = get(&pool, &format!("/api/calls?system={system}&q=engine")).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(ids(&answer), vec![second, first]);
+    assert_eq!(answer["total"], 2);
+}
+
 fn urlencode(text: &str) -> String {
     text.bytes()
         .map(|b| match b {
