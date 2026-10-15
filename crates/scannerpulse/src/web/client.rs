@@ -40,7 +40,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Peer {
         Ok(Peer(
             ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
                 .await
-                .map(|info| info.0.ip())
+                .map(|info| info.0.ip().to_canonical())
                 .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
         ))
     }
@@ -57,7 +57,8 @@ pub async fn trusted_proxies(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec<
         .and_then(Value::as_array)
         .map(|list| {
             list.iter()
-                .filter_map(|v| v.as_str()?.trim().parse().ok())
+                .filter_map(|v| v.as_str()?.trim().parse::<IpAddr>().ok())
+                .map(|ip| ip.to_canonical())
                 .collect()
         })
         .unwrap_or_default())
@@ -68,6 +69,8 @@ pub async fn trusted_proxies(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec<
 /// appends the address it heard from, so the entries to its left may be
 /// anyone's invention.
 pub fn address(peer: IpAddr, headers: &HeaderMap, trusted: &[IpAddr]) -> IpAddr {
+    // A dual-stack listener shows an IPv4 peer as `::ffff:a.b.c.d`.
+    let peer = peer.to_canonical();
     if !trusted.contains(&peer) {
         return peer;
     }
@@ -80,7 +83,7 @@ pub fn address(peer: IpAddr, headers: &HeaderMap, trusted: &[IpAddr]) -> IpAddr 
         .collect::<Vec<&str>>()
         .into_iter()
         .rev()
-        .map_while(|entry| entry.parse::<IpAddr>().ok())
+        .map_while(|entry| entry.parse::<IpAddr>().ok().map(|ip| ip.to_canonical()))
         .collect();
     forwarded
         .into_iter()
@@ -126,6 +129,19 @@ mod tests {
                 &headers(&["1.2.3.4", "203.0.113.9, 192.0.2.11"]),
                 &trusted
             ),
+            want
+        );
+    }
+
+    #[test]
+    fn an_ipv4_proxy_is_recognised_behind_a_mapped_address() {
+        let peer: IpAddr = format!("::ffff:{PROXY}").parse().unwrap();
+        let trusted = [PROXY.parse().unwrap()];
+        let want: IpAddr = "203.0.113.9".parse().unwrap();
+        assert_eq!(address(peer, &headers(&["203.0.113.9"]), &trusted), want);
+        // A forwarded entry in the mapped form comes back as plain IPv4.
+        assert_eq!(
+            address(peer, &headers(&["::ffff:203.0.113.9"]), &trusted),
             want
         );
     }
