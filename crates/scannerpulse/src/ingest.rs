@@ -295,9 +295,10 @@ fn lock<T>(counts: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Result<(), String> {
     tokio::pin!(stop);
     let pool = PgPoolOptions::new()
-        // The filer, the watcher, the transcriber, the summary and the job
-        // runner each hold one at times.
-        .max_connections(6)
+        // Held at once: the lease, the rescan listener (for its whole life),
+        // a job step (up to the request limit), and one each for the file,
+        // transcribe, watch and maintenance loops; the eighth is headroom.
+        .max_connections(8)
         .acquire_timeout(RETRY)
         // A connection given back after a cancelled call is pinged before it
         // goes back to the pool, with no limit of its own: on a dead socket it
