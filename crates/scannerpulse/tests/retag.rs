@@ -81,6 +81,29 @@ fn every_value_after_the_first_is_kept() {
 }
 
 #[test]
+fn the_rest_of_what_the_reader_reads_is_kept() {
+    use id3::TagLike;
+    let name = "2031-01-15_120000_127-Alpha_711351-_SYSA-North_SYSA.mp3";
+    let mut recorder = tag(Some("127\"Alpha\""));
+    recorder.set_artist("711351-Unit 5");
+    recorder.add_frame(id3::frame::Comment {
+        lang: "eng".to_string(),
+        description: String::new(),
+        text: "System:SYSA;Site:North;".to_string(),
+    });
+    let data = common::tagged(&recorder, 2);
+    let before = reader::describe(name, &reader::tags(&data));
+    let done = retag(name, &data, &tg(128, "Bravo")).unwrap();
+    let after = reader::describe(&done.name, &reader::tags(&done.data));
+    assert_eq!(after.site.as_deref(), Some("North"));
+    assert_eq!(after.radio_id, Some(711351));
+    assert_eq!(after.radio_alias.as_deref(), Some("Unit 5"));
+    assert_eq!(after.site, before.site);
+    assert_eq!(after.radio_id, before.radio_id);
+    assert_eq!(after.radio_alias, before.radio_alias);
+}
+
+#[test]
 fn a_file_whose_talkgroup_cannot_be_rewritten_is_refused() {
     // A patch's title names the talkgroup only by its first number.
     let patch = common::tagged(&tag(Some("P:127,128 \"Alpha\"")), 1);

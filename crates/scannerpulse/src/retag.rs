@@ -1,7 +1,8 @@
 //! A call's file rewritten to name its talkgroup as the database does: the
 //! talkgroup token of its file name and its ID3 title. The audio is kept byte
 //! for byte. The result is read back with the reader's own rules, which must
-//! give the new talkgroup, so the archive keeps describing itself.
+//! give the new talkgroup, so the archive keeps describing itself. The start
+//! time, the system, the site and the radio must read back unchanged too.
 
 use std::io::Cursor;
 
@@ -23,7 +24,24 @@ pub struct Retagged {
 pub fn retag(name: &str, data: &[u8], to: &Talkgroup) -> Result<Retagged, String> {
     let new_data = retag_title(data, to)?.unwrap_or_else(|| data.to_vec());
     let new_name = rename(name, to);
-    let read = reader::describe(&new_name, &reader::tags(&new_data)).talkgroup;
+    let before = reader::describe(name, &reader::tags(data));
+    let after = reader::describe(&new_name, &reader::tags(&new_data));
+    if reader::start_time(name) != reader::start_time(&new_name)
+        || (
+            &before.system,
+            &before.site,
+            before.radio_id,
+            &before.radio_alias,
+        ) != (
+            &after.system,
+            &after.site,
+            after.radio_id,
+            &after.radio_alias,
+        )
+    {
+        return Err("the rewrite would change more than the talkgroup".to_string());
+    }
+    let read = after.talkgroup;
     if read.as_ref() != Some(to) {
         return Err(match read {
             Some(found) => format!(
