@@ -15,6 +15,9 @@
   --accent-strong: #5ec8e5;
   --playing: #e1f3fa;
   --played: #5f6f80;
+  /* A call's left edge: bright until it is played, darker after (3:1 or more on the page, the playing wash and the chosen tint). */
+  --edge-new: #0e749b;
+  --edge-played: #7a8896;
   --warn-bg: #fff1c2;
   --warn-text: #5a4300;
   --focus: #0e749b;
@@ -35,6 +38,8 @@
   --accent-strong: #5ec8e5;
   --playing: #123447;
   --played: #8ea3b5;
+  --edge-new: #5ec8e5;
+  --edge-played: #8ea3b5;
   --warn-bg: #4a3b10;
   --warn-text: #ffe39a;
   --focus: #5ec8e5;
@@ -55,6 +60,8 @@
     --accent-strong: #5ec8e5;
     --playing: #123447;
     --played: #8ea3b5;
+    --edge-new: #5ec8e5;
+    --edge-played: #8ea3b5;
     --warn-bg: #4a3b10;
     --warn-text: #ffe39a;
     --focus: #5ec8e5;
@@ -76,6 +83,8 @@
     --accent: #0e749b;
     --playing: #e1f3fa;
     --played: #333333;
+    --edge-new: #0e749b;
+    --edge-played: #7a8896;
   }
 }
 * { box-sizing: border-box; }
