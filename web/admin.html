@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ScannerPulse · Admin</title>
+    <script>
+// Runs in the page's <head>, before anything is drawn: the listener's
+// chosen theme, so that the page never flashes the other one.
+try {
+  const theme = localStorage.getItem('scannerpulse.theme');
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+} catch {
+  // Storage may be refused: the device's preference then decides.
+}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/admin.ts"></script>
+  </body>
+</html>

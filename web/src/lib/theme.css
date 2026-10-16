@@ -1,0 +1,64 @@
+/* The Signal palette: deep blue and cyan, in light and dark. Dark follows
+   the device unless the listener picks one (data-theme on <html>). */
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #f2f6f9;
+  --text: #1b2430;
+  --muted: #4a5868;
+  --line: #d9e2ea;
+  --bar: #12324a;
+  --bar-text: #eaf4fb;
+  --accent: #0f7aa3;
+  --accent-strong: #5ec8e5;
+  --playing: #e1f3fa;
+  --played: #5f6f80;
+  --warn-bg: #fff1c2;
+  --warn-text: #5a4300;
+  --focus: #0f7aa3;
+  font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0f1a24;
+  --surface: #142331;
+  --text: #d7e3ec;
+  --muted: #9fb2c2;
+  --line: #22384a;
+  --bar: #081119;
+  --bar-text: #d7e3ec;
+  --accent: #5ec8e5;
+  --accent-strong: #5ec8e5;
+  --playing: #123447;
+  --played: #8ea3b5;
+  --warn-bg: #4a3b10;
+  --warn-text: #ffe39a;
+  --focus: #5ec8e5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: #0f1a24;
+    --surface: #142331;
+    --text: #d7e3ec;
+    --muted: #9fb2c2;
+    --line: #22384a;
+    --bar: #081119;
+    --bar-text: #d7e3ec;
+    --accent: #5ec8e5;
+    --accent-strong: #5ec8e5;
+    --playing: #123447;
+    --played: #8ea3b5;
+    --warn-bg: #4a3b10;
+    --warn-text: #ffe39a;
+    --focus: #5ec8e5;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+button, input, select { font: inherit; color: inherit; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
