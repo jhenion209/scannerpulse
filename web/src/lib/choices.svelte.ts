@@ -10,7 +10,12 @@ export const choices = $state<{ filters: FilterChoices; favorites: Favorite[]; e
   error: null,
 });
 
-async function refresh() {
+/** After a failed read, one more try this soon, before the next timer. */
+export const CHOICES_RETRY_MS = 30_000;
+
+let retry: ReturnType<typeof setTimeout> | undefined;
+
+async function refresh(again = true) {
   try {
     const [filters, favorites] = await Promise.all([fetchFilterChoices(), fetchFavorites()]);
     choices.filters = filters;
@@ -18,12 +23,16 @@ async function refresh() {
     choices.error = null;
   } catch (error) {
     choices.error = error instanceof Error ? error.message : String(error);
+    if (again) retry = setTimeout(() => void refresh(false), CHOICES_RETRY_MS);
   }
 }
 
 /** Reads the choices now and then on a timer; returns the stop. */
 export function startChoices(): () => void {
   void refresh();
-  const timer = setInterval(refresh, CHOICES_REFRESH_MS);
-  return () => clearInterval(timer);
+  const timer = setInterval(() => void refresh(), CHOICES_REFRESH_MS);
+  return () => {
+    clearInterval(timer);
+    clearTimeout(retry);
+  };
 }

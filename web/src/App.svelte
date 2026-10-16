@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import CallList from './lib/CallList.svelte';
   import { goTo, show, view } from './lib/calls.svelte';
   import { choices, startChoices } from './lib/choices.svelte';
@@ -20,14 +21,19 @@
   let filters = $state({ ...parseFilters(location.search), smart: fromUrl.has('smart') ? fromUrl.get('smart') === '1' : prefs.smartSort });
   let paused = $state(false);
   let menuOpen = $state(false);
-  const narrow = matchMedia('(max-width: 760px)');
+  const narrow = new MediaQuery('max-width: 760px');
+
+  let smartSeen = untrack(() => filters.smart);
 
   onMount(startChoices);
 
   $effect(() => {
     const search = filtersToSearch(filters);
     if (search !== location.search) history.replaceState(null, '', `${location.pathname}${search}${location.hash}`);
-    if (filters.smart !== prefs.smartSort) {
+    // Only a change made after the page opened is saved: a link's value is
+    // for this view alone.
+    if (filters.smart !== smartSeen) {
+      smartSeen = filters.smart;
       prefs.smartSort = filters.smart;
       savePref('smartSort', filters.smart);
     }
@@ -135,7 +141,7 @@
   }
 
   function toggleRail() {
-    if (narrow.matches) menuOpen = !menuOpen;
+    if (narrow.current) menuOpen = !menuOpen;
     else {
       prefs.railOpen = !prefs.railOpen;
       savePref('railOpen', prefs.railOpen);
@@ -145,7 +151,7 @@
 
 <div class="shell" class:rail-closed={!prefs.railOpen} class:menu-open={menuOpen}>
   <header class="bar">
-    <button type="button" class="menu" onclick={toggleRail} aria-controls="filters" aria-expanded={narrow.matches ? menuOpen : prefs.railOpen}>
+    <button type="button" class="menu" onclick={toggleRail} aria-controls="filters" aria-expanded={narrow.current ? menuOpen : prefs.railOpen}>
       Filters
     </button>
     <span class="name">ScannerPulse</span>
@@ -154,13 +160,13 @@
     <a class="admin" href="/admin">Admin</a>
   </header>
   <aside class="rail" id="filters" aria-label="Filters">
-    {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
     <FilterRail bind:filters bind:paused choices={choices.filters} favorites={choices.favorites} />
   </aside>
   <main class="list" aria-label="Calls" aria-busy={view.loading} bind:this={listEl}>
     <Pager index={view.paging.index} hasNext={view.paging.cursors.length > view.paging.index + 1}
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} ongo={go} />
+    {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
     {#if view.error}<p class="error" role="alert">{view.error}</p>{/if}
     {#if !view.loading && !view.error && view.calls.length === 0}
       <p class="empty">No calls match these filters{filters.allDates || filters.from || filters.to ? '' : ' in the last 24 hours'}.</p>
