@@ -55,7 +55,7 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, { signal, headers: { accept: 'application/json' } });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, body.error ?? response.statusText, body.detail ?? '');
+    throw new ApiError(response.status, body?.error ?? response.statusText, body?.detail ?? '');
   }
   return response.json() as Promise<T>;
 }

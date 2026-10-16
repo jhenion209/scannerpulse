@@ -32,8 +32,20 @@ const id = (text: string | null): number | null => {
   return Number.isSafeInteger(n) ? n : null;
 };
 
+/** A local date-time that names a real day and time; anything else is null. */
 const localTime = (text: string | null): string | null =>
-  text !== null && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text) ? text : null;
+  text !== null &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text) &&
+  !Number.isNaN(new Date(text).getTime())
+    ? text
+    : null;
+
+/** The instant a date-time names, or null when it names none. */
+const instant = (text: string | null): Date | null => {
+  if (text === null) return null;
+  const when = new Date(text);
+  return Number.isNaN(when.getTime()) ? null : when;
+};
 
 /** The filters a URL's query holds; anything malformed is left out. */
 export function parseFilters(search: string): Filters {
@@ -87,6 +99,14 @@ export interface PageAsk {
   count?: boolean;
 }
 
+/** True when a favorite is chosen but no talkgroup comes with it: not yet read, deleted, or empty. */
+export function favoriteUnresolved(
+  filters: Filters,
+  favorites: { id: number; talkgroups: number[] }[],
+): boolean {
+  return filters.favorite !== null && talkgroupsAskedFor(filters, favorites).length === 0;
+}
+
 /** The `/api/calls` query for the filters, at the instant `now`. */
 export function listQuery(
   filters: Filters,
@@ -96,14 +116,18 @@ export function listQuery(
 ): URLSearchParams {
   const params = new URLSearchParams();
   const talkgroups = talkgroupsAskedFor(filters, favorites);
-  if (talkgroups.length) params.set('talkgroups', talkgroups.join(','));
+  // The server reads an absent or empty talkgroups list as every talkgroup.
+  // Talkgroup ids start at 1, so 0 asks for none: a favorite that is not
+  // known yet, or has no talkgroups, must not widen the list to all of them.
+  if (favoriteUnresolved(filters, favorites)) params.set('talkgroups', '0');
+  else if (talkgroups.length) params.set('talkgroups', talkgroups.join(','));
   if (filters.system !== null) params.set('system', String(filters.system));
   if (!filters.allDates) {
-    const from = filters.from ? new Date(filters.from) : null;
-    const to = filters.to ? new Date(filters.to) : null;
+    const from = instant(filters.from);
+    const to = instant(filters.to);
     if (from || to) {
-      if (from && !Number.isNaN(from.getTime())) params.set('from', from.toISOString());
-      if (to && !Number.isNaN(to.getTime())) params.set('until', to.toISOString());
+      if (from) params.set('from', from.toISOString());
+      if (to) params.set('until', to.toISOString());
     } else {
       params.set('from', new Date(now.getTime() - ROLLING_HOURS * 3600_000).toISOString());
     }

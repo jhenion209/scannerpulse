@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   NO_FILTERS,
+  favoriteUnresolved,
   filtersToSearch,
   listQuery,
   parseFilters,
@@ -37,6 +38,11 @@ describe('filters in the URL', () => {
     const filters = { ...NO_FILTERS, allDates: true, from: '2031-02-28T08:00' };
     expect(filtersToSearch(filters)).toBe('?all=1');
   });
+
+  it('drops a date with the right shape but no such day or time', () => {
+    expect(parseFilters('?from=2031-13-45T99:99').from).toBeNull();
+    expect(parseFilters('?to=2031-02-28T25:00').to).toBeNull();
+  });
 });
 
 describe('the request', () => {
@@ -67,5 +73,34 @@ describe('the request', () => {
   it('asks the server for SmartSort; the page never sorts', () => {
     const query = listQuery({ ...NO_FILTERS, smart: true }, favorites, { size: 25 }, now);
     expect(query.get('smart')).toBe('true');
+  });
+
+  it('falls back to the rolling window when no date given to it is real', () => {
+    const query = listQuery({ ...NO_FILTERS, from: '2031-13-45T99:99' }, favorites, { size: 25 }, now);
+    expect(query.get('from')).toBe('2031-02-28T12:00:00.000Z');
+    expect(query.has('until')).toBe(false);
+  });
+
+  it('keeps the real bound when only one of the dates is real', () => {
+    const query = listQuery({ ...NO_FILTERS, from: '2031-02-28T08:00', to: '2031-13-45T99:99' }, favorites, { size: 25 }, now);
+    expect(query.has('from')).toBe(true);
+    expect(query.has('until')).toBe(false);
+  });
+});
+
+describe('a favorite that gives no talkgroups', () => {
+  it('is unresolved for an unknown favorite, and for one with no talkgroups', () => {
+    expect(favoriteUnresolved({ ...NO_FILTERS, favorite: 99 }, favorites)).toBe(true);
+    expect(favoriteUnresolved({ ...NO_FILTERS, favorite: 4 }, [{ id: 4, talkgroups: [] }])).toBe(true);
+  });
+
+  it('is not unresolved when it resolves, or when no favorite is chosen', () => {
+    expect(favoriteUnresolved({ ...NO_FILTERS, favorite: 3 }, favorites)).toBe(false);
+    expect(favoriteUnresolved(NO_FILTERS, favorites)).toBe(false);
+  });
+
+  it('asks for no talkgroup rather than every one', () => {
+    const query = listQuery({ ...NO_FILTERS, favorite: 99 }, favorites, { size: 25 }, now);
+    expect(query.get('talkgroups')).toBe('0');
   });
 });
