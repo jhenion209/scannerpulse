@@ -993,13 +993,6 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     }
     let holding_path = work.holding.clone().unwrap_or_default();
     let holding = PathBuf::from(&holding_path);
-    if !holding.join(&marker).is_file() {
-        // An unmounted share hides the marker: try again later rather than
-        // lose a file.
-        return Err(io_error(io::Error::other(format!(
-            "the holding folder {holding_path} is not the one the purge started with (unmounted?)"
-        ))));
-    }
     let (after_at, after_id) = work.after.unzip();
     let batch: Vec<CallFile> = sqlx::query_as(
         "SELECT c.id, c.started_at, c.location_id, c.rel_path \
@@ -1041,6 +1034,14 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         }
         let _ = std::fs::remove_file(holding.join(&marker));
         return Ok(Outcome::Done(job.done, message));
+    }
+    if !holding.join(&marker).is_file() {
+        // An unmounted share hides the marker: try again later rather than
+        // lose a file. Checked only when there is a file to copy, so a last
+        // step whose commit failed after it removed the marker still ends.
+        return Err(io_error(io::Error::other(format!(
+            "the holding folder {holding_path} is not the one the purge started with (unmounted?)"
+        ))));
     }
     for call in &batch {
         if let Some(root) = roots.get(&call.location_id) {
