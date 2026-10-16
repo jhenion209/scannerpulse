@@ -189,3 +189,119 @@ test('a link with a favorite and a page waits for slow favorites', async ({ page
   await expect(page.getByText('20 calls')).toBeVisible();
   await expect(page).toHaveURL(/page=2/);
 });
+
+const columnMenu = (page: Page) => page.locator('details.columns');
+const openColumns = async (page: Page) => {
+  await columnMenu(page).locator('summary').click();
+  await expect(columnMenu(page).getByRole('group', { name: 'Columns' })).toBeVisible();
+};
+const columnBox = (page: Page, name: string) => columnMenu(page).getByRole('checkbox', { name, exact: true });
+
+test('the Columns menu hides and shows columns, keeps the choice, and resets it', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  // Today's six columns on a desk; none of the four extras.
+  for (const name of ['Time', 'Talkgroup', 'Site', 'Source', 'Length', 'Text']) {
+    await expect(page.getByRole('columnheader', { name, exact: true })).toBeVisible();
+  }
+  for (const name of ['System', 'Call ID', 'Text source', 'Talkgroup number']) {
+    await expect(page.getByRole('columnheader', { name, exact: true })).toHaveCount(0);
+  }
+  await openColumns(page);
+  await expect(columnBox(page, 'Site')).toBeChecked();
+  await expect(columnBox(page, 'Call ID')).not.toBeChecked();
+  await expect(columnMenu(page).getByRole('button', { name: 'Reset to default' })).toBeDisabled();
+
+  await columnBox(page, 'Site').uncheck();
+  await columnBox(page, 'Call ID').check();
+  await expect(page.getByRole('columnheader', { name: 'Site', exact: true })).toHaveCount(0);
+  await expect(page.locator('td.c-site')).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'Call ID', exact: true })).toBeVisible();
+  const shownIds = await page.locator('td.c-id').allInnerTexts();
+  expect(shownIds).toEqual((await ids(page)).map(String));
+
+  // The choice is the listener's: it is still there after a reload.
+  await page.reload();
+  await expect(rows(page)).toHaveCount(30);
+  await expect(page.getByRole('columnheader', { name: 'Site', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'Call ID', exact: true })).toBeVisible();
+
+  await openColumns(page);
+  await columnMenu(page).getByRole('button', { name: 'Reset to default' }).click();
+  await expect(page.getByRole('columnheader', { name: 'Site', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Call ID', exact: true })).toHaveCount(0);
+  await expect(columnMenu(page).getByRole('button', { name: 'Reset to default' })).toBeDisabled();
+});
+
+test('the Columns menu closes with Escape and gives the focus back to its button', async ({ page }) => {
+  await page.goto('/');
+  await openColumns(page);
+  await columnBox(page, 'Site').focus();
+  await page.keyboard.press('Escape');
+  await expect(columnMenu(page).getByRole('group', { name: 'Columns' })).toBeHidden();
+  await expect(columnMenu(page).locator('summary')).toBeFocused();
+});
+
+test('Tab moves the focus on and closes the Columns menu, so it cannot cover the focused control', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/');
+  await openColumns(page);
+  // Nothing is saved yet, so "Reset to default" is disabled: the last checkbox is the last stop in the menu.
+  await columnBox(page, 'Text').focus();
+  await page.keyboard.press('Tab');
+  await expect(columnMenu(page).getByRole('group', { name: 'Columns' })).toBeHidden();
+  await expect(page.getByLabel('Rows')).toBeFocused();
+});
+
+test('on a desk the list still fits when the Text column is hidden', async ({ page }) => {
+  await page.goto('/');
+  await openColumns(page);
+  await columnBox(page, 'Text').uncheck();
+  await expect(page.getByRole('columnheader', { name: 'Text', exact: true })).toHaveCount(0);
+  await expect(rows(page).first().getByRole('button', { name: /^Play/ })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
+});
+
+test('on a phone the chosen extra columns are labelled values under the text', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  // Nothing extra by default: as before, two lines and no labels.
+  await expect(page.locator('td.chips')).toHaveCount(0);
+  await expect(page.locator('tr[data-id] td.extra:visible')).toHaveCount(0);
+
+  await openColumns(page);
+  await columnBox(page, 'Source').check();
+  await columnBox(page, 'Call ID').check();
+  const first = rows(page).first();
+  // The plain cells stay out of a phone's layout (and out of what a screen reader reads).
+  await expect(first.locator('td.c-source')).toBeHidden();
+  const id = await first.getAttribute('data-id');
+  const chips = first.locator('td.chips');
+  await expect(chips).toContainText(`Call ID ${id}`);
+  await expect(chips).toContainText(/Source \d+/);
+  // The seed leaves the site empty: an empty value shows no label.
+  await columnBox(page, 'Site').check();
+  await expect(columnBox(page, 'Site')).toBeChecked();
+  await expect(chips).toContainText(`Call ID ${id}`);
+  await expect(chips).not.toContainText('Site');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+  // Hiding a core column on a phone leaves the others on their line.
+  await columnBox(page, 'Length').uncheck();
+  await expect(first.locator('td.c-length')).toHaveCount(0);
+  await expect(first.locator('td.c-talkgroup')).toBeVisible();
+});
+
+for (const [theme, width] of [['light', 1280], ['dark', 360]] as const) {
+  test(`no accessibility fault with the Columns menu open in the ${theme} theme at ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.addInitScript((t) => localStorage.setItem('scannerpulse.theme', t), theme);
+    await page.goto('/');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    await expect(rows(page)).toHaveCount(30);
+    await openColumns(page);
+    const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
+    expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
+  });
+}

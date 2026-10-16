@@ -3,6 +3,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import type { Call } from './lib/api';
   import CallList from './lib/CallList.svelte';
+  import { defaultColumns, type ColumnId } from './lib/columns';
   import { goTo, show, view } from './lib/calls.svelte';
   import { choices, startChoices } from './lib/choices.svelte';
   import { follow } from './lib/feed';
@@ -13,7 +14,7 @@
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
-  import { loadPrefs, savePref } from './lib/prefs';
+  import { loadPrefs, resetPref, savePref } from './lib/prefs';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
 
   const prefs = $state(loadPrefs());
@@ -23,6 +24,8 @@
   let paused = $state(false);
   let menuOpen = $state(false);
   const narrow = new MediaQuery('max-width: 760px');
+  // The chosen columns; until one is chosen, today's layout for the screen's width.
+  const columns = $derived(prefs.columns ?? defaultColumns(narrow.current));
 
   let smartSeen = untrack(() => filters.smart);
   // The page a link names, until the first read has carried the list there.
@@ -162,6 +165,16 @@
     savePref('pageSize', size);
   }
 
+  function setColumns(chosen: ColumnId[]) {
+    prefs.columns = chosen;
+    savePref('columns', chosen);
+  }
+
+  function resetColumns() {
+    prefs.columns = null;
+    resetPref('columns');
+  }
+
   function setShowAll(on: boolean) {
     prefs.showAllRows = on;
     savePref('showAllRows', on);
@@ -208,13 +221,14 @@
   <main class="list" aria-label="Calls" aria-busy={view.loading} bind:this={listEl}>
     <Pager index={view.paging.index} hasNext={view.paging.cursors.length > view.paging.index + 1}
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
-      bind:showAll={() => prefs.showAllRows, setShowAll} ongo={go} />
+      bind:showAll={() => prefs.showAllRows, setShowAll} {columns} customised={prefs.columns !== null}
+      oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go} />
     {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
     {#if view.error}<p class="error" role="alert">{view.error}</p>{/if}
     {#if !view.loading && !view.error && view.calls.length === 0}
       <p class="empty">No calls match these filters{filters.allDates || filters.from || filters.to ? '' : ' in the last 24 hours'}.</p>
     {/if}
-    <CallList calls={view.calls} playingId={player.call?.id ?? null} {played} showAll={prefs.showAllRows} onplay={(call) => play(call)} />
+    <CallList calls={view.calls} playingId={player.call?.id ?? null} {played} showAll={prefs.showAllRows} {columns} onplay={(call) => play(call)} />
   </main>
   <footer class="player" aria-label="Player">
     <Player bind:continuous={() => prefs.continuous, setContinuous} bind:autoplayNew={() => prefs.autoplayNew, setAutoplayNew} />

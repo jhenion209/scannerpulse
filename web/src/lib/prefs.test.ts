@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULTS, applyTheme, loadPrefs, savePref } from './prefs';
+import { DEFAULTS, applyTheme, loadPrefs, resetPref, savePref } from './prefs';
 
 describe('prefs', () => {
   beforeEach(() => localStorage.clear());
@@ -38,6 +38,35 @@ describe('prefs', () => {
     });
     expect(loadPrefs()).toEqual(DEFAULTS);
     expect(() => savePref('theme', 'light')).not.toThrow();
+  });
+
+  it('keeps the column choice, even an empty one, and forgets it on reset', () => {
+    expect(loadPrefs().columns).toBeNull();
+    savePref('columns', ['time', 'id', 'text']);
+    expect(loadPrefs().columns).toEqual(['time', 'id', 'text']);
+    savePref('columns', []);
+    expect(loadPrefs().columns).toEqual([]);
+    resetPref('columns');
+    expect(loadPrefs().columns).toBeNull();
+  });
+
+  it('saving no choice at all forgets the stored one, and is not "every column hidden"', () => {
+    savePref('columns', ['time']);
+    savePref('columns', null);
+    expect(localStorage.getItem('scannerpulse.columns')).toBeNull();
+    expect(loadPrefs().columns).toBeNull();
+  });
+
+  it('ignores a stored column choice that names none of our columns', () => {
+    localStorage.setItem('scannerpulse.columns', '<b>,nothing');
+    expect(loadPrefs().columns).toBeNull();
+  });
+
+  it('survives a reset when storage is refused', () => {
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('denied');
+    });
+    expect(() => resetPref('columns')).not.toThrow();
   });
 
   it('sets the theme on the page, and auto leaves it to the device', () => {

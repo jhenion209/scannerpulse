@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ColumnMenu from './ColumnMenu.svelte';
+  import type { ColumnId } from './columns';
   import { pageCount } from './paging';
   import { PAGE_SIZES } from './prefs';
 
@@ -9,6 +11,10 @@
     capped,
     size = $bindable(),
     showAll = $bindable(),
+    columns,
+    customised,
+    oncolumns,
+    onresetcolumns,
     ongo,
   }: {
     index: number;
@@ -17,6 +23,10 @@
     capped: boolean;
     size: number;
     showAll: boolean;
+    columns: ColumnId[];
+    customised: boolean;
+    oncolumns: (columns: ColumnId[]) => void;
+    onresetcolumns: () => void;
     ongo: (page: number) => void;
   } = $props();
 
@@ -49,6 +59,7 @@
   </form>
   <button type="button" onclick={() => ongo(index + 1)} disabled={!hasNext}>Next</button>
   <label><input type="checkbox" class="check" bind:checked={showAll} /> Show all text</label>
+  <ColumnMenu {columns} {customised} onchange={oncolumns} onreset={onresetcolumns} />
   <label class="size">
     Rows
     <select bind:value={size}>
