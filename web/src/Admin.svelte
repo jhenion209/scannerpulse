@@ -2,6 +2,7 @@
   import { onMount, type Component } from 'svelte';
   import AccountsArea from './lib/admin/AccountsArea.svelte';
   import { AREAS, areaOf, type AreaId } from './lib/admin/areas';
+  import DataArea from './lib/admin/DataArea.svelte';
   import { activeCount } from './lib/admin/jobs';
   import { followJobs, jobs } from './lib/admin/jobs.svelte';
   import FavoritesArea from './lib/admin/FavoritesArea.svelte';
@@ -20,7 +21,7 @@
   import ViewersArea from './lib/admin/ViewersArea.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, accounts: AccountsArea, settings: SettingsArea,
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, data: DataArea, accounts: AccountsArea, settings: SettingsArea,
     favorites: FavoritesArea, viewers: ViewersArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
