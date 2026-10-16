@@ -96,3 +96,48 @@ test('a count that comes back after a field changed is dropped', async ({ page }
   await expect(page.getByRole('button', { name: /^Queue / })).toHaveCount(0);
   await expect(page.getByText(/would be queued/)).toHaveCount(0);
 });
+
+test("the improvement module's part says why it is not shown while the module is off", async ({ page }) => {
+  await signIn(page, '#transcription');
+  await expect(page.getByText('Not shown: the improvement module is off (improvement_module.enabled).')).toBeVisible();
+  await expect(page.getByRole('table', { name: "The improvement module's sets" })).toHaveCount(0);
+});
+
+test("with the module on, a set's report and runs show, and a candidate's run starts", async ({ page }) => {
+  // The module is off in the seed, and a run would send calls to a server:
+  // the test answers for the server.
+  await page.route('**/api/admin/asr/sets', (route) =>
+    route.fulfill(json([{ set: 'autumn', size: 50, labeled: 20, runs: 1 }, { set: 'spring', size: 10, labeled: 0, runs: 0 }])));
+  await page.route('**/api/admin/asr/report?*', (route) =>
+    route.fulfill(json({
+      set: 'autumn', size: 50, labeled: 20,
+      production: { wer: 0.152, errors: 38, words: 250, calls: 20, silent: 1, phantom: 0, summary: 'WER 15.2% (38 errors in 250 words, 20 calls)' },
+      runs: [{ run_at: '2031-07-01T15:00:00Z', server: 'http://192.0.2.10:8000', model: 'large-v3', prompt: 'Unit numbers.', calls: 20, wer: 0.121, seconds_per_call: 1.25 }],
+    })));
+  const asked: unknown[] = [];
+  await page.route('**/api/admin/jobs/asr-run', (route) => {
+    const body = route.request().postDataJSON();
+    asked.push(body);
+    if (!body.model) return route.fulfill(json({ error: 'a model is needed' }, 400));
+    return route.fulfill(json({ id: 9, count: 20 }, 201));
+  });
+  await signIn(page, '#transcription');
+  const sets = page.getByRole('table', { name: "The improvement module's sets" });
+  await expect(sets.locator('tbody tr')).toHaveCount(2);
+  await sets.getByRole('button', { name: 'Show the report of autumn' }).click();
+  await expect(page.getByText('Production on its calls: WER 15.2% (38 errors in 250 words, 20 calls)')).toBeVisible();
+  const run = page.getByRole('table', { name: 'Runs on the set autumn' }).locator('tbody tr');
+  await expect(run).toHaveCount(1);
+  await expect(run).toContainText('large-v3 at http://192.0.2.10:8000');
+  await expect(run).toContainText('Unit numbers.');
+  await expect(run).toContainText('12.1%');
+  await expect(run).toContainText('1.25');
+
+  await page.getByLabel('Server').fill(' http://192.0.2.11:8000 ');
+  await page.getByRole('button', { name: 'Start the run' }).click();
+  await expect(page.getByRole('alert')).toHaveText('Not started: a model is needed');
+  await page.getByLabel('Model').fill('medium');
+  await page.getByRole('button', { name: 'Start the run' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Job #9 runs 20 calls of the set autumn; follow it in Jobs.' })).toBeVisible();
+  expect(asked[1]).toEqual({ set: 'autumn', server: 'http://192.0.2.11:8000', model: 'medium' });
+});

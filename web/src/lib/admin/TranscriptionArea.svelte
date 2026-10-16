@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { tell } from '../notice.svelte';
+  import ImprovementSection from './ImprovementSection.svelte';
   import { admin, why } from './session.svelte';
   import { matchTalkgroups, previewText, queueBody, queueQuery, type AdminTalkgroup, type QueueFields } from './transcription';
 
@@ -156,6 +157,8 @@
   <p>A call fails after its tries run out. This puts every failed call back in the queue; a call of a talkgroup whose transcription is off stays failed.</p>
   <button type="button" onclick={retry}>Try the failed calls again</button>
   {#if retried}<p role="status">{retried}</p>{/if}
+
+  <ImprovementSection />
 </section>
 
 <style>
