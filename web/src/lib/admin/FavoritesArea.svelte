@@ -81,7 +81,7 @@
   {/if}
 
   <h2>A new list</h2>
-  <FavoriteEditor id="new-list" {groups} taken={favorites?.map((f) => f.name) ?? []} onsave={save} />
+  <FavoriteEditor id="new-list" {groups} taken={favorites?.map((f) => f.name) ?? null} onsave={save} />
 </section>
 
 <style>

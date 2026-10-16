@@ -10,8 +10,10 @@
     name?: string | null;
     chosen?: number[];
     groups: TalkgroupGroup[];
-    /** The names of the lists that exist: a new list may not take one (the server would replace that list). */
-    taken?: string[];
+    /** The names of the lists that exist: a new list may not take one (the
+     * server would replace that list). null: the lists are not read, so a new
+     * list cannot be told from a replacement. */
+    taken?: string[] | null;
     /** Saves; throws the server's refusal, which the editor shows. */
     onsave: (name: string, talkgroups: number[]) => Promise<void>;
     oncancel?: () => void;
@@ -29,7 +31,10 @@
     event.preventDefault();
     const listName = name ?? typed.trim();
     refusal = listName ? null : 'Name the list first.';
-    if (name === null && taken.includes(listName)) refusal = `A list named ${listName} exists: use its Edit button.`;
+    if (name === null && refusal === null) {
+      if (taken === null) refusal = 'The lists could not be read yet: reload the page before adding one.';
+      else if (taken.includes(listName)) refusal = `A list named ${listName} exists: use its Edit button.`;
+    }
     if (refusal || busy) return;
     busy = true;
     try {

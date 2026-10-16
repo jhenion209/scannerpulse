@@ -83,6 +83,20 @@ test('a new list is not saved over a list of the same name', async ({ page }) =>
   expect(saves).toEqual([]);
 });
 
+test('a new list is not saved while the lists are not read', async ({ page }) => {
+  const saves = await recordSaves(page);
+  await page.route('**/api/favorites', (route) =>
+    route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'unavailable', detail: 'the database does not answer' }) }),
+  );
+  await signIn(page, '#favorites');
+  // The talkgroups are read together with the lists, so none can be ticked here.
+  const editor = page.locator('form.editor').last();
+  await editor.getByLabel('Name').fill('Fire and ambulance');
+  await editor.getByRole('button', { name: 'Add the list' }).click();
+  await expect(editor.getByRole('alert')).toHaveText('Not saved: The lists could not be read yet: reload the page before adding one.');
+  expect(saves).toEqual([]);
+});
+
 test('the viewers are the pages open on the calls, with the admin who opened one', async ({ page }) => {
   await signIn(page);
   const main = await page.context().newPage();
