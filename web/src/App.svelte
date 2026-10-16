@@ -6,7 +6,7 @@
   import { follow } from './lib/feed';
   import FilterRail from './lib/FilterRail.svelte';
   import { addCall, liveApplies, liveUrl, newestId, setTranscript, wanted, type LiveEvent } from './lib/live';
-  import { filtersToSearch, parseFilters, talkgroupsAskedFor } from './lib/filters';
+  import { favoriteUnresolved, filtersToSearch, parseFilters, talkgroupsAskedFor } from './lib/filters';
   import Pager from './lib/Pager.svelte';
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
@@ -95,6 +95,7 @@
       return;
     }
     lastId = newestId([event.call], lastId);
+    if (favoriteUnresolved(filters, choices.favorites)) return;
     if (!liveApplies(filters, view.paging.index, paused, new Date())) return;
     if (!wanted(event.call, asked(), systemName())) return;
     if (filters.smart) return readAgain();
