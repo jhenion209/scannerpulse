@@ -343,7 +343,7 @@
 </section>
 
 <style>
-  .grid { display: grid; gap: 0.4rem; max-width: 36rem; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.4rem; max-width: 36rem; }
   .grid label { font-weight: 600; }
   select { max-width: 100%; }
   /* The holding folder's path is one long word. */

@@ -179,7 +179,9 @@
 </section>
 
 <style>
-  .queue { display: grid; gap: 0.4rem; max-width: 36rem; }
+  /* One column that may shrink below its widest content (a select's longest option),
+     else the track grows to it and the form outgrows a phone's width. */
+  .queue { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.4rem; max-width: 36rem; }
   .queue label { font-weight: 600; }
   .hint { margin: 0; color: var(--muted); }
   select { max-width: 100%; }

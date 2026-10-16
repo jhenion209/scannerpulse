@@ -136,7 +136,7 @@
 
 <style>
   h3 { margin: 1.2rem 0 0.4rem; font-size: 1rem; }
-  .candidate { display: grid; gap: 0.4rem; max-width: 36rem; }
+  .candidate { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.4rem; max-width: 36rem; }
   .candidate label { font-weight: 600; }
   .hint { margin: 0; color: var(--muted); }
   .muted { color: var(--muted); }

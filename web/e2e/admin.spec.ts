@@ -221,6 +221,32 @@ test("a table's headings and short values break between words, never inside one,
   }
 });
 
+test('a long talkgroup name does not widen the Transcription or Data forms at 360 px', async ({ page }) => {
+  // A select is as wide as its longest option: a grid track sized by it pushed the form past the page.
+  const name = 'Northern Valley Regional Emergency Medical Services Dispatch Channel Two';
+  expect(name.length).toBeGreaterThanOrEqual(70);
+  await page.route('**/api/admin/talkgroups', (route) =>
+    route.fulfill({ json: [{ id: 1, system: 'Metro', number: 101, name, transcribe: false, files_correct: true }] }));
+  await page.setViewportSize({ width: 360, height: 800 });
+  await signIn(page, '#transcription');
+  for (const [area, heading, select] of [['transcription', 'Queue past calls', 'Talkgroup'], ['data', 'Merge', 'Talkgroup that goes']] as const) {
+    await page.evaluate((h) => (location.hash = h), `#${area}`);
+    await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
+    // The list is read after the area opens: wait for its option (the first one is the prompt).
+    await expect(page.getByLabel(select, { exact: true }).locator('option')).toHaveCount(2);
+    // Not only the page: a form wider than the page but clipped must fail too.
+    const past = await page.evaluate(() => {
+      const found = document.documentElement.scrollWidth > window.innerWidth ? ['the page scrolls sideways'] : [];
+      for (const e of document.querySelectorAll('.area form, .area select, .area label')) {
+        const right = Math.round(e.getBoundingClientRect().right);
+        if (right > window.innerWidth) found.push(`${e.tagName.toLowerCase()} ends at ${right}`);
+      }
+      return found;
+    });
+    expect(past, `${area} at 360 px`).toEqual([]);
+  }
+});
+
 for (const [theme, width] of [['light', 1280], ['dark', 360]] as const) {
   test(`no accessibility fault signing in or in any area in the ${theme} theme at ${width} px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
