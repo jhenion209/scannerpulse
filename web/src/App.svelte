@@ -26,13 +26,16 @@
 
   let smartSeen = untrack(() => filters.smart);
   // The page a link names, until the first read has carried the list there.
+  // It is the link's only while the filters and page size are the link's.
   let landing = $state(parsePage(location.search));
-  let firstRead = true;
+  const viewKey = () => `${filtersToSearch(filters)}|${prefs.pageSize}`;
+  const landingKey = untrack(viewKey);
+  const landingPage = () => (viewKey() === landingKey ? landing : 0);
 
   onMount(startChoices);
 
   $effect(() => {
-    const search = filtersToSearch(filters, view.paging.index || landing);
+    const search = filtersToSearch(filters, view.paging.index || landingPage());
     if (search !== location.search) history.replaceState(null, '', `${location.pathname}${search}${location.hash}`);
     // Only a change made after the page opened is saved: a link's value is
     // for this view alone.
@@ -59,25 +62,25 @@
 
   // The feed opens after the first page is read, saying the newest call on
   // it, so no call falls between the read and the feed.
-  async function readFirstPage(open: boolean) {
-    // Only the read made on load carries the link's page; any change since
-    // then starts at page 1.
-    const target = open ? landing : 0;
+  async function readFirstPage() {
     const applied = await show(ask(), FIRST_PAGE);
-    landing = 0;
-    // A read that was superseded opens nothing: the newer one does.
+    // A read that was superseded opens nothing and leaves the link's page
+    // to the newer one (the favorites arriving replace the first read).
     if (!applied) return;
+    const target = landingPage();
     lastId = newestId(view.calls, null);
     stopFeed?.();
     stopFeed = follow(() => liveUrl(location, asked(), lastId), onLive);
-    if (target > 0) await goTo(ask(), target);
+    // The page stays in the address while it is walked to, and is dropped
+    // when the walk ends or fails.
+    // A walk that a newer read replaced leaves the page to that read.
+    if (target > 0 && !(await goTo(ask(), target))) return;
+    landing = 0;
   }
 
   $effect(() => {
     void listKey;
-    const open = firstRead;
-    firstRead = false;
-    untrack(() => readFirstPage(open));
+    untrack(readFirstPage);
   });
   onMount(() => () => {
     stopFeed?.();

@@ -163,3 +163,14 @@ test('the page number is in the URL, and the link opens that page', async ({ pag
   await expect.poll(() => ids(page)).toEqual(first);
   await expect(page).not.toHaveURL(/page=/);
 });
+
+test('a link with a favorite and a page lands on that page', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('scannerpulse.pageSize', '10'));
+  await page.goto('/');
+  const id = await page.getByLabel('Favorite').locator('option', { hasText: 'Fire and ambulance' }).getAttribute('value');
+  await page.goto(`/?favorite=${id}&page=2`);
+  await expect(page.getByLabel('Page number')).toHaveValue('2');
+  await expect(rows(page)).toHaveCount(10);
+  await expect(page.getByText('20 calls')).toBeVisible();
+  await expect(page).toHaveURL(/page=2/);
+});
