@@ -174,3 +174,18 @@ test('a link with a favorite and a page lands on that page', async ({ page }) =>
   await expect(page.getByText('20 calls')).toBeVisible();
   await expect(page).toHaveURL(/page=2/);
 });
+
+test('a link with a favorite and a page waits for slow favorites', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('scannerpulse.pageSize', '10'));
+  await page.goto('/');
+  const id = await page.getByLabel('Favorite').locator('option', { hasText: 'Fire and ambulance' }).getAttribute('value');
+  await page.route('**/api/favorites', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+  await page.goto(`/?favorite=${id}&page=2`);
+  await expect(page.getByLabel('Page number')).toHaveValue('2', { timeout: 10_000 });
+  await expect(rows(page)).toHaveCount(10);
+  await expect(page.getByText('20 calls')).toBeVisible();
+  await expect(page).toHaveURL(/page=2/);
+});

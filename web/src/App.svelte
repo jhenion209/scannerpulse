@@ -67,10 +67,13 @@
     // A read that was superseded opens nothing and leaves the link's page
     // to the newer one (the favorites arriving replace the first read).
     if (!applied) return;
-    const target = landingPage();
     lastId = newestId(view.calls, null);
     stopFeed?.();
     stopFeed = follow(() => liveUrl(location, asked(), lastId), onLive);
+    // While the chosen favorite is unknown this list is a placeholder: the
+    // read that follows the favorites arriving carries the link's page.
+    if (favoriteUnresolved(filters, choices.favorites)) return;
+    const target = landingPage();
     // The page stays in the address while it is walked to, and is dropped
     // when the walk ends or fails.
     // A walk that a newer read replaced leaves the page to that read.
