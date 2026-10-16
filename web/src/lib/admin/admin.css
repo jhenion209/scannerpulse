@@ -6,10 +6,22 @@
 .area .lead { margin: 0 0 1rem; color: var(--muted); }
 .area .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .area table { border-collapse: collapse; width: 100%; }
-/* A table wraps its cells rather than scroll sideways, down to a phone's width. */
+/* A table wraps its cells rather than scroll sideways, down to a phone's width.
+   A heading or a short value breaks between words only; a cell that can hold
+   long text (a path, an address, a browser's name, an error) is marked `long`
+   and may break anywhere. With every cell allowed to, the table's layout
+   squeezed the short columns to a letter or two. */
 .area th, .area td {
   text-align: left; vertical-align: top; padding: 0.35rem 0.75rem 0.35rem 0;
-  border-bottom: 1px solid var(--line); overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--line); overflow-wrap: normal;
+}
+.area td.long { overflow-wrap: anywhere; }
+/* A phone has no room for a table's wide margins: the words that cannot break
+   must fit beside each other. */
+@media (max-width: 480px) {
+  .area { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .area table { font-size: 0.875rem; }
+  .area th, .area td { padding-right: 0.5rem; }
 }
 .area th { color: var(--muted); font-weight: 600; }
 .area td.num, .area th.num { text-align: right; font-variant-numeric: tabular-nums; }

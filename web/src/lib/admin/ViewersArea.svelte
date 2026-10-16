@@ -57,9 +57,9 @@
         {#each viewers as viewer, i (i)}
           <tr>
             <td>{callTime(viewer.connected_at, new Date(), siteZone())}</td>
-            <td>{viewer.address}{viewer.local ? ' (local)' : ''}</td>
+            <td class="long">{viewer.address}{viewer.local ? ' (local)' : ''}</td>
             <td>{viewer.admin ?? '—'}</td>
-            <td class="agent">{viewer.user_agent}</td>
+            <td class="agent long">{viewer.user_agent}</td>
             <td>{viewer.host}</td>
           </tr>
         {/each}

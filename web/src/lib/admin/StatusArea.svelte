@@ -94,7 +94,7 @@
         <thead><tr><th scope="col">Seen</th><th scope="col">Source</th><th scope="col">File</th><th scope="col">Why</th></tr></thead>
         <tbody>
           {#each data.ingest.recent_rejected as file, i (i)}
-            <tr><td>{when(file.seen_at)}</td><td>{file.source}</td><td>{file.rel_path}</td><td>{file.reason ?? ''}</td></tr>
+            <tr><td>{when(file.seen_at)}</td><td>{file.source}</td><td class="long">{file.rel_path}</td><td class="long">{file.reason ?? ''}</td></tr>
           {/each}
         </tbody>
       </table>
@@ -116,10 +116,10 @@
         <tbody>
           {#each data.servers as server (server.url)}
             <tr>
-              <td>{server.url}</td>
+              <td class="long">{server.url}</td>
               <td>{when(server.cooling_until)}</td>
               <td class="num">{count(server.failed_rounds)}</td>
-              <td>{server.last_error ?? ''}</td>
+              <td class="long">{server.last_error ?? ''}</td>
             </tr>
           {/each}
         </tbody>
@@ -133,7 +133,7 @@
         <thead><tr><th scope="col">Call</th><th scope="col">Time</th><th scope="col" class="num">Tries</th><th scope="col">Last error</th></tr></thead>
         <tbody>
           {#each data.failed as call (call.call_id)}
-            <tr><td>{call.call_id}</td><td>{when(call.started_at)}</td><td class="num">{call.attempts}</td><td>{call.last_error ?? ''}</td></tr>
+            <tr><td>{call.call_id}</td><td>{when(call.started_at)}</td><td class="num">{call.attempts}</td><td class="long">{call.last_error ?? ''}</td></tr>
           {/each}
         </tbody>
       </table>
@@ -159,8 +159,8 @@
         <tbody>
           {#each data.database.standbys as standby, i (i)}
             <tr>
-              <td>{standby.name ?? ''}</td>
-              <td>{standby.address ?? ''}</td>
+              <td class="long">{standby.name ?? ''}</td>
+              <td class="long">{standby.address ?? ''}</td>
               <td>{standby.state ?? ''}</td>
               <td>{standby.sync_state ?? ''}</td>
               <td class="num">{standby.replay_lag_seconds === null ? '' : `${standby.replay_lag_seconds.toFixed(1)} s`}</td>

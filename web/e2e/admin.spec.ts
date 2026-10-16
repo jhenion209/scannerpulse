@@ -135,6 +135,89 @@ test("a signed-in admin's edit on the main page carries the session's token", as
   expect(token).toBe(me.csrf);
 });
 
+// A table's headings and short cells break only between words; only a cell that
+// holds long text (a path, an address, a browser's name, an error) may break anywhere.
+const SERVER_URL = 'http://speech-b.example.invalid:8000/v1/audio/transcriptions'; // 60 characters
+const REFUSED_PATH = 'incoming/20261016/Metro_Police_One/20261016_140500_Metro_Police_One_TO_59_11.mp3'; // 80, no space
+const AGENT_UNBROKEN = 'Mozilla/5.0-X11;Linux-x86_64-AppleWebKit/537.36-KHTML,like-Gecko-Chrome/130.0.0.0-Safari/537.36'.padEnd(200, 'z');
+const AGENT_WORDS = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 '.repeat(2).slice(0, 200);
+const longValues = {
+  status: {
+    maintenance: false,
+    lease: {
+      valid: true,
+      holder: 'scannerpulse-a',
+      expires_in: 12,
+      heartbeats: [
+        { host: 'scannerpulse-a', age: 3, expires_in: 12 },
+        { host: 'scannerpulse-b', age: 5, expires_in: 10 },
+      ],
+    },
+    ingest: {
+      waiting: 0,
+      rejected: 1,
+      recent_rejected: [{ source: 'trial-in', rel_path: REFUSED_PATH, reason: 'the file is not an audio recording that can be read', seen_at: '2026-10-16T14:05:00Z' }],
+    },
+    queue: { queued: 0, due: 0, failed: 1, last_minute: 0 },
+    failed: [{ call_id: 31, started_at: '2026-10-16T14:00:00Z', attempts: 3, last_error: 'the server answered 503 service unavailable twice' }],
+    servers: [{ url: SERVER_URL, cooling_until: '2026-10-16T14:10:00Z', failed_rounds: 2, last_error: 'the connection was refused by the server', updated_at: '2026-10-16T14:00:00Z' }],
+    totals: { calls_about: 35, transcripts_about: 20 },
+    recent_calls: [{ id: 1, started_at: '2026-10-16T14:01:00Z', system: 'Metro', talkgroup: 59, talkgroup_name: 'Metro Police One', transcript_state: 'text' }],
+    database: {
+      primary: true,
+      version: 'PostgreSQL 17.11',
+      address: '192.0.2.53',
+      port: 5432,
+      standbys: [{ name: 'pgautofailover_standby_2', address: '198.51.100.250', state: 'streaming', sync_state: 'quorum', replay_lag_seconds: 0.2 }],
+    },
+    failover: { lease_held: true, jobs_running: 0, jobs_stuck: 0, calls_failed: 1, calls_filed_twice: 0, files_left_in_sources: 0 },
+  },
+  viewers: [
+    { host: 'scannerpulse-a', address: '2001:db8:85a3::8a2e:370:7334', local: false, user_agent: AGENT_UNBROKEN, admin: 'e2e-admin', connected_at: '2026-10-16T13:51:20Z' },
+    { host: 'scannerpulse-b', address: '2001:db8:85a3::8a2e:370:7334', local: false, user_agent: AGENT_WORDS, admin: null, connected_at: '2026-10-16T13:52:30Z' },
+  ],
+};
+
+test("a table's headings and short values break between words, never inside one, at 375 and 1280 px", async ({ page }) => {
+  await page.route('**/api/admin/status', (route) => route.fulfill({ json: longValues.status }));
+  await page.route('**/api/admin/viewers', (route) => route.fulfill({ json: longValues.viewers }));
+  await signIn(page);
+  // Per table: its words that the browser breaks across lines, in a heading or in a cell without the `long` class.
+  // A hyphen is a place to break between words.
+  const broken = () =>
+    page.evaluate(() => {
+      const tables = [...document.querySelectorAll('.area table')];
+      const found: string[] = [];
+      for (const table of tables) {
+        for (const cell of table.querySelectorAll('th, td:not(.long)')) {
+          const texts = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+          for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+            for (const word of (node.nodeValue ?? '').matchAll(/[^\s-]+/g)) {
+              const range = document.createRange();
+              range.setStart(node, word.index!);
+              range.setEnd(node, word.index! + word[0].length);
+              if (range.getClientRects().length > 1) found.push(`${table.querySelector('caption')?.textContent}: ${cell.tagName.toLowerCase()} "${word[0]}"`);
+            }
+          }
+        }
+      }
+      return { tables: tables.length, found };
+    });
+  for (const width of [375, 1280]) {
+    await page.setViewportSize({ width, height: 800 });
+    for (const [area, tables] of [['status', 6], ['viewers', 1]] as const) {
+      await page.evaluate((h) => (location.hash = h), `#${area}`);
+      await expect(page.getByRole('heading', { name: area === 'status' ? 'Newest calls' : 'Viewers' })).toBeVisible();
+      if (area === 'viewers') await expect(page.getByRole('table', { name: 'The open pages' })).toBeVisible();
+      const result = await broken();
+      expect(result.tables, `${area} at ${width} px: the tables shown`).toBe(tables);
+      expect(result.found, `${area} at ${width} px`).toEqual([]);
+      const wide = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+      expect(wide, `${area} at ${width} px scrolls sideways`).toBe(false);
+    }
+  }
+});
+
 for (const [theme, width] of [['light', 1280], ['dark', 360]] as const) {
   test(`no accessibility fault signing in or in any area in the ${theme} theme at ${width} px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
