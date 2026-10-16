@@ -31,13 +31,22 @@ for (const width of [1280, 360]) {
     await page.setViewportSize({ width, height: 800 });
     await page.clock.install();
     let failing = false;
-    await page.route('**/api/status', (route) => (failing ? route.fulfill(down) : route.fallback()));
+    await page.route('**/api/status', async (route) => {
+      if (failing) return route.fulfill(down);
+      // As on a newly seeded database: the newest call is as new as the server's clock.
+      const response = await route.fetch();
+      const body = await response.json();
+      body.newest_call = body.server_time;
+      await route.fulfill({ response, json: body });
+    });
     await page.goto('/');
     await expect(rows(page)).toHaveCount(30);
-    const chips = page.getByRole('list', { name: 'Status' });
-    // The calls chip is hidden on a phone, but it is in the list all the same.
+    // A phone hides the whole list while the status is healthy and the newest call fresh.
+    const chips = page.getByRole('list', { name: 'Status', includeHidden: true });
     await expect(chips).toContainText('35 calls');
     await expect(chips).not.toContainText('Status unavailable');
+    if (width < 760) await expect(chips).toBeHidden();
+    else await expect(chips).toBeVisible();
 
     failing = true;
     await page.clock.fastForward('00:31');
