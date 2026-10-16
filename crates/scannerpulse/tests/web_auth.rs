@@ -310,6 +310,60 @@ async fn a_session_ends_when_idle_too_old_or_disabled(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_polled_read_does_not_keep_the_session_alive(pool: PgPool) {
+    admin(&pool, "ann", PASSWORD).await;
+    let app = app(&pool);
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let set_ago = |hours: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE sessions SET last_seen = now() - make_interval(hours => $1)")
+                .bind(hours)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let ago = |hours: i32| {
+        let pool = pool.clone();
+        async move {
+            // Whether last_seen is still where `set_ago(hours)` put it.
+            sqlx::query_scalar::<_, bool>(
+                "SELECT last_seen < now() - make_interval(hours => $1) + interval '1 minute' \
+                 FROM sessions",
+            )
+            .bind(hours)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let poll = [("cookie", cookie.as_str()), ("x-scannerpulse-poll", "1")];
+    set_ago(11).await;
+    let polled = send(&app, "GET", "/api/admin/jobs", &poll, None).await;
+    assert_eq!(polled.status, 200, "{:?}", polled.body);
+    assert!(ago(11).await, "a polled read leaves last_seen where it was");
+    let plain = send(&app, "GET", "/api/admin/jobs", &[("cookie", &cookie)], None).await;
+    assert_eq!(plain.status, 200);
+    assert!(!ago(1).await, "a plain read moves last_seen to now");
+    // The header is ignored on a change: it always counts as use.
+    set_ago(11).await;
+    let change = [
+        ("cookie", cookie.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-scannerpulse-poll", "1"),
+    ];
+    let body = Some(json!({"login": "bob", "password": PASSWORD}));
+    let added = send(&app, "POST", "/api/admin/accounts", &change, body).await;
+    assert_eq!(added.status, 201, "{:?}", added.body);
+    assert!(!ago(1).await, "a change with the header moves last_seen");
+    // A polled read still checks the idle limit.
+    set_ago(13).await;
+    let ended = send(&app, "GET", "/api/admin/jobs", &poll, None).await;
+    assert_eq!(ended.status, 401, "{:?}", ended.body);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn signing_out_ends_the_session(pool: PgPool) {
     admin(&pool, "ann", PASSWORD).await;
     let app = app(&pool);

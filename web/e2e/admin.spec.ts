@@ -50,21 +50,28 @@ test('single sign-on shows when it is set up, and no way in says how to turn one
 
 test('the status is read again every 15 seconds, and a failed read keeps the last one', async ({ page }) => {
   await page.clock.install();
-  let reads = 0;
+  // What each read of the status said about itself: the timer's reads carry the poll header.
+  const marks: (string | undefined)[] = [];
   let failing = false;
   await page.route('**/api/admin/status', async (route) => {
-    reads += 1;
+    marks.push(route.request().headers()['x-scannerpulse-poll']);
     if (failing) return route.fulfill(refuse(503, 'the database does not answer'));
     return route.continue();
   });
   await signIn(page);
   await expect(page.getByRole('heading', { name: 'Newest calls' })).toBeVisible();
-  const before = reads;
+  const before = marks.length;
+  const readNow = page.getByRole('button', { name: 'Read now' });
   await page.clock.fastForward('00:15');
-  await expect.poll(() => reads).toBe(before + 1);
+  await expect.poll(() => marks.length).toBe(before + 1);
+  expect(marks[before], 'the timer reads as a poll, which the server does not count as use').toBe('1');
   failing = true;
-  await page.getByRole('button', { name: 'Read now' }).click();
-  await expect(page.getByRole('alert')).toHaveText('The status could not be read: the database does not answer');
+  // A click while a read is still under way starts none, so it is made again until one is.
+  await expect(async () => {
+    await readNow.click();
+    await expect(page.getByRole('alert')).toHaveText('The status could not be read: the database does not answer', { timeout: 1000 });
+  }).toPass();
+  expect(marks.at(-1), "the admin's own read is a plain one").toBeUndefined();
   await expect(page.getByRole('heading', { name: 'Newest calls' })).toBeVisible();
 });
 

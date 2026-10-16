@@ -21,9 +21,10 @@
   let viewers = $state<Viewer[] | null>(null);
   let problem = $state<string | null>(null);
 
-  async function read() {
+  /** The timer's reads are polls: they do not count as use of the session. */
+  async function read(poll = false) {
     try {
-      viewers = await admin<Viewer[]>('GET', '/api/admin/viewers');
+      viewers = await admin<Viewer[]>('GET', '/api/admin/viewers', undefined, { poll });
       problem = null;
     } catch (error) {
       problem = why(error);
@@ -32,7 +33,7 @@
 
   onMount(() => {
     void read();
-    const timer = setInterval(read, VIEWERS_EVERY_MS);
+    const timer = setInterval(() => void read(true), VIEWERS_EVERY_MS);
     return () => clearInterval(timer);
   });
 </script>
@@ -41,7 +42,7 @@
   <h1 id="viewers-title">Viewers</h1>
   <div class="row lead">
     <span>Every page open on the calls now, on every host; a page leaves the list when it closes. Read every 30 s.</span>
-    <button type="button" onclick={read}>Read now</button>
+    <button type="button" onclick={() => read()}>Read now</button>
   </div>
   {#if problem}<p class="problem" role="alert">The viewers could not be read: {problem}</p>{/if}
   {#if viewers === null}

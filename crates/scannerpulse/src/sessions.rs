@@ -74,8 +74,22 @@ pub async fn create(
 /// The session of `token`, when it has not ended and its account is
 /// enabled. Counts as a request: the idle limit starts again.
 pub async fn find(db: impl sqlx::PgExecutor<'_>, token: &str) -> sqlx::Result<Option<Session>> {
+    lookup(db, token, true).await
+}
+
+/// `find`, with the choice of whether the lookup counts as use. A lookup
+/// that does not (`touch` false: a read the admin page makes on a timer)
+/// checks the session in every way, the idle limit too, but leaves
+/// `last_seen` where it was, so a page left open cannot keep a session
+/// alive past its idle limit.
+pub async fn lookup(
+    db: impl sqlx::PgExecutor<'_>,
+    token: &str,
+    touch: bool,
+) -> sqlx::Result<Option<Session>> {
     let found: Option<(i64, String, String)> = sqlx::query_as(
-        "UPDATE sessions s SET last_seen = now() FROM admins a \
+        "UPDATE sessions s SET last_seen = CASE WHEN $5 THEN now() ELSE s.last_seen END \
+         FROM admins a \
          WHERE s.token_hash = $1 AND a.id = s.admin_id AND NOT a.disabled \
            AND s.last_seen >= now() - make_interval(hours => $2) \
            AND s.created_at >= now() - make_interval(days => $3) \
@@ -86,6 +100,7 @@ pub async fn find(db: impl sqlx::PgExecutor<'_>, token: &str) -> sqlx::Result<Op
     .bind(IDLE_HOURS)
     .bind(MAX_DAYS)
     .bind(OIDC_HOURS)
+    .bind(touch)
     .fetch_optional(db)
     .await?;
     Ok(found.map(|(admin_id, login, csrf)| Session {

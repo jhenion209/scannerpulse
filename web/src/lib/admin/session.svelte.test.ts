@@ -66,6 +66,16 @@ describe('an admin request', () => {
     expect(sent(1).body).toBe(JSON.stringify({ value: ['B'] }));
   });
 
+  it('marks a timed read, and only a read', async () => {
+    fetched.mockImplementation(async () => answer(200, [1]));
+    await admin('GET', '/api/admin/jobs', undefined, { poll: true });
+    expect(sent(0).headers['x-scannerpulse-poll']).toBe('1');
+    await admin('GET', '/api/admin/jobs');
+    expect(sent(1).headers['x-scannerpulse-poll']).toBeUndefined();
+    await admin('POST', '/api/admin/rescan', undefined, { poll: true });
+    expect(sent(2).headers['x-scannerpulse-poll']).toBeUndefined();
+  });
+
   it("gives a refusal in the server's words", async () => {
     fetched.mockResolvedValueOnce(answer(409, { error: 'conflict', detail: 'the last enabled admin cannot be disabled' }));
     await expect(admin('POST', '/api/admin/accounts/ann/disable')).rejects.toThrow('the last enabled admin cannot be disabled');

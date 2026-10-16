@@ -18,6 +18,9 @@ use crate::sessions::{self, Kind, Session};
 pub const COOKIE: &str = "scannerpulse_session";
 /// The header that carries the session's CSRF token on every change.
 pub const CSRF_HEADER: &str = "x-csrf-token";
+/// The header the admin page puts on a read it makes on a timer: such a
+/// read does not count as use of the session (`1`; ignored on a change).
+pub const POLL_HEADER: &str = "x-scannerpulse-poll";
 
 /// The session's token from the request's cookies.
 fn token(headers: &HeaderMap) -> Option<String> {
@@ -51,6 +54,15 @@ fn reads_only(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD)
 }
 
+/// A read the page made on its own: a change always counts as use.
+fn polled(parts: &Parts) -> bool {
+    reads_only(&parts.method)
+        && parts
+            .headers
+            .get(POLL_HEADER)
+            .is_some_and(|value| value == "1")
+}
+
 /// The session the request's cookie names, if it is open; the CSRF token
 /// is not checked.
 pub async fn session(
@@ -73,7 +85,7 @@ impl FromRequestParts<AppState> for Admin {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Admin, ApiError> {
         let signed_out = || ApiError::Unauthorized("sign in as an admin first".into());
         let token = token(&parts.headers).ok_or_else(signed_out)?;
-        let session = sessions::find(&state.pool, &token)
+        let session = sessions::lookup(&state.pool, &token, !polled(parts))
             .await?
             .ok_or_else(signed_out)?;
         if !reads_only(&parts.method) && !csrf_ok(&parts.headers, &session) {

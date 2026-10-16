@@ -49,14 +49,18 @@ export async function signOut(): Promise<void> {
 }
 
 /** An admin request, JSON both ways; the answer's body, or undefined when it
- * has none. A change carries the CSRF token. Throws the server's refusal. */
+ * has none. A change carries the CSRF token. A read the page makes on its own
+ * (`poll`) says so, and the server does not count it as use of the session, so
+ * a page left open cannot keep the session from ending. Throws the server's refusal. */
 export async function admin<T = undefined>(
   method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
   body?: unknown,
+  options?: { poll?: boolean },
 ): Promise<T> {
   const headers: Record<string, string> = { ...JSON_ONLY };
   if (method !== 'GET') headers['x-csrf-token'] = session.csrf;
+  else if (options?.poll) headers['x-scannerpulse-poll'] = '1';
   if (body !== undefined) headers['content-type'] = 'application/json';
   const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   if (response.status === 401 && session.login !== null) {

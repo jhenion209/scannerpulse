@@ -12,12 +12,13 @@
   let reading = $state(false);
 
   /** Reads the status; a read still under way is not started again. A
-   * failed read keeps the last good one on screen, with the failure above it. */
-  async function read() {
+   * failed read keeps the last good one on screen, with the failure above it.
+   * The timer's reads are polls: they do not count as use of the session. */
+  async function read(poll = false) {
     if (reading) return;
     reading = true;
     try {
-      data = await admin<AdminStatus>('GET', '/api/admin/status');
+      data = await admin<AdminStatus>('GET', '/api/admin/status', undefined, { poll });
       readAt = new Date();
       problem = null;
     } catch (error) {
@@ -29,7 +30,7 @@
 
   onMount(() => {
     void read();
-    const timer = setInterval(read, STATUS_EVERY_MS);
+    const timer = setInterval(() => void read(true), STATUS_EVERY_MS);
     return () => clearInterval(timer);
   });
 
@@ -44,7 +45,7 @@
     <span>
       {#if readAt}Read at {callTime(readAt.toISOString(), new Date(), siteZone())}; read again every 15 s.{:else}Reading…{/if}
     </span>
-    <button type="button" onclick={read} disabled={reading}>Read now</button>
+    <button type="button" onclick={() => read()} disabled={reading}>Read now</button>
   </div>
   {#if problem}<p class="problem" role="alert">The status could not be read: {problem}</p>{/if}
 
