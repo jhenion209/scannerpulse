@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { SvelteSet } from 'svelte/reactivity';
-  import type { Call } from './lib/api';
   import CallList from './lib/CallList.svelte';
   import { goTo, show, view } from './lib/calls.svelte';
   import { choices, startChoices } from './lib/choices.svelte';
   import FilterRail from './lib/FilterRail.svelte';
   import { filtersToSearch, parseFilters, talkgroupsAskedFor } from './lib/filters';
   import Pager from './lib/Pager.svelte';
+  import Player from './lib/Player.svelte';
+  import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
   import { loadPrefs, savePref } from './lib/prefs';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
@@ -31,8 +31,6 @@
     }
   });
 
-  let playingId = $state<number | null>(null);
-  const played = new SvelteSet<number>();
   const ask = () => ({ filters, favorites: choices.favorites, size: prefs.pageSize });
 
   // A new filter or page size reads the first page again. The favorites are
@@ -62,9 +60,14 @@
     else void goTo(ask(), page);
   }
 
-  function play(call: Call) {
-    playingId = call.id;
-    played.add(call.id);
+  function setContinuous(on: boolean) {
+    prefs.continuous = on;
+    savePref('continuous', on);
+  }
+
+  function setAutoplayNew(on: boolean) {
+    prefs.autoplayNew = on;
+    savePref('autoplayNew', on);
   }
 
   function toggleRail() {
@@ -98,9 +101,11 @@
     {#if !view.loading && !view.error && view.calls.length === 0}
       <p class="empty">No calls match these filters{filters.allDates || filters.from || filters.to ? '' : ' in the last 24 hours'}.</p>
     {/if}
-    <CallList calls={view.calls} {playingId} {played} showAll={prefs.showAllRows} onplay={play} />
+    <CallList calls={view.calls} playingId={player.call?.id ?? null} {played} showAll={prefs.showAllRows} onplay={(call) => play(call)} />
   </main>
-  <footer class="player" aria-label="Player"></footer>
+  <footer class="player" aria-label="Player">
+    <Player bind:continuous={() => prefs.continuous, setContinuous} bind:autoplayNew={() => prefs.autoplayNew, setAutoplayNew} />
+  </footer>
 </div>
 
 <style>
