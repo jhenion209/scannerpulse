@@ -59,7 +59,7 @@
           <span class="bar" aria-hidden="true"><i style:width={`${lengthPercent(call.duration_ms)}%`}></i></span>
           <span class="secs">{seconds(call.duration_ms)}</span>
         </td>
-        <td class="text">
+        <td class="text"><div class="line">
           {#if call.transcript}
             <span class="snippet" class:open>{call.transcript}</span>
             {#if !showAll}
@@ -69,7 +69,7 @@
           {:else}
             <span class="none">No text</span>
           {/if}
-        </td>
+        </div></td>
       </tr>
     {/each}
   </tbody>
@@ -84,13 +84,27 @@
   .play { background: none; border: 1px solid var(--line); border-radius: 50%; width: 2rem; height: 2rem; cursor: pointer; color: var(--accent); }
   .time, .len { white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tg { font-weight: 600; }
+  .tg, td.wide { white-space: nowrap; }
   .bar { display: inline-block; width: 3.5rem; height: 0.4rem; border-radius: 3px; background: var(--line); vertical-align: middle; }
   .bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
   .secs { margin-left: 0.35rem; font-size: 0.85rem; color: var(--muted); }
   .text { width: 100%; }
+  .line { display: flex; gap: 0.5rem; align-items: baseline; }
+  .snippet { flex: 1; min-width: 0; }
   .snippet { display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
   .snippet.open { display: block; }
   .more { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; }
   .none { color: var(--muted); font-style: italic; }
-  @media (max-width: 760px) { .wide { display: none; } }
+  /* A phone shows each call on two lines: play, time, talkgroup and length,
+     then the text across the whole width. */
+  @media (max-width: 760px) {
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    tbody, tr, td { display: block; }
+    tr { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; border-bottom: 1px solid var(--line); }
+    td { border: 0; padding: 0.2rem 0.4rem; }
+    .wide { display: none; }
+    .tg { overflow: hidden; text-overflow: ellipsis; }
+    .bar { display: none; }
+    td.text { grid-column: 1 / -1; padding-top: 0; }
+  }
 </style>

@@ -130,10 +130,10 @@
 
 <style>
   .rail { display: flex; flex-direction: column; gap: 0.9rem; padding: 0.9rem; }
-  .field { display: flex; flex-direction: column; gap: 0.3rem; border: 0; margin: 0; padding: 0; }
+  .field { display: flex; flex-direction: column; gap: 0.3rem; border: 0; margin: 0; padding: 0; min-width: 0; }
   .field > span, legend { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; color: var(--muted); padding: 0; }
   select, input[type='search'], input[type='datetime-local'] {
-    background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.3rem 0.4rem; min-height: 2.25rem;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.3rem 0.4rem; min-height: 2.25rem; width: 100%;
   }
   .groups { max-height: 18rem; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
   .system { position: sticky; top: 0; background: var(--surface); font-weight: 600; padding: 0.2rem 0.5rem; }

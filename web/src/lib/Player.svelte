@@ -22,12 +22,14 @@
   });
 
   function ended() {
+    player.busy = false;
     if (id === null) return;
     const next = afterEnd(view.calls, id, continuous);
     if (next) play(next, 'newer');
   }
 
   function failedToPlay() {
+    player.busy = false;
     if (id === null) return;
     failed.add(id);
     const next = afterFailure(view.calls, id, player.direction, failed);
@@ -49,7 +51,8 @@
     <button type="button" onclick={() => stepTo('newer')} disabled={!canNewer} aria-label="Newer call (N)" title="Newer call (N)">▲</button>
     <button type="button" onclick={() => stepTo('older')} disabled={!canOlder} aria-label="Older call (P)" title="Older call (P)">▼</button>
   </div>
-  <audio bind:this={audio} controls preload="none" onended={ended} onerror={failedToPlay}></audio>
+  <audio bind:this={audio} controls preload="none" onended={ended} onerror={failedToPlay}
+    onplaying={() => (player.busy = true)} onpause={() => (player.busy = false)}></audio>
   <p class="now" aria-live="polite">
     {#if player.call}
       <b>{player.call.talkgroup_name ?? player.call.talkgroup}</b>

@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import CallList from './lib/CallList.svelte';
   import { goTo, show, view } from './lib/calls.svelte';
   import { choices, startChoices } from './lib/choices.svelte';
+  import { follow } from './lib/feed';
   import FilterRail from './lib/FilterRail.svelte';
+  import { addCall, liveApplies, liveUrl, newestId, setTranscript, wanted, type LiveEvent } from './lib/live';
   import { filtersToSearch, parseFilters, talkgroupsAskedFor } from './lib/filters';
   import Pager from './lib/Pager.svelte';
   import Player from './lib/Player.svelte';
@@ -39,10 +41,71 @@
   const listKey = $derived(
     `${filtersToSearch(filters)}|${talkgroupsAskedFor(filters, choices.favorites)}|${prefs.pageSize}`,
   );
+  let listEl: HTMLElement;
+  let lastId: number | null = null;
+  let stopFeed: (() => void) | null = null;
+  const asked = () => talkgroupsAskedFor(filters, choices.favorites);
+  const systemName = () => choices.filters.systems.find((s) => s.id === filters.system)?.name ?? null;
+
+  // The feed opens after the first page is read, saying the newest call on
+  // it, so no call falls between the read and the feed.
+  async function readFirstPage() {
+    await show(ask(), FIRST_PAGE);
+    lastId = newestId(view.calls, null);
+    stopFeed?.();
+    stopFeed = follow(() => liveUrl(location, asked(), lastId), onLive);
+  }
+
   $effect(() => {
     void listKey;
-    untrack(() => show(ask(), FIRST_PAGE));
+    untrack(readFirstPage);
   });
+  onMount(() => () => stopFeed?.());
+
+  // Leaving "Pause updates" reads the first page again.
+  let wasPaused = false;
+  $effect(() => {
+    const now = paused || filters.allDates;
+    if (wasPaused && !now && view.paging.index === 0) untrack(() => show(ask(), view.paging));
+    wasPaused = now;
+  });
+
+  /** Changes the rows, keeping the rows the listener is reading where they are. */
+  async function keepScroll(change: () => void) {
+    const before = listEl.scrollHeight;
+    change();
+    await tick();
+    if (listEl.scrollTop > 0) listEl.scrollTop += listEl.scrollHeight - before;
+  }
+
+  // SmartSort orders a page on the server: a new call reads the page again,
+  // at most once a second.
+  let reread: ReturnType<typeof setTimeout> | undefined;
+  const readAgain = () => {
+    clearTimeout(reread);
+    reread = setTimeout(() => void show(ask(), view.paging), 1000);
+  };
+
+  function onLive(event: LiveEvent) {
+    if (event.type === 'resync') return void show(ask(), view.paging);
+    if (event.type === 'transcript') {
+      // Text arrives even while paused: it changes a row, not the list.
+      const rows = setTranscript(view.calls, event);
+      if (rows) view.calls = rows;
+      return;
+    }
+    lastId = newestId([event.call], lastId);
+    if (!liveApplies(filters, view.paging.index, paused, new Date())) return;
+    if (!wanted(event.call, asked(), systemName())) return;
+    if (filters.smart) return readAgain();
+    const rows = addCall(view.calls, event.call, prefs.pageSize);
+    if (!rows) return;
+    // The page grows until it is twice its size, then is read again.
+    if (rows.length >= 2 * prefs.pageSize) return void show(ask(), FIRST_PAGE);
+    void keepScroll(() => (view.calls = rows));
+    if (view.total !== null && !view.capped) view.total += 1;
+    if (prefs.autoplayNew && !player.busy) play(event.call);
+  }
 
   function setSize(size: number) {
     prefs.pageSize = size;
@@ -93,7 +156,7 @@
     {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
     <FilterRail bind:filters bind:paused choices={choices.filters} favorites={choices.favorites} />
   </aside>
-  <main class="list" aria-label="Calls" aria-busy={view.loading}>
+  <main class="list" aria-label="Calls" aria-busy={view.loading} bind:this={listEl}>
     <Pager index={view.paging.index} hasNext={view.paging.cursors.length > view.paging.index + 1}
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} ongo={go} />
@@ -110,7 +173,7 @@
 
 <style>
   .shell {
-    display: grid; min-height: 100vh;
+    display: grid; height: 100vh; height: 100dvh;
     grid-template: 'bar bar' auto 'rail list' 1fr 'player player' auto / 16rem 1fr;
   }
   .shell.rail-closed { grid-template-columns: 0 1fr; }
