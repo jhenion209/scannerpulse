@@ -19,7 +19,7 @@
 <div class="confirm">
   <label for={id}>Type <strong>{name}</strong> to confirm</label>
   <div class="row">
-    <input {id} type="text" autocomplete="off" spellcheck="false" bind:value={typed} />
+    <input {id} type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" bind:value={typed} />
     <button type="button" class="primary" disabled={typed !== name || busy} onclick={go}>{action}</button>
   </div>
 </div>
