@@ -9,6 +9,7 @@ mod calls;
 pub mod client;
 mod data;
 mod edit;
+mod embedded;
 mod error;
 mod info;
 mod jobs;
@@ -256,13 +257,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/{*rest}", axum::routing::any(no_route))
         .with_state(state);
     // Every other path is the frontend's: a file it built, or its page,
-    // which reads the path itself.
+    // which reads the path itself; from the folder when one is named,
+    // otherwise from the files embedded at build time.
     let routes = match files {
         Some(dir) => routes.fallback_service(
             tower_http::services::ServeDir::new(&dir)
                 .fallback(tower_http::services::ServeFile::new(dir.join("index.html"))),
         ),
-        None => routes,
+        None => routes.fallback(embedded::serve),
     };
     // Last, so that it also sees the answers no handler wrote: a refused
     // parameter, a wrong method, an unknown path, a range past the end.

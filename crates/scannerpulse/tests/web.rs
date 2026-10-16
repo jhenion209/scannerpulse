@@ -52,9 +52,11 @@ async fn healthz_fails_when_the_database_cannot_be_reached(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn an_unknown_path_is_not_found(pool: PgPool) {
+async fn an_unknown_file_is_not_found(pool: PgPool) {
     let options = (*pool.connect_options()).clone();
-    let (status, body) = get(app(&pool, options), "/nonexistent").await;
+    // A path without an extension is the frontend's page; a file it does not
+    // have is not found.
+    let (status, body) = get(app(&pool, options), "/nonexistent.txt").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, r#"{"detail":"","error":"not found"}"#);
 }
@@ -108,4 +110,49 @@ async fn the_frontends_files_are_served_and_its_page_answers_its_own_paths(pool:
     // A path that climbs out of the folder never reads outside it.
     let (_, body) = get(app, "/../../../../etc/passwd").await;
     assert!(!body.contains("root:"), "{body}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_embedded_page_is_served_when_no_folder_is_named(pool: PgPool) {
+    let app = web::router(AppState::new(
+        pool.clone(),
+        (*pool.connect_options()).clone(),
+    ));
+    let page = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, headers, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    // Built or not, the main page is HTML that names the product, and is
+    // asked for again on every load.
+    let (status, headers, body) = page("/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    assert_eq!(headers["cache-control"], "no-cache");
+    assert!(body.contains("ScannerPulse"), "{body}");
+    // A path without an extension is a page; the main one when it has no
+    // page of its own.
+    let (status, headers, _) = page("/calls/123").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    let (status, headers, _) = page("/admin").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    // A missing file is not the page.
+    let (status, _, _) = page("/assets/missing-0000.js").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, body) = page("/../../../../etc/passwd").await;
+    assert!(!body.contains("root:"), "{body}");
+    // The API keeps its own answers.
+    let (status, _, body) = page("/api/nonexistent").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.contains("\"error\":\"not found\""), "{body}");
 }

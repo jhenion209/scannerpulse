@@ -62,7 +62,9 @@ listen.
     in a row.
 - `web` serves the web interface and its API. It reads `DATABASE_URL`,
   `SCANNERPULSE_WEB_LISTEN` (default `127.0.0.1:8080`),
-  `SCANNERPULSE_WEB_STATIC` (the frontend's built files) and
+  `SCANNERPULSE_WEB_STATIC` (a folder of the frontend's built files, served
+  in place of the copy built into the binary; the binary carries the page
+  that `web/` builds, or one saying it was not built) and
   `SCANNERPULSE_HOST` (its name in the list of open pages; default: the
   host's name) and `SCANNERPULSE_OIDC_CLIENT_SECRET`. It never writes to
   the archive and needs no lease, so several hosts can serve the same site
