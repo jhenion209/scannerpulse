@@ -974,3 +974,34 @@ async fn a_purge_refuses_an_unreadable_file_and_ends(pool: PgPool) {
     assert_eq!(rows(bad_call).await, 1, "the refused call stays");
     assert!(root.join(bad).exists(), "and so does its file");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_purge_refuses_a_call_whose_folder_is_not_there(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let holding = dir.path().join("holding");
+    std::fs::create_dir_all(&holding).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    set_holding(&pool, &holding).await;
+    let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();
+    // The day folder does not exist, as when a share is not mounted.
+    let rel = "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3";
+    let (call, talkgroup) = filed(&pool, places, &root, rel, None, at).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+    assert!(ended.message.contains("1 refused"), "{}", ended.message);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM calls WHERE id = $1")
+        .bind(call)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 1, "the row stays");
+}

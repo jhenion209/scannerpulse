@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -196,6 +197,9 @@ async fn remove_gone(
     gone: &[Gone],
 ) -> sqlx::Result<()> {
     for file in gone {
+        // Per file, so that the filer's write of the same name cannot slip
+        // between the check and the removal.
+        let _writing = archive::WRITES.lock().await;
         let named: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM calls WHERE location_id = $1 AND rel_path = $2)",
         )
@@ -263,6 +267,16 @@ async fn free_rel(
     }
 }
 
+/// A file that is not there is missing only when its folder is: an unmounted
+/// share would otherwise look like a share of missing files.
+fn missing_or_refused(old: &Path, rel_path: &str) -> Handled {
+    if old.parent().is_some_and(|dir| dir.is_dir()) {
+        Handled::Missing
+    } else {
+        Handled::Refused(format!("{rel_path}: its folder is not there"))
+    }
+}
+
 /// What correcting one call's file did.
 enum Handled {
     /// The row names the new file; the old one goes in the next step.
@@ -290,7 +304,9 @@ async fn correct_one(
     let old = root.join(&call.rel_path);
     let data = match std::fs::read(&old) {
         Ok(data) => data,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Handled::Missing),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(missing_or_refused(&old, &call.rel_path));
+        }
         Err(error) => {
             return Ok(Handled::Refused(format!("{}: {error}", call.rel_path)));
         }
@@ -776,6 +792,9 @@ struct Purge {
     talkgroup_id: i32,
     /// The holding folder as it was when the job started.
     holding: String,
+    /// The holding folder's device, so that an unmounted share is noticed.
+    #[serde(default)]
+    holding_dev: u64,
 }
 
 /// Adds a job that purges the talkgroup, once its name is typed exactly.
@@ -817,9 +836,25 @@ pub async fn start_purge(
         }
     }
     confirmed(&preview.talkgroup, confirm)?;
+    let filling: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM jobs WHERE kind = 'merge' AND state IN ('queued', 'running') \
+           AND (params->>'into')::int = $1 LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if filling.is_some() {
+        return Err(JobError::Refused(
+            "a merge into this talkgroup is waiting or running; purge after it".into(),
+        ));
+    }
+    let holding_dev = std::fs::metadata(&kept)
+        .map_err(|error| JobError::Refused(format!("cannot read the holding folder: {error}")))?
+        .dev();
     let params = serde_json::to_value(Purge {
         talkgroup_id: id,
-        holding,
+        holding: kept.to_string_lossy().into_owned(),
+        holding_dev,
     })
     .expect("plain data");
     let job = jobs::create(
@@ -870,7 +905,16 @@ async fn purge_one(
             Ok(()) => true,
             Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
         },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Handled::Refused(why) = missing_or_refused(&old, &call.rel_path) {
+                return Ok(Handled::Refused(why));
+            }
+            crate::log::warn(format!(
+                "purge: call {} had no file at {}; its row is deleted",
+                call.id, call.rel_path
+            ));
+            false
+        }
         Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
     };
     sqlx::query("DELETE FROM calls WHERE id = $1 AND started_at = $2")
@@ -906,6 +950,14 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
             params.holding
         ))));
     }
+    if params.holding_dev != 0
+        && std::fs::metadata(&holding).map_err(io_error)?.dev() != params.holding_dev
+    {
+        return Err(io_error(io::Error::other(format!(
+            "the holding folder {} is not the one the purge started with (unmounted?)",
+            params.holding
+        ))));
+    }
     let (after_at, after_id) = work.after.unzip();
     let batch: Vec<CallFile> = sqlx::query_as(
         "SELECT c.id, c.started_at, c.location_id, c.rel_path \
@@ -935,6 +987,15 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         }
         if let Some(why) = &work.last_refusal {
             message.push_str(&format!("; the last refusal: {why}"));
+        }
+        let remain: i64 = sqlx::query_scalar("SELECT count(*) FROM calls WHERE talkgroup_id = $1")
+            .bind(params.talkgroup_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if remain > 0 {
+            message.push_str(&format!(
+                "; {remain} remain (refused, in read-only locations, or filed during the purge)"
+            ));
         }
         return Ok(Outcome::Done(job.done, message));
     }

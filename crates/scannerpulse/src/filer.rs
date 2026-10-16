@@ -227,11 +227,11 @@ impl Filer {
                 rel
             }
         };
-        drop(writing);
         let id = match self.record(row, &call, &rel).await? {
             Ok(id) => id,
             Err(outcome) => return Ok(outcome),
         };
+        drop(writing);
         if self.fence.held() {
             self.delete_source(&path, &data, &call);
         }
