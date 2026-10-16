@@ -1,11 +1,11 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { fetchExcel, type Call, type FilterChoices } from './api';
   import CallList from './CallList.svelte';
-  import { createList } from './calls.svelte';
+  import { queryOf, type Ask, type List } from './calls.svelte';
   import type { ColumnId } from './columns';
   import { exportQuery, saveFile } from './exporting';
-  import { listQuery } from './filters';
   import { callTime } from './format';
   import { FIRST_PAGE, pageCount } from './paging';
   import { player } from './playing.svelte';
@@ -15,6 +15,7 @@
   let {
     open = $bindable(),
     text = $bindable(),
+    results,
     choices,
     onedit,
     ondownload,
@@ -24,6 +25,8 @@
     open: boolean;
     /** The words searched for; a link may bring them. */
     text: string;
+    /** The panel's list; the page keeps a text saved or heard live in it. */
+    results: List;
     choices: FilterChoices;
     onedit: (call: Call) => void;
     ondownload: (call: Call) => void;
@@ -31,14 +34,14 @@
     tell: (text: string) => void;
   } = $props();
 
-  // The panel's own list: its own fields, results, pages and player. It never
-  // reads or changes the live list's filters.
-  const results = createList();
+  // The panel's own fields, pages and player, over its own list (`results`). It
+  // never reads or changes the live list's filters.
   const fields = $state<SearchFields>({ text: '', talkgroup: null, system: null, from: '', to: '', size: 25 });
   const COLUMNS: ColumnId[] = ['time', 'talkgroup', 'length', 'text'];
   const played = new SvelteSet<number>();
   let playing = $state<Call | null>(null);
-  let searched = $state(false);
+  /** What the results on screen were asked with: pages and the Excel file follow it, not fields edited since. */
+  let searched = $state.raw<Ask | null>(null);
   let exporting = $state(false);
 
   let dialog: HTMLDialogElement;
@@ -47,20 +50,21 @@
   let opener: Element | null = null;
 
   const ask = () => searchAsk(fields);
-  const count = $derived(results.view.total === null ? null : pageCount(results.view.total, results.view.capped, fields.size));
+  const count = $derived(results.view.total === null || !searched ? null : pageCount(results.view.total, results.view.capped, searched.size));
   const hasNext = $derived(results.view.paging.cursors.length > results.view.paging.index + 1);
 
   /** A new search is a new list: the first page, counted exactly. */
   function run(event?: SubmitEvent) {
     event?.preventDefault();
     text = fields.text;
-    searched = true;
-    void results.show(ask(), FIRST_PAGE);
+    searched = ask();
+    void results.show(searched, FIRST_PAGE);
   }
 
   function turn(index: number) {
-    if (index < results.view.paging.cursors.length) void results.show(ask(), { ...results.view.paging, index }, false);
-    else void results.goTo(ask(), index);
+    if (!searched) return;
+    if (index < results.view.paging.cursors.length) void results.show(searched, { ...results.view.paging, index }, false);
+    else void results.goTo(searched, index);
   }
 
   // Opening shows the panel (not modal: the live page stays usable) and puts
@@ -76,11 +80,16 @@
   });
   // Words given from outside (the bar's search box, or a link) are searched
   // at once, whether the panel was open already or not.
+  // Only `open` and `text` are followed: the panel's own typing changes
+  // `fields.text`, which must not start a search or put the old words back.
   $effect(() => {
-    if (open && text && text !== fields.text) {
-      fields.text = text;
+    const words = open ? text : '';
+    if (!words) return;
+    untrack(() => {
+      if (words === fields.text) return;
+      fields.text = words;
       run();
-    }
+    });
   });
 
   function close() {
@@ -126,12 +135,11 @@
   });
 
   async function excel() {
+    if (!searched) return;
     exporting = true;
     tell('Making the Excel file of every match…');
     try {
-      const query = listQuery(ask().filters, [], { size: fields.size }, new Date());
-      if (fields.text.trim()) query.set('q', fields.text.trim());
-      const file = await fetchExcel(exportQuery(query));
+      const file = await fetchExcel(exportQuery(queryOf(searched, null, false)));
       saveFile(file.blob, file.name);
       tell(file.note ?? `Saved ${file.name}.`);
     } catch (error) {

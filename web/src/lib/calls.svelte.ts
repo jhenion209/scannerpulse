@@ -25,7 +25,7 @@ export type View = {
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** The request for one page of `ask`. */
-function queryOf(ask: Ask, after: string | null, count: boolean): URLSearchParams {
+export function queryOf(ask: Ask, after: string | null, count: boolean): URLSearchParams {
   const query = listQuery(ask.filters, ask.favorites, { size: ask.size, after, count }, new Date());
   if (ask.text?.trim()) query.set('q', ask.text.trim());
   if (ask.exact && count) query.set('exact', 'true');
@@ -108,6 +108,8 @@ export function createList() {
 
   return { view, show, goTo };
 }
+
+export type List = ReturnType<typeof createList>;
 
 /** The main page's list, shared by the list, the player and the live feed. */
 const main = createList();

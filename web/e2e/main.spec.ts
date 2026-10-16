@@ -665,3 +665,115 @@ for (const width of [1280, 360]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   });
 }
+
+test('the panel\'s words can be changed after a search, and typing alone searches nothing', async ({ page }) => {
+  const expected = await exactCount(page, 'responding');
+  await page.goto('/?search=station');
+  const words = panel(page).getByLabel('Words');
+  await expect(panelRows(page).first()).toBeVisible();
+  const asked: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/api/calls' && url.searchParams.has('q')) asked.push(url.searchParams.get('q') ?? '');
+  });
+  await words.fill('');
+  await words.pressSequentially('responding');
+  await expect(words).toHaveValue('responding');
+  expect(asked).toEqual([]);
+  await panel(page).getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(panel(page)).toContainText(`${expected} matches`);
+  await expect(words).toHaveValue('responding');
+  await expect(page).toHaveURL(/search=responding/);
+  expect(asked).toEqual(['responding']);
+});
+
+test('a page turn and the Excel file use the search on screen, not fields edited since', async ({ page }) => {
+  await page.goto('/?search=responding');
+  await expect(panelRows(page).first()).toBeVisible();
+  await panel(page).getByLabel('Rows').selectOption('10');
+  await expect(panelRows(page)).toHaveCount(10);
+  // Fields changed without pressing Search.
+  await panel(page).getByLabel('Talkgroup').selectOption({ index: 1 });
+  await panel(page).getByLabel('From', { exact: true }).fill('2031-07-01T08:00');
+  const turn = page.waitForRequest((request) => request.url().includes('/api/calls?') && request.url().includes('after='));
+  await panel(page).getByRole('button', { name: 'Next' }).click();
+  const page2 = new URL((await turn).url()).searchParams;
+  expect(page2.get('q')).toBe('responding');
+  expect(page2.get('talkgroups')).toBeNull();
+  expect(page2.get('from')).toBeNull();
+  const sheet = page.waitForRequest((request) => request.url().includes('/api/export/xlsx'));
+  await panel(page).getByRole('button', { name: 'Excel — every match' }).click();
+  const file = new URL((await sheet).url()).searchParams;
+  expect(file.get('q')).toBe('responding');
+  expect(file.get('talkgroups')).toBeNull();
+  expect(file.get('from')).toBeNull();
+});
+
+test('a text saved from a panel row changes that row', async ({ page }) => {
+  await page.goto('/?search=responding');
+  const tr = panelRows(page).first();
+  await expect(tr).toBeVisible();
+  await tr.locator('details.row-actions summary').click();
+  await tr.getByRole('button', { name: 'Edit text' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit the text' });
+  const text = `responding, corrected by a test ${Date.now()}`;
+  await dialog.getByLabel('Text').fill(text);
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(tr.locator('td.c-text')).toContainText(text);
+});
+
+/** A message is on screen, above whatever is under it (the panel too), clear of the player. */
+const seen = async (page: Page, words: string) => {
+  const notice = page.getByRole('status');
+  await expect(notice).toContainText(words);
+  const box = (await notice.boundingBox())!;
+  const view = page.viewportSize()!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(view.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(view.height);
+  expect(box.y + box.height).toBeLessThanOrEqual((await page.locator('footer.player').boundingBox())!.y);
+  // The message lets clicks through; for this check it takes them, so the
+  // element drawn on top at three of its points can be asked.
+  await page.addStyleTag({ content: '.notice { pointer-events: auto !important; }' });
+  const onTop = await notice.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return [r.left + 4, r.left + r.width / 2, r.right - 4].map((x) => {
+      const hit = document.elementFromPoint(x, r.top + r.height / 2);
+      return hit === el || el.contains(hit);
+    });
+  });
+  expect(onTop).toEqual([true, true, true]);
+};
+
+for (const width of [1280, 360]) {
+  test(`a message is seen while the list is scrolled, and does not move its rows, at ${width} px`, async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width, height: 740 });
+    await page.goto('/');
+    await expect(rows(page)).toHaveCount(30);
+    const tr = rows(page).nth(12);
+    await tr.evaluate((row) => {
+      const list = row.closest('main')!;
+      list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - 150;
+    });
+    expect(await page.locator('main.list').evaluate((list) => list.scrollTop)).toBeGreaterThan(0);
+    const before = (await tr.boundingBox())!.y;
+    // The menu is not opened: on a phone a row's menu opens out of sight once the list is scrolled.
+    await tr.locator('button', { hasText: 'Share link' }).evaluate((item: HTMLButtonElement) => item.click());
+    await seen(page, 'Link copied');
+    expect((await tr.boundingBox())!.y).toBeCloseTo(before, 0);
+  });
+
+  test(`a message is seen above the search panel at ${width} px`, async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width, height: 740 });
+    await page.goto('/?search=responding');
+    const tr = panelRows(page).first();
+    await expect(tr).toBeVisible();
+    await tr.locator('details.row-actions summary').click();
+    await tr.getByRole('button', { name: 'Share link' }).click();
+    await seen(page, 'Link copied');
+  });
+}

@@ -7,7 +7,7 @@
   import { sharedCallId, shareUrl } from './lib/actions';
   import CallList from './lib/CallList.svelte';
   import { defaultColumns, type ColumnId } from './lib/columns';
-  import { goTo, show, view } from './lib/calls.svelte';
+  import { createList, goTo, show, view } from './lib/calls.svelte';
   import { choices, startChoices } from './lib/choices.svelte';
   import { follow } from './lib/feed';
   import FilterRail from './lib/FilterRail.svelte';
@@ -55,6 +55,8 @@
   let searchText = $state(linkWords);
   let searchOpen = $state(linkWords !== '');
   let barText = $state(linkWords);
+  // The panel's list lives here, so a text saved or heard live reaches its rows too.
+  const found = createList();
   function openSearch(event: SubmitEvent) {
     event.preventDefault();
     if (barText.trim()) searchText = barText.trim();
@@ -164,9 +166,7 @@
     if (event.type === 'resync') return void show(ask(), view.paging);
     if (event.type === 'transcript') {
       // Text arrives even while paused: it changes a row, not the list.
-      const rows = setTranscript(view.calls, event);
-      if (rows) view.calls = rows;
-      return;
+      return setText(event);
     }
     lastId = newestId([event.call], lastId);
     noteCall(event.call.started_at);
@@ -184,6 +184,14 @@
     void keepScroll(() => (view.calls = rows));
     if (view.total !== null && !view.capped) view.total += 1;
     playNew(event.call);
+  }
+
+  /** A call's text changed: its row follows in the list and in the search panel's results. */
+  function setText(event: Extract<LiveEvent, { type: 'transcript' }>) {
+    for (const list of [view, found.view]) {
+      const rows = setTranscript(list.calls, event);
+      if (rows) list.calls = rows;
+    }
   }
 
   function setSize(size: number) {
@@ -329,8 +337,7 @@
   }
 
   function saved(id: number, transcript: string, origin: string) {
-    const rows = setTranscript(view.calls, { type: 'transcript', id, talkgroup_id: null, transcript, origin });
-    if (rows) view.calls = rows;
+    setText({ type: 'transcript', id, talkgroup_id: null, transcript, origin });
     if (shared.call?.id === id) shared.call = { ...shared.call, transcript, origin };
     tell('The text is saved.');
   }
@@ -408,6 +415,8 @@
     <ThemeSwitch bind:theme={prefs.theme} />
     <a class="admin" href="/admin">Admin</a>
   </header>
+  <!-- Outside the scrolling list, over the search panel: seen wherever the list is. -->
+  <p class="notice" role="status">{notice ?? ''}</p>
   <aside class="rail" id="filters" aria-label="Filters">
     <FilterRail bind:filters bind:paused choices={choices.filters} favorites={choices.favorites} />
   </aside>
@@ -425,7 +434,6 @@
     {#if shared.open}
       <SharedCall call={shared.call} error={shared.error} onplay={(call) => play(call)} onclose={closeShared} />
     {/if}
-    <p class="notice" role="status">{notice ?? ''}</p>
     {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
     {#if view.error}<p class="error" role="alert">{view.error}</p>{/if}
     {#if !view.loading && !view.error && view.calls.length === 0}
@@ -442,7 +450,7 @@
 </div>
 <EditDialog call={editing} onclose={() => (editing = null)} onsaved={saved} />
 <ShareDialog url={sharing} onclose={() => (sharing = null)} />
-<SearchPanel bind:open={searchOpen} bind:text={searchText} choices={choices.filters}
+<SearchPanel bind:open={searchOpen} bind:text={searchText} results={found} choices={choices.filters}
   onedit={(call) => (editing = call)} ondownload={download} onshare={share} {tell} />
 
 <style>
@@ -477,8 +485,16 @@
   .error { margin: 0.9rem 0.9rem 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
   .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; }
   .empty { margin: 1rem; color: var(--muted); }
-  .notice { margin: 0; padding: 0 0.9rem; }
-  .notice:not(:empty) { margin: 0.6rem 0.9rem 0; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--surface); border: 1px solid var(--field-border); }
+  /* A line over the top of the list's cell, in front of the search panel. It
+     takes no room, so no row moves when it shows, and lets clicks through. */
+  .notice {
+    grid-area: list; align-self: start; justify-self: center; z-index: 30; margin: 0; padding: 0;
+    max-width: calc(100% - 1.8rem); overflow-wrap: anywhere; pointer-events: none;
+  }
+  .notice:not(:empty) {
+    margin-top: 0.6rem; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--surface);
+    border: 1px solid var(--field-border); box-shadow: 0 4px 14px rgb(0 0 0 / 0.25);
+  }
   .player { grid-area: player; background: var(--bar); color: var(--bar-text); }
   /* Printing (and a PDF saved from the print dialog) keeps the calls only:
      every row's whole text, without the controls. */
