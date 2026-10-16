@@ -2,6 +2,7 @@
   import { onMount, type Component } from 'svelte';
   import { AREAS, areaOf, type AreaId } from './lib/admin/areas';
   import { checkSession, session, signOut, why } from './lib/admin/session.svelte';
+  import MaintenanceArea from './lib/admin/MaintenanceArea.svelte';
   import SignIn from './lib/admin/SignIn.svelte';
   import StatusArea from './lib/admin/StatusArea.svelte';
   import { notice, tell } from './lib/notice.svelte';
@@ -10,7 +11,7 @@
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea };
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea };
 
   const prefs = $state(loadPrefs());
   let area = $state<AreaId>(areaOf(location.hash));

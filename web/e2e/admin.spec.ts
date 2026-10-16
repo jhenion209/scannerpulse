@@ -125,18 +125,24 @@ test("a signed-in admin's edit on the main page carries the session's token", as
 });
 
 for (const [theme, width] of [['light', 1280], ['dark', 360]] as const) {
-  test(`no accessibility fault signing in or on the status in the ${theme} theme at ${width} px`, async ({ page }) => {
+  test(`no accessibility fault signing in or in any area in the ${theme} theme at ${width} px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
     await page.addInitScript((t) => localStorage.setItem('scannerpulse.theme', t), theme);
-    const axe = async () => {
+    const axe = async (where: string) => {
       const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
-      expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
+      expect(result.violations.map((v) => `${where} ${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
     };
     await page.goto('/admin');
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
-    await axe();
+    await axe('sign-in');
     await signIn(page);
-    await expect(page.getByRole('heading', { name: 'Newest calls' })).toBeVisible();
-    await axe();
+    const links = page.getByRole('navigation', { name: 'Admin areas', includeHidden: true }).getByRole('link', { includeHidden: true });
+    for (const href of await links.evaluateAll((as) => as.map((a) => a.getAttribute('href')!))) {
+      await page.evaluate((h) => (location.hash = h), href);
+      await expect(page.locator('h1')).toBeVisible();
+      // Each area reads what it shows: wait until it has.
+      await expect(page.getByText('Reading…')).toHaveCount(0);
+      await axe(href);
+    }
   });
 }
