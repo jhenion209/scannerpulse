@@ -16,6 +16,7 @@
   import { notice, tell } from './lib/notice.svelte';
   import { loadPrefs } from './lib/prefs';
   import { startStatus } from './lib/status.svelte';
+  import Logo from './lib/Logo.svelte';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
   import TranscriptionArea from './lib/admin/TranscriptionArea.svelte';
   import ViewersArea from './lib/admin/ViewersArea.svelte';
@@ -83,7 +84,7 @@
       <button type="button" class="menu" onclick={() => (menuOpen = !menuOpen)} aria-controls="areas" aria-expanded={menuOpen}>
         Menu
       </button>
-      <span class="name">ScannerPulse · Admin</span>
+      <span class="name"><Logo />ScannerPulse · Admin</span>
       <span class="spacer"></span>
       <span class="who">{session.login}</span>
       <button type="button" class="out" onclick={leave}>Sign out</button>
@@ -109,7 +110,7 @@
 
 <style>
   .signin { max-width: 24rem; margin: 3rem auto; padding: 0 1rem; }
-  .signin h1 { font-size: 1.35rem; }
+  .signin h1 { font-size: 1.35rem; display: flex; align-items: center; gap: 0.4rem; }
   .shell {
     display: grid; min-height: 100vh; min-height: 100dvh;
     grid-template: 'bar bar' auto 'side main' 1fr / 13rem 1fr;
@@ -123,7 +124,7 @@
     padding: 0.25rem 0.6rem; min-height: 2.25rem; cursor: pointer;
   }
   .menu { display: none; }
-  .name { font-weight: 700; color: var(--accent-strong); }
+  .name { font-weight: 700; color: var(--accent-strong); display: inline-flex; align-items: center; gap: 0.35rem; }
   .spacer { flex: 1; }
   .who { overflow-wrap: anywhere; }
   .calls { color: var(--bar-text); }

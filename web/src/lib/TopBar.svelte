@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Logo from './Logo.svelte';
   import type { Theme } from './prefs';
   import StatusChips from './StatusChips.svelte';
   import ThemeSwitch from './ThemeSwitch.svelte';
@@ -40,7 +41,7 @@
   <button type="button" class="menu" onclick={ontoggle} aria-controls="filters" aria-expanded={railOpen}>
     Filters
   </button>
-  <span class="name">ScannerPulse</span>
+  <span class="name"><Logo />ScannerPulse</span>
   <form class="find" role="search" aria-label="Search calls" onsubmit={submit}>
     <input type="search" aria-label="Words to search for" placeholder="Search calls" bind:value={text} />
     <button type="submit">Search</button>
@@ -60,7 +61,7 @@
     background: none; color: var(--bar-text); border: 1px solid currentColor; border-radius: 4px;
     padding: 0.25rem 0.6rem; min-height: 2.25rem; cursor: pointer;
   }
-  .name { font-weight: 700; color: var(--accent-strong); }
+  .name { font-weight: 700; color: var(--accent-strong); display: inline-flex; align-items: center; gap: 0.35rem; }
   .find { display: flex; gap: 0.3rem; }
   .find input {
     min-height: 2.25rem; width: 14rem; padding: 0.2rem 0.5rem; border-radius: 4px;

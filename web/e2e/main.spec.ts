@@ -975,3 +975,13 @@ test('the skip link still lands inside the calls when the list is empty', async 
   });
   expect(inside).toBe(true);
 });
+
+test('the top bar shows the mark beside the name, and the page has its icon', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('header .name svg.logo')).toBeVisible();
+  const href = await page.locator('link[rel="icon"]').getAttribute('href');
+  expect(href).toBe('/favicon.svg');
+  const icon = await page.request.get(href!);
+  expect(icon.status()).toBe(200);
+  expect(icon.headers()['content-type']).toContain('image/svg+xml');
+});

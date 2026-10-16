@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { apiError } from '../api';
+  import Logo from '../Logo.svelte';
   import { session, signIn, why } from './session.svelte';
 
   let methods = $state<{ password: boolean; oidc: boolean } | null>(null);
@@ -38,7 +39,7 @@
 </script>
 
 <main class="signin">
-  <h1>ScannerPulse · Admin</h1>
+  <h1 class="brand"><Logo />ScannerPulse · Admin</h1>
   {#if session.ended}<p class="note" role="alert">The session has ended. Sign in again.</p>{/if}
   {#if methods?.password}
     <form onsubmit={submit} aria-label="Sign in">
