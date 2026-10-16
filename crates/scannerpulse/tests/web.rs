@@ -156,3 +156,20 @@ async fn the_embedded_page_is_served_when_no_folder_is_named(pool: PgPool) {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("\"error\":\"not found\""), "{body}");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_embedded_page_answers_only_get_and_head(pool: PgPool) {
+    let app = web::router(AppState::new(
+        pool.clone(),
+        (*pool.connect_options()).clone(),
+    ));
+    let response = app
+        .oneshot(Request::post("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.headers()["allow"], "GET, HEAD");
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], br#"{"detail":"","error":"method not allowed"}"#);
+}
