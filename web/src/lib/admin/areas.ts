@@ -6,6 +6,8 @@ export const AREAS = [
   { id: 'maintenance', label: 'Maintenance' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'settings', label: 'Settings' },
+  { id: 'favorites', label: 'Favorites' },
+  { id: 'viewers', label: 'Viewers' },
   { id: 'jobs', label: 'Jobs' },
 ] as const;
 

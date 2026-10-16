@@ -4,6 +4,7 @@
   import { AREAS, areaOf, type AreaId } from './lib/admin/areas';
   import { activeCount } from './lib/admin/jobs';
   import { followJobs, jobs } from './lib/admin/jobs.svelte';
+  import FavoritesArea from './lib/admin/FavoritesArea.svelte';
   import JobsArea from './lib/admin/JobsArea.svelte';
   import { checkSession, session, signOut, why } from './lib/admin/session.svelte';
   import MaintenanceArea from './lib/admin/MaintenanceArea.svelte';
@@ -14,9 +15,11 @@
   import { loadPrefs } from './lib/prefs';
   import { startStatus } from './lib/status.svelte';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
+  import ViewersArea from './lib/admin/ViewersArea.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, accounts: AccountsArea, settings: SettingsArea, jobs: JobsArea };
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, accounts: AccountsArea, settings: SettingsArea,
+    favorites: FavoritesArea, viewers: ViewersArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
   let area = $state<AreaId>(areaOf(location.hash));
