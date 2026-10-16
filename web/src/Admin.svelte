@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount, type Component } from 'svelte';
   import { AREAS, areaOf, type AreaId } from './lib/admin/areas';
+  import { activeCount } from './lib/admin/jobs';
+  import { followJobs, jobs } from './lib/admin/jobs.svelte';
+  import JobsArea from './lib/admin/JobsArea.svelte';
   import { checkSession, session, signOut, why } from './lib/admin/session.svelte';
   import MaintenanceArea from './lib/admin/MaintenanceArea.svelte';
   import SignIn from './lib/admin/SignIn.svelte';
@@ -11,7 +14,7 @@
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea };
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
   let area = $state<AreaId>(areaOf(location.hash));
@@ -32,6 +35,11 @@
   // The status gives the site's time zone, in which every time is shown.
   onMount(startStatus);
   onMount(() => void check());
+  // While an admin is signed in, the jobs are followed for the menu's badge.
+  $effect(() => {
+    if (session.login) return followJobs();
+  });
+  const running = $derived(jobs.list ? activeCount(jobs.list) : 0);
 
   async function check() {
     problem = null;
@@ -76,7 +84,12 @@
     </header>
     <nav id="areas" class="side" aria-label="Admin areas">
       {#each AREAS as item (item.id)}
-        <a href={`#${item.id}`} aria-current={area === item.id ? 'page' : undefined} onclick={() => (menuOpen = false)}>{item.label}</a>
+        {@const count = item.id === 'jobs' ? running : 0}
+        <a href={`#${item.id}`} aria-current={area === item.id ? 'page' : undefined}
+          aria-label={count ? `${item.label}, ${count} under way` : undefined}
+          onclick={() => (menuOpen = false)}>
+          {item.label}{#if count}<span class="badge" aria-hidden="true">{count}</span>{/if}
+        </a>
       {/each}
     </nav>
     <main class="main">
@@ -113,6 +126,10 @@
   .side a { padding: 0.45rem 0.7rem; border-radius: 4px; color: var(--text); text-decoration: none; }
   .side a:hover { background: var(--bg); }
   .side a[aria-current='page'] { background: var(--bg); color: var(--accent); font-weight: 700; box-shadow: inset 3px 0 0 var(--accent); }
+  .badge {
+    margin-left: 0.4rem; padding: 0 0.45rem; border-radius: 999px; background: var(--accent); color: var(--bg);
+    font-weight: 700;
+  }
   .main { grid-area: main; min-width: 0; }
   .notice {
     position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 30; margin: 0;

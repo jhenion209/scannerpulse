@@ -34,3 +34,13 @@ FROM calls c WHERE c.transcript_state = 'text';
 INSERT INTO favorites (name) VALUES ('Fire and ambulance');
 INSERT INTO favorite_talkgroups (favorite_id, talkgroup_id)
 SELECT f.id, t.id FROM favorites f, talkgroups t WHERE t.number IN (101, 201);
+
+-- Jobs for the admin page's list; nothing runs them here. One waits on
+-- maintenance, one ended well and one failed.
+INSERT INTO jobs (kind, state, done, total, message, started_by, created_at, started_at, finished_at, updated_at, host)
+VALUES ('purge', 'failed', 3, 10, 'the holding folder is not there', 'e2e-admin',
+        now() - interval '2 days', now() - interval '2 days', now() - interval '2 days', now() - interval '2 days', 'host-a'),
+       ('correct', 'done', 12, 12, 'corrected 12 files', 'e2e-admin',
+        now() - interval '1 day', now() - interval '1 day', now() - interval '1 day', now() - interval '1 day', 'host-a'),
+       ('queue', 'running', 40, 100, 'waiting: maintenance is on', 'e2e-admin',
+        now() - interval '20 minutes', now() - interval '19 minutes', NULL, now() - interval '1 minute', 'host-b');
