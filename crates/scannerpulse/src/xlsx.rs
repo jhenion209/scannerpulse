@@ -1,14 +1,17 @@
 //! A minimal Excel workbook: one sheet of rows, written without a library.
 //!
-//! The file is a zip of five XML parts, stored without compression. Every
-//! text cell is an inline string, never a formula, so a transcript that starts
-//! with `=` stays text.
+//! The file is a zip of five XML parts (six when the sheet has links), stored
+//! without compression. Every text cell is an inline string, never a formula,
+//! so a transcript that starts with `=` stays text; a link is a hyperlink on
+//! a cell that shows its address, not a `HYPERLINK` formula.
 
 /// A cell of the sheet.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
     Text(String),
     Number(f64),
+    /// An address, shown as text and opened by a click.
+    Link(String),
 }
 
 /// The longest text a cell holds, in characters (Excel's limit).
@@ -18,13 +21,24 @@ const MAX_CHARS: usize = 32_767;
 pub fn workbook(sheet_name: &str, header: &[&str], rows: &[Vec<Cell>]) -> Result<Vec<u8>, String> {
     let mut sheet = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
-         <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>",
+         <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData>",
     );
     let header: Vec<Cell> = header.iter().map(|h| Cell::Text(h.to_string())).collect();
+    // Each link's cell and address, for the sheet's hyperlinks and their part.
+    let mut links: Vec<(String, &str)> = Vec::new();
     for (n, row) in std::iter::once(&header).chain(rows.iter()).enumerate() {
         sheet.push_str(&format!("<row r=\"{}\">", n + 1));
-        for cell in row {
+        for (column, cell) in row.iter().enumerate() {
             match cell {
+                Cell::Link(url) => {
+                    let place = format!("{}{}", column_name(column), n + 1);
+                    sheet.push_str(&format!(
+                        "<c r=\"{place}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                        escape(url)
+                    ));
+                    links.push((place, url));
+                }
                 Cell::Text(text) => {
                     sheet.push_str("<c t=\"inlineStr\"><is><t xml:space=\"preserve\">");
                     sheet.push_str(&escape(&text.chars().take(MAX_CHARS).collect::<String>()));
@@ -36,8 +50,25 @@ pub fn workbook(sheet_name: &str, header: &[&str], rows: &[Vec<Cell>]) -> Result
         }
         sheet.push_str("</row>");
     }
-    sheet.push_str("</sheetData></worksheet>");
-    let parts: [(&str, String); 5] = [
+    sheet.push_str("</sheetData>");
+    let mut targets = String::new();
+    if !links.is_empty() {
+        sheet.push_str("<hyperlinks>");
+        for (i, (place, url)) in links.iter().enumerate() {
+            sheet.push_str(&format!(
+                "<hyperlink ref=\"{place}\" r:id=\"rId{}\"/>",
+                i + 1
+            ));
+            targets.push_str(&format!(
+                "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",
+                i + 1,
+                escape(url)
+            ));
+        }
+        sheet.push_str("</hyperlinks>");
+    }
+    sheet.push_str("</worksheet>");
+    let mut parts: Vec<(&str, String)> = vec![
         (
             "[Content_Types].xml",
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
@@ -77,7 +108,30 @@ pub fn workbook(sheet_name: &str, header: &[&str], rows: &[Vec<Cell>]) -> Result
         ),
         ("xl/worksheets/sheet1.xml", sheet),
     ];
+    if !targets.is_empty() {
+        parts.push((
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{targets}</Relationships>"
+            ),
+        ));
+    }
     zip(&parts)
+}
+
+/// A column's letters: 0 is A, 25 is Z, 26 is AA.
+fn column_name(mut index: usize) -> String {
+    let mut name = Vec::new();
+    loop {
+        name.push(b'A' + (index % 26) as u8);
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+    name.reverse();
+    String::from_utf8(name).expect("ASCII letters")
 }
 
 /// Text made safe for XML: the five special characters escaped, and the
@@ -178,6 +232,41 @@ mod tests {
             pos += 30 + name_len + size;
         }
         parts
+    }
+
+    #[test]
+    fn a_link_shows_its_address_and_opens_it() {
+        let rows = vec![vec![
+            Cell::Text("a".into()),
+            Cell::Link("https://radio.example/audio/7?x=1&y=2".into()),
+        ]];
+        let data = workbook("Calls", &["Text", "Audio"], &rows).unwrap();
+        let parts = unzip(&data);
+        let part = |name: &str| {
+            parts
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, body)| body.clone())
+                .unwrap_or_else(|| panic!("no part {name}"))
+        };
+        let sheet = part("xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains(
+                "<t xml:space=\"preserve\">https://radio.example/audio/7?x=1&amp;y=2</t>"
+            )
+        );
+        assert!(sheet.contains("<hyperlinks><hyperlink ref=\"B2\" r:id=\"rId1\"/></hyperlinks>"));
+        assert!(sheet.contains(
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\""
+        ));
+        assert!(!sheet.contains("<f>"), "a link is never a formula");
+        let rels = part("xl/worksheets/_rels/sheet1.xml.rels");
+        assert!(rels.contains(
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://radio.example/audio/7?x=1&amp;y=2\" TargetMode=\"External\"/>"
+        ));
+        assert_eq!(super::column_name(0), "A");
+        assert_eq!(super::column_name(25), "Z");
+        assert_eq!(super::column_name(26), "AA");
     }
 
     #[test]

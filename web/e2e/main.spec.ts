@@ -510,9 +510,12 @@ test('CSV covers the page, or the chosen calls, with the text as it is', async (
   const file = await exportFile(page, /^CSV — this page/);
   expect(file.suggestedFilename()).toMatch(NAME);
   const lines = readFileSync(await file.path(), 'utf8').split('\r\n').filter(Boolean);
-  expect(lines[0]).toBe('\uFEFFDate,Time,Talkgroup,Site,Source,Length (s),Text');
+  expect(lines[0]).toBe('\uFEFFDate,Time,Talkgroup,Site,Source,Length (s),Text,Audio');
   expect(lines).toHaveLength(31);
-  expect(lines.some((l) => l.endsWith(',<b>not bold</b> & kept as typed'))).toBe(true);
+  expect(lines.some((l) => l.includes(',<b>not bold</b> & kept as typed,'))).toBe(true);
+  // Each row ends with a link to its call's audio on this site.
+  const origin = new URL(page.url()).origin;
+  expect(lines.slice(1).every((l) => new RegExp(`,${origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/audio/\\d+$`).test(l))).toBe(true);
 
   await page.getByRole('button', { name: 'Select calls' }).click();
   const boxes = page.locator('tbody td.c-select input');

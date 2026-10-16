@@ -56,10 +56,11 @@ export function csvText(rows: string[][]): string {
 }
 
 /** The page's rows as a table: the columns on screen, the time split into
- * the date and the time in the site's zone. */
-export function pageTable(calls: Call[], columns: ColumnId[], zone: string): string[][] {
+ * the date and the time in the site's zone, and last each call's audio at
+ * `origin` (the page's own address). */
+export function pageTable(calls: Call[], columns: ColumnId[], zone: string, origin: string): string[][] {
   const shown = COLUMNS.filter((c) => columns.includes(c.id));
-  const header = shown.flatMap((c) => (c.id === 'time' ? ['Date', 'Time'] : c.id === 'length' ? ['Length (s)'] : [c.label]));
+  const header = [...shown.flatMap((c) => (c.id === 'time' ? ['Date', 'Time'] : c.id === 'length' ? ['Length (s)'] : [c.label])), 'Audio'];
   const value = (call: Call, id: ColumnId): string[] => {
     if (id === 'time') {
       const { date, time } = zoned(new Date(call.started_at), zone);
@@ -70,7 +71,7 @@ export function pageTable(calls: Call[], columns: ColumnId[], zone: string): str
     if (id === 'text') return [call.transcript ?? ''];
     return isExtra(id) ? [extraText(call, id)] : [''];
   };
-  return [header, ...calls.map((call) => shown.flatMap((c) => value(call, c.id)))];
+  return [header, ...calls.map((call) => [...shown.flatMap((c) => value(call, c.id)), `${origin}/audio/${call.id}`])];
 }
 
 /** The list's query for every match: without its page, count or SmartSort. */

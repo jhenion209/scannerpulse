@@ -56,7 +56,7 @@
   function csv() {
     if (nothing) return tell(NOTHING);
     const name = pageName('csv');
-    saveFile(new Blob([csvText(pageTable(rows(), columns, zone))], { type: 'text/csv' }), name);
+    saveFile(new Blob([csvText(pageTable(rows(), columns, zone, location.origin))], { type: 'text/csv' }), name);
     tell(`Saved ${name}.`);
   }
 

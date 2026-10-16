@@ -54,10 +54,10 @@ describe('a CSV of the page', () => {
   });
 
   it('has the columns on screen, the time split into date and time in the site\'s zone', () => {
-    const rows = pageTable([call({})], ['time', 'talkgroup', 'id', 'length', 'text'], 'America/Chicago');
+    const rows = pageTable([call({})], ['time', 'talkgroup', 'id', 'length', 'text'], 'America/Chicago', 'https://radio.example');
     expect(rows).toEqual([
-      ['Date', 'Time', 'Talkgroup', 'Call ID', 'Length (s)', 'Text'],
-      ['2031-07-01', '12:00:02', 'Fire', '7', '2.5', 'Engine 7'],
+      ['Date', 'Time', 'Talkgroup', 'Call ID', 'Length (s)', 'Text', 'Audio'],
+      ['2031-07-01', '12:00:02', 'Fire', '7', '2.5', 'Engine 7', 'https://radio.example/audio/7'],
     ]);
   });
 });

@@ -1,9 +1,9 @@
 //! `/api/export/xlsx`: every match of a search, newest first, as an Excel
-//! file.
+//! file, each row with a link to its call's audio.
 
 use axum::body::Body;
 use axum::extract::{Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 
 use super::audio::{attachment, export_name, time_zone};
@@ -16,10 +16,35 @@ use crate::xlsx::{Cell, workbook};
 /// `X-Export-Capped-At` header says so.
 pub const MAX_ROWS: i64 = 100_000;
 
+/// The site's address as the asker reached it: the request's host, and
+/// https when the proxy in front says so. Both come from the request, which is
+/// enough: the file goes back only to the one who asked. None for a host that
+/// is not a plain name, address or port.
+fn site_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    let plain = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    if !plain {
+        return None;
+    }
+    let scheme = match headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some("https") => "https",
+        _ => "http",
+    };
+    Some(format!("{scheme}://{host}"))
+}
+
 pub async fn export(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let origin = site_origin(&headers);
     let permit = state.exports.clone().try_acquire_owned().map_err(|_| {
         ApiError::Limit(
             StatusCode::TOO_MANY_REQUESTS,
@@ -48,13 +73,17 @@ pub async fn export(
                     Cell::Text(r.talkgroup_name.clone().unwrap_or_default()),
                     Cell::Number(f64::from(r.duration_ms.unwrap_or(0)) / 1000.0),
                     Cell::Text(r.transcript.clone().unwrap_or_default()),
+                    match &origin {
+                        Some(origin) => Cell::Link(format!("{origin}/audio/{}", r.id)),
+                        None => Cell::Text(format!("/audio/{}", r.id)),
+                    },
                 ]
             })
             .collect();
         drop(page);
         workbook(
             "Calls",
-            &["Date", "Time", "Talkgroup", "Length (s)", "Text"],
+            &["Date", "Time", "Talkgroup", "Length (s)", "Text", "Audio"],
             &rows,
         )
     })

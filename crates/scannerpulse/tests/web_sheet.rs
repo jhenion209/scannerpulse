@@ -45,8 +45,11 @@ async fn the_search_is_exported_newest_first_with_text_kept_as_text(pool: PgPool
         (*pool.connect_options()).clone(),
     ));
     let response = app
+        .clone()
         .oneshot(
             Request::get("/api/export/xlsx?q=engine")
+                .header("host", "radio.example")
+                .header("x-forwarded-proto", "https")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -80,4 +83,21 @@ async fn the_search_is_exported_newest_first_with_text_kept_as_text(pool: PgPool
         "the site's local time"
     );
     assert!(sheet.contains("<c><v>2</v></c>"), "the length in seconds");
+    // Each call's audio, as a link on the address the asker reached.
+    assert!(sheet.contains("<t xml:space=\"preserve\">Audio</t>"));
+    assert_eq!(sheet.matches(">https://radio.example/audio/").count(), 2);
+    assert_eq!(sheet.matches("<hyperlink ").count(), 2);
+    // Without a usable host, the address is the path alone and links nothing.
+    let bare = app
+        .oneshot(
+            Request::get("/api/export/xlsx?q=engine")
+                .header("host", "bad host\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sheet = sheet_xml(&bare.into_body().collect().await.unwrap().to_bytes());
+    assert_eq!(sheet.matches(">/audio/").count(), 2);
+    assert!(!sheet.contains("<hyperlinks>"));
 }
