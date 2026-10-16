@@ -18,12 +18,12 @@
   let text = $state(words);
 
   /** The skip link lands on the first call's play bar, or else the list's
-   * first control: the list itself takes no focus, so a click in it never
+   * first enabled control: the list itself takes no focus, so a click in it never
    * moves the focus away from an open menu. */
   function skip(event: MouseEvent) {
     const target =
       document.querySelector<HTMLElement>('#calls tbody button') ??
-      document.querySelector<HTMLElement>('#calls button, #calls input, #calls select');
+      document.querySelector<HTMLElement>('#calls button:not(:disabled), #calls input:not(:disabled), #calls select:not(:disabled)');
     if (!target) return;
     event.preventDefault();
     target.focus();

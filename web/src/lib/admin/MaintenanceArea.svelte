@@ -3,7 +3,7 @@
   import { fetchStatus, type Status } from '../api';
   import { tell } from '../notice.svelte';
   import { etaText } from '../status';
-  import { drained } from './drain';
+  import { drainedPercent } from './drain';
   import { STATUS_EVERY_MS } from './health';
   import { admin, why } from './session.svelte';
 
@@ -13,9 +13,8 @@
   let busy = $state(false);
   // The largest the queue was seen at since the area opened: the bar's 0 %.
   let largest = $state(0);
-  const share = $derived(data ? drained(largest, data.queue) : null);
   // Whole per cent, rounded down: 100 % only once no call waits.
-  const percent = $derived(share === null ? 0 : Math.floor(share * 100));
+  const percent = $derived(data ? drainedPercent(largest, data.queue) : null);
 
   async function read() {
     try {
@@ -90,7 +89,7 @@
       {data.queue.toLocaleString('en-US')} {data.queue === 1 ? 'call' : 'calls'} waiting{#if data.maintenance}; paused by maintenance{:else if data.queue && data.eta_seconds !== null},
         done in {etaText(data.eta_seconds)}{/if}{#if !data.transcription}; transcription is off{/if}.
     </p>
-    {#if share !== null}
+    {#if percent !== null}
       <label for="drain">Drained since {largest.toLocaleString('en-US')} were waiting</label>
       <progress id="drain" max="100" value={percent}>{percent} %</progress>
       <span>{percent} %</span>

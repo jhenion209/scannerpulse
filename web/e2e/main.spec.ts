@@ -962,3 +962,16 @@ test('a link to a favorite list that is gone says so, and offers every talkgroup
   await page.getByRole('button', { name: 'Show every talkgroup' }).click();
   await expect(rows(page)).toHaveCount(30);
 });
+
+test('the skip link still lands inside the calls when the list is empty', async ({ page }) => {
+  await page.goto('/?favorite=999999');
+  await expect(page.getByRole('alert').filter({ hasText: 'no longer exists' })).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Skip to the calls' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const inside = await page.evaluate(() => {
+    const active = document.activeElement as HTMLButtonElement | null;
+    return !!active && !!active.closest('#calls') && !active.disabled;
+  });
+  expect(inside).toBe(true);
+});
