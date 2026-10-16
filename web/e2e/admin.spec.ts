@@ -178,17 +178,19 @@ const longValues = {
   ],
 };
 
-test("a table's headings and short values break between words, never inside one, at 375 and 1280 px", async ({ page }) => {
+test("a table's headings and short values break between words, never inside one, at 360, 375 and 1280 px", async ({ page }) => {
   await page.route('**/api/admin/status', (route) => route.fulfill({ json: longValues.status }));
   await page.route('**/api/admin/viewers', (route) => route.fulfill({ json: longValues.viewers }));
   await signIn(page);
-  // Per table: its words that the browser breaks across lines, in a heading or in a cell without the `long` class.
-  // A hyphen is a place to break between words.
+  // Per table: its words that the browser breaks across lines, in a heading or in a cell without the `long` class
+  // (a hyphen is a place to break between words), and the smallest text size of its cells.
   const broken = () =>
     page.evaluate(() => {
       const tables = [...document.querySelectorAll('.area table')];
       const found: string[] = [];
+      let smallest = Infinity;
       for (const table of tables) {
+        for (const cell of table.querySelectorAll('th, td')) smallest = Math.min(smallest, parseFloat(getComputedStyle(cell).fontSize));
         for (const cell of table.querySelectorAll('th, td:not(.long)')) {
           const texts = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
           for (let node = texts.nextNode(); node; node = texts.nextNode()) {
@@ -201,9 +203,9 @@ test("a table's headings and short values break between words, never inside one,
           }
         }
       }
-      return { tables: tables.length, found };
+      return { tables: tables.length, found, smallest };
     });
-  for (const width of [375, 1280]) {
+  for (const width of [360, 375, 1280]) {
     await page.setViewportSize({ width, height: 800 });
     for (const [area, tables] of [['status', 6], ['viewers', 1]] as const) {
       await page.evaluate((h) => (location.hash = h), `#${area}`);
@@ -212,6 +214,7 @@ test("a table's headings and short values break between words, never inside one,
       const result = await broken();
       expect(result.tables, `${area} at ${width} px: the tables shown`).toBe(tables);
       expect(result.found, `${area} at ${width} px`).toEqual([]);
+      expect(result.smallest, `${area} at ${width} px: the smallest text in a table, in px`).toBeGreaterThanOrEqual(14);
       const wide = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
       expect(wide, `${area} at ${width} px scrolls sideways`).toBe(false);
     }

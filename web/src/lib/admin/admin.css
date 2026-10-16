@@ -20,7 +20,7 @@
    must fit beside each other. */
 @media (max-width: 480px) {
   .area { padding-left: 0.75rem; padding-right: 0.75rem; }
-  .area table { font-size: 0.875rem; }
+  .area table { font-size: 14px; }
   .area th, .area td { padding-right: 0.5rem; }
 }
 .area th { color: var(--muted); font-weight: 600; }
