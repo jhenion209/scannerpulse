@@ -24,9 +24,13 @@ describe('stepping through the list', () => {
 
 describe('when a call ends or fails', () => {
   it('plays the newer call next only in continuous play', () => {
-    expect(afterEnd(calls, 3, true)?.id).toBe(4);
-    expect(afterEnd(calls, 3, false)).toBeNull();
-    expect(afterEnd(calls, 5, true)).toBeNull();
+    expect(afterEnd(calls, 3, true, new Set())?.id).toBe(4);
+    expect(afterEnd(calls, 3, false, new Set())).toBeNull();
+    expect(afterEnd(calls, 5, true, new Set())).toBeNull();
+  });
+
+  it('passes over a newer call that failed before', () => {
+    expect(afterEnd(calls, 2, true, new Set([3]))?.id).toBe(4);
   });
 
   it('passes over a call that fails, in the direction it was going, and over others that failed', () => {

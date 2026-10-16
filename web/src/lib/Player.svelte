@@ -24,7 +24,7 @@
   function ended() {
     player.busy = false;
     if (id === null) return;
-    const next = afterEnd(view.calls, id, continuous);
+    const next = afterEnd(view.calls, id, continuous, failed);
     if (next) play(next, 'newer');
   }
 

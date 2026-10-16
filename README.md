@@ -242,6 +242,19 @@ listen.
 - `lease` shows which host holds the lease, and each host's heartbeat.
 - `read --zone ZONE FILE...` prints what ingest reads from each file.
 
+## Building
+
+The web interface is a Svelte app in `web/`. Build it before the binary,
+which embeds `web/dist`: `cd web && npm ci && npm run build`, then
+`cargo build --release`. Node is needed only to build, never to run. Without
+`web/dist` the binary still builds and serves a page that says the
+interface was not built.
+
+Tests: `cargo test --workspace` (with `DATABASE_URL`), and in `web/`
+`npm test` (logic) and `npm run e2e`, which drives a browser against
+`scannerpulse web` over a database filled by `web/e2e/seed.sh` with
+invented calls.
+
 ## Licence
 
 Licensed under either of the Apache License, Version 2.0 (`LICENSE-APACHE`) or
