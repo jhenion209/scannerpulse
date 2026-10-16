@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import { ApiError, fetchAudio, fetchCall, fetchExcel, type Call, type CallDetail } from './lib/api';
-  import { audioBody, csvText, exportName, exportQuery, pageTable, saveFile } from './lib/exporting';
+  import { ApiError, fetchCall, type Call, type CallDetail } from './lib/api';
   import ExportMenu from './lib/ExportMenu.svelte';
-  import { sharedCallId, shareUrl } from './lib/actions';
+  import { sharedCallId } from './lib/actions';
+  import { download, share, sharing } from './lib/callActions.svelte';
   import CallList from './lib/CallList.svelte';
   import { defaultColumns, type ColumnId } from './lib/columns';
   import { createList, goTo, show, view } from './lib/calls.svelte';
@@ -19,14 +19,14 @@
   import SharedCall from './lib/SharedCall.svelte';
   import SearchPanel from './lib/SearchPanel.svelte';
   import { searchOf, withSearch } from './lib/search';
+  import { notice, tell } from './lib/notice.svelte';
   import { keepOnPage, toggleAll, toggleOne } from './lib/selection';
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
   import { loadPrefs, resetPref, savePref } from './lib/prefs';
   import { noteCall, startStatus, status } from './lib/status.svelte';
-  import StatusChips from './lib/StatusChips.svelte';
-  import ThemeSwitch from './lib/ThemeSwitch.svelte';
+  import TopBar from './lib/TopBar.svelte';
 
   const prefs = $state(loadPrefs());
   const fromUrl = new URLSearchParams(location.search);
@@ -54,12 +54,10 @@
   const linkWords = searchOf(location.search) ?? '';
   let searchText = $state(linkWords);
   let searchOpen = $state(linkWords !== '');
-  let barText = $state(linkWords);
   // The panel's list lives here, so a text saved or heard live reaches its rows too.
   const found = createList();
-  function openSearch(event: SubmitEvent) {
-    event.preventDefault();
-    if (barText.trim()) searchText = barText.trim();
+  function openSearch(words: string) {
+    if (words) searchText = words;
     searchOpen = true;
   }
 
@@ -256,116 +254,19 @@
     });
   });
 
-  // Export. Excel and call audio are built on the server from every match
-  // of the list (or, for audio, the chosen calls); CSV, PDF and print are the
-  // page on screen, or the chosen calls when some are ticked. A file of the
-  // page or the chosen calls is named by those calls' own time range, as the
-  // server names a file of chosen calls.
-  let exporting = $state(false);
+  // Export: the menu builds the files; printing the chosen calls hides the others.
   let printChosen = $state(false);
   const zone = () => status.data?.time_zone ?? 'UTC';
   const listParams = () => listQuery(filters, choices.favorites, { size: prefs.pageSize }, new Date());
-  const pageRows = () =>
-    selecting && chosen.length ? view.calls.filter((c) => chosen.includes(c.id)) : view.calls;
-  const oldestFirst = (calls: Call[]) => [...calls].sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at));
-  const pageName = (ext: string) => exportName(oldestFirst(pageRows()), null, null, zone(), ext);
-  const why = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-  async function excel() {
-    exporting = true;
-    tell('Making the Excel file of every match…');
-    try {
-      const file = await fetchExcel(exportQuery(listParams()));
-      saveFile(file.blob, file.name);
-      tell(file.note ?? `Saved ${file.name}.`);
-    } catch (error) {
-      tell(`The Excel file could not be made: ${why(error)}`);
-    } finally {
-      exporting = false;
-    }
-  }
-
-  function csv() {
-    if (selecting && chosen.length === 0) return tell('Nothing is selected: tick calls first.');
-    const name = pageName('csv');
-    saveFile(new Blob([csvText(pageTable(pageRows(), columns, zone()))], { type: 'text/csv' }), name);
-    tell(`Saved ${name}.`);
-  }
-
-  /** Prints the page (or the chosen calls); the file name the browser offers
-   * for a PDF is the export name, as the page's title. */
-  async function printPage(kind: 'pdf' | 'print') {
-    if (selecting && chosen.length === 0) return tell('Nothing is selected: tick calls first.');
-    const title = document.title;
-    printChosen = selecting && chosen.length > 0;
-    document.title = pageName('pdf').replace(/\.pdf$/, '');
-    await tick();
-    const restore = () => {
-      document.title = title;
-      printChosen = false;
-    };
-    window.addEventListener('afterprint', restore, { once: true });
-    window.print();
-    if (kind === 'pdf') tell('Choose “Save as PDF” in the print dialog to keep a PDF.');
-  }
-
-  async function audio() {
-    if (selecting && chosen.length === 0) return tell('Nothing is selected: tick calls first.');
-    exporting = true;
-    const ids = selecting && chosen.length ? chosen : undefined;
-    tell(ids ? `Joining the audio of ${ids.length} chosen calls…` : 'Joining the audio of every match…');
-    try {
-      const file = await fetchAudio(audioBody(listParams(), ids));
-      saveFile(file.blob, file.name);
-      tell(file.note ?? `Saved ${file.name}.`);
-    } catch (error) {
-      tell(`The call audio could not be made: ${why(error)}`);
-    } finally {
-      exporting = false;
-    }
-  }
-
-  // The actions on one call.
+  // The actions on one call: editing needs the dialog; download and share
+  // are in callActions.
   let editing = $state<Call | null>(null);
-  let sharing = $state<string | null>(null);
-  let notice = $state<string | null>(null);
-  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  function tell(text: string) {
-    notice = text;
-    clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (notice = null), 6000);
-  }
 
   function saved(id: number, transcript: string, origin: string) {
     setText({ type: 'transcript', id, talkgroup_id: null, transcript, origin });
     if (shared.call?.id === id) shared.call = { ...shared.call, transcript, origin };
     tell('The text is saved.');
-  }
-
-  /** Downloads the call under its file's own name. */
-  async function download(call: Call) {
-    try {
-      const detail = await fetchCall(call.id);
-      const link = document.createElement('a');
-      link.href = `/audio/${call.id}`;
-      link.download = detail.file;
-      document.body.append(link);
-      link.click();
-      link.remove();
-    } catch (error) {
-      tell(`The call could not be downloaded: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  /** Copies a link to the call; where the browser will not, shows it to copy by hand. */
-  async function share(call: Call) {
-    const url = shareUrl(location.origin, call.id);
-    try {
-      await navigator.clipboard.writeText(url);
-      tell(`Link copied: ${url}`);
-    } catch {
-      sharing = url;
-    }
   }
 
   // A link to one call (`/calls/<id>`) shows it above the list.
@@ -401,22 +302,10 @@
 </script>
 
 <div class="shell" class:rail-closed={!prefs.railOpen} class:menu-open={menuOpen} class:print-chosen={printChosen}>
-  <header class="bar">
-    <button type="button" class="menu" onclick={toggleRail} aria-controls="filters" aria-expanded={narrow.current ? menuOpen : prefs.railOpen}>
-      Filters
-    </button>
-    <span class="name">ScannerPulse</span>
-    <form class="find" role="search" aria-label="Search calls" onsubmit={openSearch}>
-      <input type="search" aria-label="Words to search for" placeholder="Search calls" bind:value={barText} />
-      <button type="submit">Search</button>
-    </form>
-    <span class="spacer"></span>
-    <StatusChips />
-    <ThemeSwitch bind:theme={prefs.theme} />
-    <a class="admin" href="/admin">Admin</a>
-  </header>
+  <TopBar railOpen={narrow.current ? menuOpen : prefs.railOpen} words={linkWords} bind:theme={prefs.theme}
+    ontoggle={toggleRail} onsearch={openSearch} />
   <!-- Outside the scrolling list, over the search panel: seen wherever the list is. -->
-  <p class="notice" role="status">{notice ?? ''}</p>
+  <p class="notice" role="status">{notice.text ?? ''}</p>
   <aside class="rail" id="filters" aria-label="Filters">
     <FilterRail bind:filters bind:paused choices={choices.filters} favorites={choices.favorites} />
   </aside>
@@ -427,8 +316,8 @@
       oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go}
       bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length}>
       {#snippet extra()}
-        <ExportMenu {selecting} chosenCount={selecting ? chosen.length : 0} busy={exporting}
-          onexcel={excel} oncsv={csv} onprint={printPage} onaudio={audio} />
+        <ExportMenu calls={view.calls} {selecting} {chosen} {columns} zone={zone()} params={listParams}
+          bind:printChosen />
       {/snippet}
     </Pager>
     {#if shared.open}
@@ -449,9 +338,9 @@
   </footer>
 </div>
 <EditDialog call={editing} onclose={() => (editing = null)} onsaved={saved} />
-<ShareDialog url={sharing} onclose={() => (sharing = null)} />
+<ShareDialog url={sharing.url} onclose={() => (sharing.url = null)} />
 <SearchPanel bind:open={searchOpen} bind:text={searchText} results={found} choices={choices.filters}
-  onedit={(call) => (editing = call)} ondownload={download} onshare={share} {tell} />
+  onedit={(call) => (editing = call)} />
 
 <style>
   .shell {
@@ -460,27 +349,6 @@
   }
   .shell.rail-closed { grid-template-columns: 0 1fr; }
   .shell.rail-closed .rail { display: none; }
-  .bar {
-    grid-area: bar; display: flex; gap: 0.75rem; align-items: center;
-    padding: 0.5rem 1rem; background: var(--bar); color: var(--bar-text);
-  }
-  .menu {
-    background: none; color: var(--bar-text); border: 1px solid currentColor; border-radius: 4px;
-    padding: 0.25rem 0.6rem; min-height: 2.25rem; cursor: pointer;
-  }
-  .name { font-weight: 700; color: var(--accent-strong); }
-  .bar { flex-wrap: wrap; row-gap: 0.4rem; }
-  .find { display: flex; gap: 0.3rem; }
-  .find input {
-    min-height: 2.25rem; width: 14rem; padding: 0.2rem 0.5rem; border-radius: 4px;
-    border: 1px solid var(--bar-text); background: var(--bg); color: var(--text); font: inherit;
-  }
-  .find button {
-    min-height: 2.25rem; padding: 0 0.7rem; border-radius: 4px; border: 1px solid var(--bar-text);
-    background: none; color: var(--bar-text); font: inherit; cursor: pointer;
-  }
-  .spacer { flex: 1; }
-  .admin { color: var(--bar-text); }
   .rail { grid-area: rail; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; }
   .error { margin: 0.9rem 0.9rem 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
   .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; }
@@ -499,7 +367,7 @@
   /* Printing (and a PDF saved from the print dialog) keeps the calls only:
      every row's whole text, without the controls. */
   @media print {
-    .bar, .rail, .player, .notice, .error, :global(.pager), :global(.c-actions), :global(.c-select), :global(.c-play),
+    .rail, .player, .notice, .error, :global(.pager), :global(.c-actions), :global(.c-select), :global(.c-play),
     :global(.calls .more) { display: none !important; }
     .shell { display: block; height: auto; }
     .list { overflow: visible; }
@@ -508,8 +376,6 @@
     :global(.calls tr.selected td) { background: none !important; }
   }
   @media (max-width: 760px) {
-    /* A phone keeps the Search button; the panel has the words field. */
-    .find input { display: none; }
     .shell, .shell.rail-closed { grid-template: 'bar' auto 'list' 1fr 'player' auto / 1fr; }
     .rail, .shell.rail-closed .rail { display: none; }
     .shell.menu-open .rail {

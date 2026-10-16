@@ -2,11 +2,13 @@
   import { untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { fetchExcel, type Call, type FilterChoices } from './api';
+  import { download, share } from './callActions.svelte';
   import CallList from './CallList.svelte';
   import { queryOf, type Ask, type List } from './calls.svelte';
   import type { ColumnId } from './columns';
   import { exportQuery, saveFile } from './exporting';
   import { callTime } from './format';
+  import { tell } from './notice.svelte';
   import { FIRST_PAGE, pageCount } from './paging';
   import { player } from './playing.svelte';
   import { PAGE_SIZES } from './prefs';
@@ -18,9 +20,6 @@
     results,
     choices,
     onedit,
-    ondownload,
-    onshare,
-    tell,
   }: {
     open: boolean;
     /** The words searched for; a link may bring them. */
@@ -29,9 +28,6 @@
     results: List;
     choices: FilterChoices;
     onedit: (call: Call) => void;
-    ondownload: (call: Call) => void;
-    onshare: (call: Call) => void;
-    tell: (text: string) => void;
   } = $props();
 
   // The panel's own fields, pages and player, over its own list (`results`). It
@@ -196,7 +192,7 @@
     {#if results.view.error}<p class="error" role="alert">{results.view.error}</p>{/if}
     <div class="results">
       <CallList calls={results.view.calls} playingId={playing?.id ?? null} {played} showAll={false} columns={COLUMNS}
-        onplay={play} {onedit} {ondownload} {onshare} />
+        onplay={play} {onedit} ondownload={download} onshare={share} />
     </div>
     <nav class="pages" aria-label="Result pages">
       <button type="button" onclick={() => turn(results.view.paging.index - 1)} disabled={results.view.paging.index === 0}>Previous</button>

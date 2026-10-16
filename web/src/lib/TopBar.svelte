@@ -1,0 +1,65 @@
+<script lang="ts">
+  import type { Theme } from './prefs';
+  import StatusChips from './StatusChips.svelte';
+  import ThemeSwitch from './ThemeSwitch.svelte';
+
+  let { railOpen, words = '', theme = $bindable('auto'), ontoggle, onsearch }: {
+    /** Whether the filter rail (or, on a phone, its menu) is open. */
+    railOpen: boolean;
+    /** The words a link brought, to start the search box with. */
+    words?: string;
+    theme?: Theme;
+    ontoggle: () => void;
+    /** Opens the search panel, with the words typed when there are some. */
+    onsearch: (words: string) => void;
+  } = $props();
+
+  // svelte-ignore state_referenced_locally
+  let text = $state(words);
+
+  function submit(event: SubmitEvent) {
+    event.preventDefault();
+    onsearch(text.trim());
+  }
+</script>
+
+<header class="bar">
+  <button type="button" class="menu" onclick={ontoggle} aria-controls="filters" aria-expanded={railOpen}>
+    Filters
+  </button>
+  <span class="name">ScannerPulse</span>
+  <form class="find" role="search" aria-label="Search calls" onsubmit={submit}>
+    <input type="search" aria-label="Words to search for" placeholder="Search calls" bind:value={text} />
+    <button type="submit">Search</button>
+  </form>
+  <span class="spacer"></span>
+  <StatusChips />
+  <ThemeSwitch bind:theme />
+  <a class="admin" href="/admin">Admin</a>
+</header>
+
+<style>
+  .bar {
+    grid-area: bar; display: flex; flex-wrap: wrap; gap: 0.75rem; row-gap: 0.4rem; align-items: center;
+    padding: 0.5rem 1rem; background: var(--bar); color: var(--bar-text);
+  }
+  .menu {
+    background: none; color: var(--bar-text); border: 1px solid currentColor; border-radius: 4px;
+    padding: 0.25rem 0.6rem; min-height: 2.25rem; cursor: pointer;
+  }
+  .name { font-weight: 700; color: var(--accent-strong); }
+  .find { display: flex; gap: 0.3rem; }
+  .find input {
+    min-height: 2.25rem; width: 14rem; padding: 0.2rem 0.5rem; border-radius: 4px;
+    border: 1px solid var(--bar-text); background: var(--bg); color: var(--text); font: inherit;
+  }
+  .find button {
+    min-height: 2.25rem; padding: 0 0.7rem; border-radius: 4px; border: 1px solid var(--bar-text);
+    background: none; color: var(--bar-text); font: inherit; cursor: pointer;
+  }
+  .spacer { flex: 1; }
+  .admin { color: var(--bar-text); }
+  @media print { .bar { display: none !important; } }
+  /* A phone keeps the Search button; the panel has the words field. */
+  @media (max-width: 760px) { .find input { display: none; } }
+</style>
