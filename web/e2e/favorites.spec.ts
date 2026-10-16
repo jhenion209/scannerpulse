@@ -49,6 +49,40 @@ test("a list without a name is not sent, and a refusal is in the server's words"
   await expect(editor.getByRole('alert')).toHaveText('Not saved: a list holds at most 500 talkgroups');
 });
 
+// A save is answered here, so a test that fails never changes the database.
+async function recordSaves(page: Page) {
+  const saves: string[] = [];
+  await page.route('**/api/admin/favorites/*', (route) => {
+    if (route.request().method() !== 'PUT') return route.continue();
+    saves.push(route.request().url());
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+  return saves;
+}
+
+test('Enter in the talkgroup search does not save the list', async ({ page }) => {
+  const saves = await recordSaves(page);
+  await signIn(page, '#favorites');
+  const editor = page.locator('form.editor').last();
+  await editor.getByLabel('Name').fill('Enter must not save');
+  await editor.getByLabel('Find a talkgroup').fill('Metro');
+  await editor.getByLabel('Find a talkgroup').press('Enter');
+  await page.waitForTimeout(500);
+  expect(saves).toEqual([]);
+  await expect(editor.getByLabel('Name')).toHaveValue('Enter must not save');
+});
+
+test('a new list is not saved over a list of the same name', async ({ page }) => {
+  const saves = await recordSaves(page);
+  await signIn(page, '#favorites');
+  const editor = page.locator('form.editor').last();
+  await editor.getByLabel('Name').fill('Fire and ambulance');
+  await editor.getByRole('checkbox', { name: /Metro Fire Dispatch/ }).check();
+  await editor.getByRole('button', { name: 'Add the list' }).click();
+  await expect(editor.getByRole('alert')).toHaveText('Not saved: A list named Fire and ambulance exists: use its Edit button.');
+  expect(saves).toEqual([]);
+});
+
 test('the viewers are the pages open on the calls, with the admin who opened one', async ({ page }) => {
   await signIn(page);
   const main = await page.context().newPage();

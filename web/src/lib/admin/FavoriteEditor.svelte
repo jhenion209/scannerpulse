@@ -3,13 +3,15 @@
   import { matchGroups, toggle } from '../talkgroups';
   import { why } from './session.svelte';
 
-  let { id, name = null, chosen = [], groups, onsave, oncancel }: {
+  let { id, name = null, chosen = [], groups, taken = [], onsave, oncancel }: {
     /** Makes the fields' ids unique on the page. */
     id: string;
     /** The list's name; null for a new list, whose name is typed. */
     name?: string | null;
     chosen?: number[];
     groups: TalkgroupGroup[];
+    /** The names of the lists that exist: a new list may not take one (the server would replace that list). */
+    taken?: string[];
     /** Saves; throws the server's refusal, which the editor shows. */
     onsave: (name: string, talkgroups: number[]) => Promise<void>;
     oncancel?: () => void;
@@ -27,6 +29,7 @@
     event.preventDefault();
     const listName = name ?? typed.trim();
     refusal = listName ? null : 'Name the list first.';
+    if (name === null && taken.includes(listName)) refusal = `A list named ${listName} exists: use its Edit button.`;
     if (refusal || busy) return;
     busy = true;
     try {
@@ -50,7 +53,8 @@
   {/if}
   <fieldset>
     <legend>Talkgroups ({picked.length} chosen)</legend>
-    <input type="search" aria-label="Find a talkgroup" placeholder="Find a talkgroup" bind:value={search} />
+    <input type="search" aria-label="Find a talkgroup" placeholder="Find a talkgroup" bind:value={search}
+      onkeydown={(event) => { if (event.key === 'Enter') event.preventDefault(); }} />
     <div class="groups">
       {#each shown as group (group.system_id)}
         <div role="group" aria-label={group.system}>
