@@ -18,7 +18,7 @@ describe('the search panel in the address', () => {
 
 describe('what the panel asks the server', () => {
   it('searches every date when no date is given, with an exact count', () => {
-    const ask = searchAsk({ text: 'engine', talkgroup: null, system: null, from: '', to: '', size: 25 });
+    const ask = searchAsk({ text: 'engine', talkgroup: null, system: null, from: '', to: '', size: 25 }, 'UTC');
     expect(ask.filters.allDates).toBe(true);
     expect(ask.filters.talkgroups).toEqual([]);
     expect(ask.text).toBe('engine');
@@ -27,7 +27,8 @@ describe('what the panel asks the server', () => {
   });
 
   it('keeps a range when one is given, and a talkgroup or system when chosen', () => {
-    const ask = searchAsk({ text: '', talkgroup: 4, system: 2, from: '2031-07-01T08:00', to: '', size: 25 });
+    const ask = searchAsk({ text: '', talkgroup: 4, system: 2, from: '2031-07-01T08:00', to: '', size: 25 }, 'Asia/Tokyo');
     expect(ask.filters).toMatchObject({ talkgroups: [4], system: 2, from: '2031-07-01T08:00', to: null, allDates: false });
+    expect(ask.zone).toBe('Asia/Tokyo');
   });
 });

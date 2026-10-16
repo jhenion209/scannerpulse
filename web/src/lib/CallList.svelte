@@ -5,6 +5,7 @@
   import { callTime, lengthPercent, seconds } from './format';
   import RowActions from './RowActions.svelte';
   import { pageState } from './selection';
+  import { siteZone } from './status.svelte';
 
   let {
     calls,
@@ -85,17 +86,17 @@
       >
         {#if selecting}
           <td class="c-select">
-            <input type="checkbox" aria-label={`Select ${talkgroup(call)} at ${callTime(call.started_at, now)}`}
+            <input type="checkbox" aria-label={`Select ${talkgroup(call)} at ${callTime(call.started_at, now, siteZone())}`}
               checked={chosen.includes(call.id)} onchange={() => onchoose(call.id)} />
           </td>
         {/if}
         <td class="c-play">
           <button type="button" class="play" onclick={() => onplay(call)}
-            aria-label={`Play ${talkgroup(call)} at ${callTime(call.started_at, now)}${isPlayed ? ' (played)' : ''}`}>{isPlayed ? '✓' : '▶'}</button>
+            aria-label={`Play ${talkgroup(call)} at ${callTime(call.started_at, now, siteZone())}${isPlayed ? ' (played)' : ''}`}>{isPlayed ? '✓' : '▶'}</button>
         </td>
         {#each shown as column (column.id)}
           {#if column.id === 'time'}
-            {@const when = callTime(call.started_at, now)}
+            {@const when = callTime(call.started_at, now, siteZone())}
             {@const gap = when.indexOf(' ')}
             <td class="c-time time">{#if gap < 0}{when}{:else}<span class="date">{when.slice(0, gap)}</span> {when.slice(gap + 1)}{/if}</td>
           {:else if column.id === 'talkgroup'}
@@ -122,7 +123,7 @@
           {/if}
         {/each}
         <td class="c-actions">
-          <RowActions label={`${talkgroup(call)} at ${callTime(call.started_at, now)}`}
+          <RowActions label={`${talkgroup(call)} at ${callTime(call.started_at, now, siteZone())}`}
             onedit={() => onedit(call)} ondownload={() => ondownload(call)} onshare={() => onshare(call)} />
         </td>
         {#if labels.length}

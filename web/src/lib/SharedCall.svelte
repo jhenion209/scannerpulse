@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { CallDetail } from './api';
-  import { seconds, source } from './format';
+  import { callTime, seconds, source } from './format';
+  import { siteZone } from './status.svelte';
 
   let { call, error, onplay, onclose }: {
     call: CallDetail | null;
@@ -9,8 +10,8 @@
     onclose: () => void;
   } = $props();
 
-  const when = (startedAt: string) =>
-    new Date(startedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+  // Measured against the epoch, the time always carries its date.
+  const when = (startedAt: string) => callTime(startedAt, new Date(0), siteZone());
 </script>
 
 <section class="shared" aria-labelledby="shared-title">

@@ -5,6 +5,7 @@
 
 import type { Call } from './api';
 import { COLUMNS, extraText, isExtra, type ColumnId } from './columns';
+import { zoned } from './format';
 
 /** What a file's name needs of a call. */
 export interface NamePart {
@@ -16,23 +17,6 @@ export interface NamePart {
 /** The most talkgroups a name lists, and its longest length in bytes (the server's values). */
 const NAME_TALKGROUPS = 5;
 const NAME_BYTES = 200;
-
-/** The date and time in `zone` as numbers; a zone the browser does not know is UTC. */
-function zoned(at: Date, zone: string) {
-  const format = (timeZone: string) =>
-    new Intl.DateTimeFormat('en-US', {
-      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-    }).formatToParts(at);
-  let parts: Intl.DateTimeFormatPart[];
-  try {
-    parts = format(zone);
-  } catch {
-    parts = format('UTC');
-  }
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
-  return { date: `${get('year')}-${get('month')}-${get('day')}`, time: `${get('hour')}:${get('minute')}:${get('second')}` };
-}
 
 const stamp = (at: Date, zone: string) => {
   const { date, time } = zoned(at, zone);

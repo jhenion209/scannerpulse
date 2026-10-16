@@ -15,8 +15,9 @@ export interface SearchFields {
 }
 
 /** The panel's request: its own words and filters, every date when no date
- * is given (never the list's rolling 24 hours), and an exact count. */
-export function searchAsk(fields: SearchFields): Ask {
+ * is given (never the list's rolling 24 hours), and an exact count; the
+ * dates are read in the site's `zone`. */
+export function searchAsk(fields: SearchFields, zone: string): Ask {
   return {
     filters: {
       ...NO_FILTERS,
@@ -30,6 +31,7 @@ export function searchAsk(fields: SearchFields): Ask {
     size: fields.size,
     text: fields.text,
     exact: true,
+    zone,
   };
 }
 

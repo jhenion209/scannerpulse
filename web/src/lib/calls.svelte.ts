@@ -11,6 +11,8 @@ export interface Ask {
   text?: string;
   /** Count every match on a new read, not up to the server's cap. */
   exact?: boolean;
+  /** The site's time zone, in which the date-times are read. */
+  zone: string;
 }
 
 export type View = {
@@ -26,7 +28,7 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 
 /** The request for one page of `ask`. */
 export function queryOf(ask: Ask, after: string | null, count: boolean): URLSearchParams {
-  const query = listQuery(ask.filters, ask.favorites, { size: ask.size, after, count }, new Date());
+  const query = listQuery(ask.filters, ask.favorites, { size: ask.size, after, count }, new Date(), ask.zone);
   if (ask.text?.trim()) query.set('q', ask.text.trim());
   if (ask.exact && count) query.set('exact', 'true');
   return query;

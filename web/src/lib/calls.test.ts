@@ -42,7 +42,7 @@ const body = (ids: number[], next: string | null, total: number | null) => ({
   calls: ids.map(call), next, total, total_capped: false,
 });
 
-const ask = { filters: { ...NO_FILTERS, allDates: true }, favorites: [], size: 10 };
+const ask = { filters: { ...NO_FILTERS, allDates: true }, favorites: [], size: 10, zone: 'UTC' };
 
 afterEach(() => vi.unstubAllGlobals());
 

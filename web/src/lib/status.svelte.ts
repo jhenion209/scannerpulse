@@ -42,3 +42,6 @@ export function noteCall(startedAt: string) {
 
 /** The server's time now. */
 export const serverNow = () => new Date(status.now + status.offset);
+
+/** The site's time zone; until the status is read, this browser's own. */
+export const siteZone = () => status.data?.time_zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;

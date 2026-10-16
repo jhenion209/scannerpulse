@@ -3,6 +3,7 @@
 
 import type { Call } from './api';
 import type { Filters } from './filters';
+import { zonedInstant } from './format';
 
 export type LiveEvent =
   | { type: 'call'; call: Call }
@@ -10,10 +11,11 @@ export type LiveEvent =
   | { type: 'resync' };
 
 /** New calls join only the first page, while not paused, when the range
- * asked for has not ended. "All dates" counts as paused. */
-export function liveApplies(filters: Filters, pageIndex: number, paused: boolean, now: Date): boolean {
+ * asked for (in the site's `zone`) has not ended. "All dates" counts as paused. */
+export function liveApplies(filters: Filters, pageIndex: number, paused: boolean, now: Date, zone: string): boolean {
   if (pageIndex !== 0 || paused || filters.allDates) return false;
-  return !filters.to || new Date(filters.to).getTime() > now.getTime();
+  const to = filters.to === null ? null : zonedInstant(filters.to, zone);
+  return to === null || to.getTime() > now.getTime();
 }
 
 /** The server keeps the talkgroups; the system is the page's to check. */

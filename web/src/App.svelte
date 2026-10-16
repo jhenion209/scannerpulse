@@ -25,7 +25,7 @@
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
   import { loadPrefs, resetPref, savePref } from './lib/prefs';
-  import { noteCall, startStatus, status } from './lib/status.svelte';
+  import { noteCall, siteZone, startStatus } from './lib/status.svelte';
   import TopBar from './lib/TopBar.svelte';
 
   const prefs = $state(loadPrefs());
@@ -73,13 +73,16 @@
     }
   });
 
-  const ask = () => ({ filters, favorites: choices.favorites, size: prefs.pageSize });
+  const ask = () => ({ filters, favorites: choices.favorites, size: prefs.pageSize, zone: siteZone() });
 
   // A new filter or page size reads the first page again. The favorites are
   // read again every 5 minutes: only a change in the talkgroups they ask for
-  // counts, or the list would jump back to page 1 on the timer.
+  // counts, or the list would jump back to page 1 on the timer. Typed dates
+  // are the site's: the site's zone arriving after the first read (it comes
+  // with the status) reads them again.
+  const datesTyped = $derived(!filters.allDates && (filters.from !== null || filters.to !== null));
   const listKey = $derived(
-    `${filtersToSearch(filters)}|${talkgroupsAskedFor(filters, choices.favorites)}|${prefs.pageSize}`,
+    `${filtersToSearch(filters)}|${talkgroupsAskedFor(filters, choices.favorites)}|${prefs.pageSize}|${datesTyped ? siteZone() : ''}`,
   );
   let listEl: HTMLElement;
   let lastId: number | null = null;
@@ -172,7 +175,7 @@
     // A system that cannot be named yet (choices unread, or an unknown id)
     // would let every system's calls in.
     if (filters.system !== null && systemName() === null) return;
-    if (!liveApplies(filters, view.paging.index, paused, new Date())) return;
+    if (!liveApplies(filters, view.paging.index, paused, new Date(), siteZone())) return;
     if (!wanted(event.call, asked(), systemName())) return;
     if (filters.smart) return readAgain(event.call);
     const rows = addCall(view.calls, event.call, prefs.pageSize);
@@ -256,8 +259,7 @@
 
   // Export: the menu builds the files; printing the chosen calls hides the others.
   let printChosen = $state(false);
-  const zone = () => status.data?.time_zone ?? 'UTC';
-  const listParams = () => listQuery(filters, choices.favorites, { size: prefs.pageSize }, new Date());
+  const listParams = () => listQuery(filters, choices.favorites, { size: prefs.pageSize }, new Date(), siteZone());
 
   // The actions on one call: editing needs the dialog; download and share
   // are in callActions.
@@ -316,7 +318,7 @@
       oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go}
       bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length}>
       {#snippet extra()}
-        <ExportMenu calls={view.calls} {selecting} {chosen} {columns} zone={zone()} params={listParams}
+        <ExportMenu calls={view.calls} {selecting} {chosen} {columns} zone={siteZone()} params={listParams}
           bind:printChosen />
       {/snippet}
     </Pager>

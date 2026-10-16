@@ -48,14 +48,14 @@ describe('filters in the URL', () => {
 
 describe('the request', () => {
   it('asks for the rolling last 24 hours by default', () => {
-    const query = listQuery(NO_FILTERS, favorites, { size: 100 }, now);
+    const query = listQuery(NO_FILTERS, favorites, { size: 100 }, now, 'UTC');
     expect(query.get('from')).toBe('2031-02-28T12:00:00.000Z');
     expect(query.has('until')).toBe(false);
     expect(query.get('size')).toBe('100');
   });
 
   it('asks for every date when all dates is on', () => {
-    const query = listQuery({ ...NO_FILTERS, allDates: true }, favorites, { size: 50 }, now);
+    const query = listQuery({ ...NO_FILTERS, allDates: true }, favorites, { size: 50 }, now, 'UTC');
     expect(query.has('from')).toBe(false);
   });
 
@@ -66,24 +66,30 @@ describe('the request', () => {
   });
 
   it('carries the cursor and skips the count on a page turn', () => {
-    const query = listQuery(NO_FILTERS, favorites, { size: 25, after: 'abc', count: false }, now);
+    const query = listQuery(NO_FILTERS, favorites, { size: 25, after: 'abc', count: false }, now, 'UTC');
     expect(query.get('after')).toBe('abc');
     expect(query.get('count')).toBe('false');
   });
 
   it('asks the server for SmartSort; the page never sorts', () => {
-    const query = listQuery({ ...NO_FILTERS, smart: true }, favorites, { size: 25 }, now);
+    const query = listQuery({ ...NO_FILTERS, smart: true }, favorites, { size: 25 }, now, 'UTC');
     expect(query.get('smart')).toBe('true');
   });
 
   it('falls back to the rolling window when no date given to it is real', () => {
-    const query = listQuery({ ...NO_FILTERS, from: '2031-13-45T99:99' }, favorites, { size: 25 }, now);
+    const query = listQuery({ ...NO_FILTERS, from: '2031-13-45T99:99' }, favorites, { size: 25 }, now, 'UTC');
     expect(query.get('from')).toBe('2031-02-28T12:00:00.000Z');
     expect(query.has('until')).toBe(false);
   });
 
+  it("reads a typed date-time in the site's zone, whatever the browser's", () => {
+    const query = listQuery({ ...NO_FILTERS, from: '2031-07-01T08:00', to: '2031-07-01T09:30' }, favorites, { size: 25 }, now, 'Asia/Tokyo');
+    expect(query.get('from')).toBe('2031-06-30T23:00:00.000Z');
+    expect(query.get('until')).toBe('2031-07-01T00:30:00.000Z');
+  });
+
   it('keeps the real bound when only one of the dates is real', () => {
-    const query = listQuery({ ...NO_FILTERS, from: '2031-02-28T08:00', to: '2031-13-45T99:99' }, favorites, { size: 25 }, now);
+    const query = listQuery({ ...NO_FILTERS, from: '2031-02-28T08:00', to: '2031-13-45T99:99' }, favorites, { size: 25 }, now, 'UTC');
     expect(query.has('from')).toBe(true);
     expect(query.has('until')).toBe(false);
   });
@@ -101,7 +107,7 @@ describe('a favorite that gives no talkgroups', () => {
   });
 
   it('asks for no talkgroup rather than every one', () => {
-    const query = listQuery({ ...NO_FILTERS, favorite: 99 }, favorites, { size: 25 }, now);
+    const query = listQuery({ ...NO_FILTERS, favorite: 99 }, favorites, { size: 25 }, now, 'UTC');
     expect(query.get('talkgroups')).toBe('0');
   });
 });

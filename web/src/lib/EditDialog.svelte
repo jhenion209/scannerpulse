@@ -2,6 +2,7 @@
   import { MAX_TEXT, textProblem } from './actions';
   import { saveTranscript, type Call } from './api';
   import { callTime } from './format';
+  import { siteZone } from './status.svelte';
 
   let { call, onclose, onsaved }: {
     /** The call being edited; null when the dialog is closed. */
@@ -46,7 +47,7 @@
     <h2 id="edit-title">Edit the text</h2>
     {#if call}
       <!-- Measured against the epoch, the time always carries its date. -->
-      <p class="about">{call.talkgroup_name ?? call.talkgroup} · {callTime(call.started_at, new Date(0))}</p>
+      <p class="about">{call.talkgroup_name ?? call.talkgroup} · {callTime(call.started_at, new Date(0), siteZone())}</p>
     {/if}
     <label for="edit-text">Text</label>
     <textarea id="edit-text" bind:value={text} rows="7" maxlength={MAX_TEXT} aria-describedby="edit-count"></textarea>

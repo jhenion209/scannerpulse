@@ -1,12 +1,15 @@
 // What the listener filters the list by, as the page's URL holds it, and the
 // request it makes. The default is a rolling window: the last 24 hours,
-// worked out at each request, never written into the URL.
+// worked out at each request, never written into the URL. The dates are the
+// site's: a date-time is read in its time zone, whatever the browser's.
+
+import { zonedInstant } from './format';
 
 export interface Filters {
   favorite: number | null;
   talkgroups: number[];
   system: number | null;
-  /** Local date-times as `YYYY-MM-DDTHH:MM`, from the date pickers. */
+  /** The site's date-times as `YYYY-MM-DDTHH:MM`, from the date pickers. */
   from: string | null;
   to: string | null;
   allDates: boolean;
@@ -34,18 +37,7 @@ const id = (text: string | null): number | null => {
 
 /** A local date-time that names a real day and time; anything else is null. */
 const localTime = (text: string | null): string | null =>
-  text !== null &&
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text) &&
-  !Number.isNaN(new Date(text).getTime())
-    ? text
-    : null;
-
-/** The instant a date-time names, or null when it names none. */
-const instant = (text: string | null): Date | null => {
-  if (text === null) return null;
-  const when = new Date(text);
-  return Number.isNaN(when.getTime()) ? null : when;
-};
+  text !== null && zonedInstant(text, 'UTC') !== null ? text : null;
 
 /** The filters a URL's query holds; anything malformed is left out. */
 export function parseFilters(search: string): Filters {
@@ -116,12 +108,14 @@ export function favoriteUnresolved(
   return filters.favorite !== null && talkgroupsAskedFor(filters, favorites).length === 0;
 }
 
-/** The `/api/calls` query for the filters, at the instant `now`. */
+/** The `/api/calls` query for the filters, at the instant `now`, with the
+ * date-times read in the site's `zone`. */
 export function listQuery(
   filters: Filters,
   favorites: { id: number; talkgroups: number[] }[],
   page: PageAsk,
   now: Date,
+  zone: string,
 ): URLSearchParams {
   const params = new URLSearchParams();
   const talkgroups = talkgroupsAskedFor(filters, favorites);
@@ -132,8 +126,8 @@ export function listQuery(
   else if (talkgroups.length) params.set('talkgroups', talkgroups.join(','));
   if (filters.system !== null) params.set('system', String(filters.system));
   if (!filters.allDates) {
-    const from = instant(filters.from);
-    const to = instant(filters.to);
+    const from = filters.from === null ? null : zonedInstant(filters.from, zone);
+    const to = filters.to === null ? null : zonedInstant(filters.to, zone);
     if (from || to) {
       if (from) params.set('from', from.toISOString());
       if (to) params.set('until', to.toISOString());

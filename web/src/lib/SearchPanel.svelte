@@ -13,6 +13,7 @@
   import { player } from './playing.svelte';
   import { PAGE_SIZES } from './prefs';
   import { searchAsk, type SearchFields } from './search';
+  import { siteZone } from './status.svelte';
 
   let {
     open = $bindable(),
@@ -45,7 +46,7 @@
   let audio: HTMLAudioElement;
   let opener: Element | null = null;
 
-  const ask = () => searchAsk(fields);
+  const ask = () => searchAsk(fields, siteZone());
   const count = $derived(results.view.total === null || !searched ? null : pageCount(results.view.total, results.view.capped, searched.size));
   const hasNext = $derived(results.view.paging.cursors.length > results.view.paging.index + 1);
 
@@ -210,7 +211,7 @@
     <audio bind:this={audio} controls preload="none" aria-label="Search result player"
       onplay={() => (player.held = true)} onended={stop} onerror={failed}></audio>
     <p class="now" aria-live="polite">
-      {#if playing}<b>{playing.talkgroup_name ?? playing.talkgroup}</b> {callTime(playing.started_at, new Date(0))}{:else}No result playing{/if}
+      {#if playing}<b>{playing.talkgroup_name ?? playing.talkgroup}</b> {callTime(playing.started_at, new Date(0), siteZone())}{:else}No result playing{/if}
     </p>
   </div>
 </dialog>

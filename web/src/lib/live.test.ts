@@ -12,12 +12,18 @@ const now = new Date('2026-10-15T12:00:00Z');
 
 describe('when new calls join the list', () => {
   it('only on the first page, unpaused, with no range that has ended', () => {
-    expect(liveApplies(NO_FILTERS, 0, false, now)).toBe(true);
-    expect(liveApplies(NO_FILTERS, 1, false, now)).toBe(false);
-    expect(liveApplies(NO_FILTERS, 0, true, now)).toBe(false);
-    expect(liveApplies({ ...NO_FILTERS, allDates: true }, 0, false, now)).toBe(false);
-    expect(liveApplies({ ...NO_FILTERS, to: '2026-10-14T10:00' }, 0, false, now)).toBe(false);
-    expect(liveApplies({ ...NO_FILTERS, to: '2026-10-16T10:00' }, 0, false, now)).toBe(true);
+    expect(liveApplies(NO_FILTERS, 0, false, now, 'UTC')).toBe(true);
+    expect(liveApplies(NO_FILTERS, 1, false, now, 'UTC')).toBe(false);
+    expect(liveApplies(NO_FILTERS, 0, true, now, 'UTC')).toBe(false);
+    expect(liveApplies({ ...NO_FILTERS, allDates: true }, 0, false, now, 'UTC')).toBe(false);
+    expect(liveApplies({ ...NO_FILTERS, to: '2026-10-14T10:00' }, 0, false, now, 'UTC')).toBe(false);
+    expect(liveApplies({ ...NO_FILTERS, to: '2026-10-16T10:00' }, 0, false, now, 'UTC')).toBe(true);
+  });
+
+  it("reads the range's end in the site's zone", () => {
+    // 20:30 on the 15th in Tokyo is 11:30 UTC: before now (12:00 UTC).
+    expect(liveApplies({ ...NO_FILTERS, to: '2026-10-15T20:30' }, 0, false, now, 'Asia/Tokyo')).toBe(false);
+    expect(liveApplies({ ...NO_FILTERS, to: '2026-10-15T20:30' }, 0, false, now, 'UTC')).toBe(true);
   });
 });
 

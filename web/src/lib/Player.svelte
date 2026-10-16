@@ -1,6 +1,7 @@
 <script lang="ts">
   import { view } from './calls.svelte';
   import { callTime, source } from './format';
+  import { siteZone } from './status.svelte';
   import { afterEnd, afterFailure, navKey, step } from './playback';
   import { failed, play, player, stepTo } from './playing.svelte';
 
@@ -82,7 +83,7 @@
   <p class="now" aria-live="polite">
     {#if player.call}
       <b>{player.call.talkgroup_name ?? player.call.talkgroup}</b>
-      {callTime(player.call.started_at, new Date())}
+      {callTime(player.call.started_at, new Date(), siteZone())}
       {source(player.call)}
       {#if failed.has(player.call.id)}<span class="failed">could not be played</span>{/if}
     {:else}
