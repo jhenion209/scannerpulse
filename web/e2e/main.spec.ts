@@ -944,3 +944,21 @@ test('an open search panel is left out of a printout', async ({ page }) => {
   await page.emulateMedia({ media: 'screen' });
   await expect(panel(page)).toBeVisible();
 });
+
+test('the first Tab offers to skip to the calls', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.keyboard.press('Tab');
+  const skip = page.getByRole('link', { name: 'Skip to the calls' });
+  await expect(skip).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(rows(page).first().locator('td.c-play button')).toBeFocused();
+});
+
+test('a link to a favorite list that is gone says so, and offers every talkgroup', async ({ page }) => {
+  await page.goto('/?favorite=999999');
+  await expect(page.getByRole('alert').filter({ hasText: 'no longer exists' })).toBeVisible();
+  await expect(rows(page)).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show every talkgroup' }).click();
+  await expect(rows(page)).toHaveCount(30);
+});

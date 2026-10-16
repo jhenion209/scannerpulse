@@ -14,6 +14,8 @@
   // The largest the queue was seen at since the area opened: the bar's 0 %.
   let largest = $state(0);
   const share = $derived(data ? drained(largest, data.queue) : null);
+  // Whole per cent, rounded down: 100 % only once no call waits.
+  const percent = $derived(share === null ? 0 : Math.floor(share * 100));
 
   async function read() {
     try {
@@ -85,13 +87,13 @@
   <h2>Transcription queue</h2>
   {#if data}
     <p>
-      {data.queue.toLocaleString('en-US')} {data.queue === 1 ? 'call' : 'calls'} waiting{#if data.queue && data.eta_seconds !== null},
+      {data.queue.toLocaleString('en-US')} {data.queue === 1 ? 'call' : 'calls'} waiting{#if data.maintenance}; paused by maintenance{:else if data.queue && data.eta_seconds !== null},
         done in {etaText(data.eta_seconds)}{/if}{#if !data.transcription}; transcription is off{/if}.
     </p>
     {#if share !== null}
       <label for="drain">Drained since {largest.toLocaleString('en-US')} were waiting</label>
-      <progress id="drain" max="100" value={Math.round(share * 100)}>{Math.round(share * 100)} %</progress>
-      <span>{Math.round(share * 100)} %</span>
+      <progress id="drain" max="100" value={percent}>{percent} %</progress>
+      <span>{percent} %</span>
     {/if}
   {/if}
 </section>

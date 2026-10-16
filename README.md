@@ -102,9 +102,9 @@ listen.
     `since`, the last call a reconnecting page saw);
   - `POST /api/auth/login` (`login`, `password`) signs an admin in: the
     session is a cookie (`HttpOnly`, `Secure`, `SameSite=Lax`) that ends 12
-    hours after the last request and at most 7 days after signing in (a read
-    that carries `X-ScannerPulse-Poll: 1`, as the admin page's timed reads do,
-    does not count as a request for that limit), and
+    hours after the last request and at most 7 days after signing in (an
+    admin route's read that carries `X-ScannerPulse-Poll: 1`, as the admin
+    page's timed reads do, does not count as a request for that limit), and
     every admin change must carry the session's CSRF token in an
     `X-CSRF-Token` header (`/api/auth/me` gives it). Five failed sign-ins for
     one name, or from one address, within 15 minutes lock that name or that

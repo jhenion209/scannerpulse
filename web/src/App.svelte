@@ -88,6 +88,11 @@
   let lastId: number | null = null;
   let stopFeed: (() => void) | null = null;
   const asked = () => talkgroupsAskedFor(filters, choices.favorites);
+  // A favorite the lists no longer hold: the list stays empty (it never widens
+  // to every talkgroup), and says why.
+  const favoriteGone = $derived(
+    filters.favorite !== null && choices.favoritesRead && !choices.favorites.some((f) => f.id === filters.favorite),
+  );
   const systemName = () => choices.filters.systems.find((s) => s.id === filters.system)?.name ?? null;
 
   // The feed opens after the first page is read, saying the newest call on
@@ -311,7 +316,7 @@
   <aside class="rail" id="filters" aria-label="Filters">
     <FilterRail bind:filters bind:paused choices={choices.filters} favorites={choices.favorites} />
   </aside>
-  <main class="list" aria-label="Calls" aria-busy={view.loading} bind:this={listEl}>
+  <main class="list" id="calls" aria-label="Calls" aria-busy={view.loading} bind:this={listEl}>
     <Pager index={view.paging.index} hasNext={view.paging.cursors.length > view.paging.index + 1}
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} {columns} customised={prefs.columns !== null}
@@ -326,6 +331,12 @@
       <SharedCall call={shared.call} error={shared.error} onplay={(call) => play(call)} onclose={closeShared} />
     {/if}
     {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
+    {#if favoriteGone}
+      <p class="error" role="alert">
+        The favorite list this page was opened with no longer exists.
+        <button type="button" class="link" onclick={() => (filters = { ...filters, favorite: null })}>Show every talkgroup</button>
+      </p>
+    {/if}
     {#if view.error}<p class="error" role="alert">{view.error}</p>{/if}
     {#if !view.loading && !view.error && view.calls.length === 0}
       <p class="empty">No calls match these filters{filters.allDates || filters.from || filters.to ? '' : ' in the last 24 hours'}.</p>
@@ -355,6 +366,7 @@
   .error { margin: 0.9rem 0.9rem 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
   .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; }
   .empty { margin: 1rem; color: var(--muted); }
+  .error .link { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
   /* A line over the top of the list's cell, in front of the search panel. It
      takes no room, so no row moves when it shows, and lets clicks through. */
   .notice {

@@ -82,6 +82,25 @@ describe('an admin request', () => {
     expect(session.login).toBe('ann');
   });
 
+  it('reads the session again and tries once more when a change is refused for its token', async () => {
+    fetched
+      .mockResolvedValueOnce(answer(403, { error: 'forbidden', detail: "a change needs the session's x-csrf-token header" }))
+      .mockResolvedValueOnce(answer(200, { login: 'bob', csrf: 'new' }))
+      .mockResolvedValueOnce(answer(204));
+    await admin('PUT', '/api/admin/settings/web.system_order', { value: ['B'] });
+    expect(sent(1).path).toBe('/api/auth/me');
+    expect(sent(2).headers['x-csrf-token']).toBe('new');
+    expect(session).toMatchObject({ login: 'bob', csrf: 'new' });
+  });
+
+  it('gives a refusal that is not about the token in the server words, without trying again', async () => {
+    fetched
+      .mockResolvedValueOnce(answer(403, { error: 'forbidden', detail: 'password sign-in is off' }))
+      .mockResolvedValueOnce(answer(200, { login: 'ann', csrf: 'tok' }));
+    await expect(admin('POST', '/api/admin/rescan')).rejects.toThrow('password sign-in is off');
+    expect(fetched).toHaveBeenCalledTimes(2);
+  });
+
   it('brings the sign-in form back when the session has ended', async () => {
     fetched.mockResolvedValueOnce(answer(401, { error: 'unauthorized', detail: 'sign in as an admin first' }));
     await expect(admin('GET', '/api/admin/status')).rejects.toThrow('sign in as an admin first');

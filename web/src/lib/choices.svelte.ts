@@ -4,9 +4,11 @@ import { fetchFavorites, fetchFilterChoices, type Favorite, type FilterChoices }
  * server, so never on each interaction. */
 export const CHOICES_REFRESH_MS = 5 * 60_000;
 
-export const choices = $state<{ filters: FilterChoices; favorites: Favorite[]; error: string | null }>({
+export const choices = $state<{ filters: FilterChoices; favorites: Favorite[]; favoritesRead: boolean; error: string | null }>({
   filters: { talkgroup_groups: [], systems: [], sites: [] },
   favorites: [],
+  /** The favorite lists have been read once: an unknown one is then gone, not late. */
+  favoritesRead: false,
   error: null,
 });
 
@@ -20,7 +22,10 @@ async function refresh(again = true) {
   // choices in place, and the other way round.
   const [filters, favorites] = await Promise.allSettled([fetchFilterChoices(), fetchFavorites()]);
   if (filters.status === 'fulfilled') choices.filters = filters.value;
-  if (favorites.status === 'fulfilled') choices.favorites = favorites.value;
+  if (favorites.status === 'fulfilled') {
+    choices.favorites = favorites.value;
+    choices.favoritesRead = true;
+  }
   const failed = [filters, favorites].find((r) => r.status === 'rejected');
   if (failed) {
     const error = failed.reason;

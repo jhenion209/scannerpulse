@@ -39,7 +39,7 @@
 
 <main class="signin">
   <h1>ScannerPulse · Admin</h1>
-  {#if session.ended}<p class="note" role="status">The session has ended. Sign in again.</p>{/if}
+  {#if session.ended}<p class="note" role="alert">The session has ended. Sign in again.</p>{/if}
   {#if methods?.password}
     <form onsubmit={submit} aria-label="Sign in">
       <label for="signin-login">Name</label>

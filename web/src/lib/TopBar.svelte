@@ -17,6 +17,18 @@
   // svelte-ignore state_referenced_locally
   let text = $state(words);
 
+  /** The skip link lands on the first call's play bar, or else the list's
+   * first control: the list itself takes no focus, so a click in it never
+   * moves the focus away from an open menu. */
+  function skip(event: MouseEvent) {
+    const target =
+      document.querySelector<HTMLElement>('#calls tbody button') ??
+      document.querySelector<HTMLElement>('#calls button, #calls input, #calls select');
+    if (!target) return;
+    event.preventDefault();
+    target.focus();
+  }
+
   function submit(event: SubmitEvent) {
     event.preventDefault();
     onsearch(text.trim());
@@ -24,6 +36,7 @@
 </script>
 
 <header class="bar">
+  <a class="skip" href="#calls" onclick={skip}>Skip to the calls</a>
   <button type="button" class="menu" onclick={ontoggle} aria-controls="filters" aria-expanded={railOpen}>
     Filters
   </button>
@@ -58,6 +71,9 @@
     background: none; color: var(--bar-text); font: inherit; cursor: pointer;
   }
   .spacer { flex: 1; }
+  /* Out of sight until the keyboard reaches it: the first stop of the page. */
+  .skip { position: absolute; left: -999px; top: 0.5rem; z-index: 40; padding: 0.4rem 0.7rem; border-radius: 4px; background: var(--bg); color: var(--accent); }
+  .skip:focus { left: 0.5rem; }
   .admin { color: var(--bar-text); }
   @media print { .bar { display: none !important; } }
   /* A phone keeps the Search button; the panel has the words field. */

@@ -84,7 +84,7 @@ test('a session that ends brings the sign-in form back', async ({ page }) => {
   await expect(page.getByText(/^Read at /)).toBeVisible();
   await page.route('**/api/admin/status', (route) => route.fulfill(refuse(401, 'sign in as an admin first')));
   await page.getByRole('button', { name: 'Read now' }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'The session has ended' })).toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'The session has ended' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
 });
 

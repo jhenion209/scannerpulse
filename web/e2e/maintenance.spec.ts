@@ -61,6 +61,19 @@ test('the queue shows how far it has drained, read every 15 seconds', async ({ p
   await page.clock.fastForward('00:15');
   await expect(page.getByText('50 calls waiting, done in about 3 min.')).toBeVisible();
   await expect(page.getByRole('progressbar', { name: 'Drained since 200 were waiting' })).toHaveAttribute('value', '75');
+  // Rounded down: 100 % only once no call waits.
+  queue = 1;
+  await page.clock.fastForward('00:15');
+  await expect(page.getByRole('progressbar', { name: 'Drained since 200 were waiting' })).toHaveAttribute('value', '99');
+});
+
+test('while maintenance is on, the queue says it is paused instead of when it ends', async ({ page }) => {
+  await page.route('**/api/status', async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), queue: 40, transcription: true, eta_seconds: 120, maintenance: true } });
+  });
+  await signIn(page, '#maintenance');
+  await expect(page.getByText('40 calls waiting; paused by maintenance.')).toBeVisible();
 });
 
 test('the side menu opens the area, and the address names it', async ({ page }) => {
