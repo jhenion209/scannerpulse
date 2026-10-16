@@ -141,7 +141,7 @@
   td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr.playing td { background: var(--playing); }
   tr.played td { color: var(--played); }
-  tr.selected td { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+  tr.selected td { background: color-mix(in srgb, var(--accent) 8%, var(--bg)); }
   .c-select input { width: 1.15rem; height: 1.15rem; margin: 0.4rem 0.1rem; }
   .play { background: none; border: 1px solid var(--line); border-radius: 50%; width: 2rem; height: 2rem; cursor: pointer; color: var(--accent); }
   .time, .len { white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -164,6 +164,11 @@
      hidden one leaves its place empty. */
   @media (max-width: 760px) {
     thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    /* While selecting, the heading row shows with the box for the whole
+       page alone; the other headings stay hidden. */
+    .selecting thead { position: static; width: auto; height: auto; overflow: visible; clip: auto; display: block; }
+    .selecting thead tr { grid-template-columns: auto; }
+    .selecting th:not(.c-select) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); padding: 0; }
     tbody, tr, td { display: block; }
     tr { display: grid; grid-template-columns: auto auto 1fr auto auto; align-items: center; border-bottom: 1px solid var(--line); }
     td { border: 0; padding: 0.2rem 0.4rem; }
