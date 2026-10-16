@@ -202,6 +202,20 @@ async fn a_person_s_text_is_never_replaced(pool: PgPool) -> sqlx::Result<()> {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_transcript_for_a_deleted_call_is_dropped_quietly(pool: PgPool) -> sqlx::Result<()> {
+    common::hold_lease(&pool, HOLDER).await;
+    let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;
+    sqlx::query("DELETE FROM calls WHERE id = $1")
+        .bind(call.0)
+        .execute(&pool)
+        .await?;
+    let mut conn = pool.acquire().await?;
+    let written = queue::write(&mut conn, HOLDER, call, "Engine 5", "model-x").await;
+    assert_eq!(written.unwrap(), Written::CallGone);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn without_the_lease_nothing_is_written(pool: PgPool) -> sqlx::Result<()> {
     common::hold_lease(&pool, "host-b 200-1900000000").await;
     let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;

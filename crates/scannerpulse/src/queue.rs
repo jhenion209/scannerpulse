@@ -73,6 +73,8 @@ pub enum Written {
     NoSpeech,
     /// A person's text was there already and stays.
     KeptHuman,
+    /// The call was deleted (a purge) while its request was in flight.
+    CallGone,
 }
 
 /// Writes the machine's `text` for `call` and takes the call out of the
@@ -87,11 +89,15 @@ pub async fn write(
 ) -> Result<Written, RecordError> {
     let mut tx = store::fenced(conn, holder).await?;
     // A person's save takes this lock first, so the two are taken in turn.
-    sqlx::query("SELECT 1 FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE")
+    let here = sqlx::query("SELECT 1 FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE")
         .bind(call.0)
         .bind(call.1)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+    if here.is_none() {
+        tx.rollback().await?;
+        return Ok(Written::CallGone);
+    }
     let origin: Option<String> = sqlx::query_scalar(
         "SELECT origin FROM transcripts WHERE call_id = $1 AND started_at = $2 FOR UPDATE",
     )

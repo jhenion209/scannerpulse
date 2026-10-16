@@ -263,6 +263,7 @@ impl Transcriber {
                 let write =
                     queue::write(&mut conn, &holder, (call, queued.started_at), &text, &model);
                 return match tokio::time::timeout(self.db_limit, write).await {
+                    Ok(Ok(Written::CallGone)) => Ok(Outcome::Gone(call)),
                     Ok(Ok(written)) => Ok(Outcome::Written(call, written)),
                     Ok(Err(RecordError::LeaseLost)) => Ok(Outcome::LeaseLost(call)),
                     Ok(Err(RecordError::Database(error))) => Err(error),
