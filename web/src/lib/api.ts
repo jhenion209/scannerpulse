@@ -40,6 +40,19 @@ export interface Favorite {
   talkgroups: number[];
 }
 
+/** `/api/status`: what the top bar's chips show. */
+export interface Status {
+  maintenance: boolean;
+  transcription: boolean;
+  queue: number;
+  eta_seconds: number | null;
+  calls: number;
+  calls_estimated: boolean;
+  newest_call: string | null;
+  server_time: string;
+  time_zone: string;
+}
+
 /** An answer of 400 or more: the server's `{error, detail}`. */
 export class ApiError extends Error {
   constructor(
@@ -64,3 +77,4 @@ export const fetchCalls = (query: URLSearchParams, signal?: AbortSignal) =>
   getJson<CallPage>(`/api/calls?${query}`, signal);
 export const fetchFilterChoices = () => getJson<FilterChoices>('/api/filters');
 export const fetchFavorites = () => getJson<Favorite[]>('/api/favorites');
+export const fetchStatus = () => getJson<Status>('/api/status');

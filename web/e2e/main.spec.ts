@@ -81,6 +81,8 @@ test('the player steps with N and P, stops at the edges and passes over a call t
   await page.goto('/');
   // The calls are 2 s long: without continuous play none moves on by itself.
   await page.getByLabel('Continuous').uncheck();
+  // The rows are read only once the list is there.
+  await expect(rows(page)).toHaveCount(30);
   const all = await ids(page);
   await rows(page).nth(2).getByRole('button', { name: /^Play/ }).click();
   await expect(playingRow(page)).toHaveAttribute('data-id', String(all[2]));
@@ -109,6 +111,7 @@ test('the player steps with N and P, stops at the edges and passes over a call t
 
 test('continuous play moves to the newer call when one ends', async ({ page }) => {
   await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
   const all = await ids(page);
   await rows(page).nth(4).getByRole('button', { name: /^Play/ }).click();
   await expect(playingRow(page)).toHaveAttribute('data-id', String(all[3]), { timeout: 10_000 });
@@ -305,3 +308,14 @@ for (const [theme, width] of [['light', 1280], ['dark', 360]] as const) {
     expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
   });
 }
+
+test('the top bar shows the status: the calls, the newest call\'s age and the server\'s time', async ({ page }) => {
+  await page.goto('/');
+  const chips = page.getByRole('list', { name: 'Status' });
+  await expect(chips).toContainText('35 calls');
+  await expect(chips).toContainText(/Newest call \d+ (s|min|h|d)/);
+  await expect(chips.locator('time')).toHaveText(/^\d\d:\d\d:\d\d \S+$/);
+  // The seed turns neither maintenance nor transcription on.
+  await expect(chips).not.toContainText('Maintenance');
+  await expect(chips).not.toContainText('Queue');
+});

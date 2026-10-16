@@ -15,6 +15,8 @@
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
   import { loadPrefs, resetPref, savePref } from './lib/prefs';
+  import { noteCall, startStatus } from './lib/status.svelte';
+  import StatusChips from './lib/StatusChips.svelte';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
 
   const prefs = $state(loadPrefs());
@@ -36,6 +38,7 @@
   const landingPage = () => (viewKey() === landingKey ? landing : 0);
 
   onMount(startChoices);
+  onMount(startStatus);
 
   $effect(() => {
     const search = filtersToSearch(filters, view.paging.index || landingPage());
@@ -144,6 +147,7 @@
       return;
     }
     lastId = newestId([event.call], lastId);
+    noteCall(event.call.started_at);
     if (favoriteUnresolved(filters, choices.favorites)) return;
     // A system that cannot be named yet (choices unread, or an unknown id)
     // would let every system's calls in.
@@ -212,6 +216,7 @@
     </button>
     <span class="name">ScannerPulse</span>
     <span class="spacer"></span>
+    <StatusChips />
     <ThemeSwitch bind:theme={prefs.theme} />
     <a class="admin" href="/admin">Admin</a>
   </header>
@@ -259,6 +264,7 @@
   .empty { margin: 1rem; color: var(--muted); }
   .player { grid-area: player; background: var(--bar); color: var(--bar-text); }
   @media (max-width: 760px) {
+    .bar { flex-wrap: wrap; row-gap: 0.4rem; }
     .shell, .shell.rail-closed { grid-template: 'bar' auto 'list' 1fr 'player' auto / 1fr; }
     .rail, .shell.rail-closed .rail { display: none; }
     .shell.menu-open .rail {
