@@ -1,5 +1,6 @@
 <script lang="ts">
   import ColumnMenu from './ColumnMenu.svelte';
+  import type { Snippet } from 'svelte';
   import type { ColumnId } from './columns';
   import { pageCount } from './paging';
   import { PAGE_SIZES } from './prefs';
@@ -13,6 +14,7 @@
     showAll = $bindable(),
     selecting = $bindable(false),
     chosenCount = 0,
+    extra,
     columns,
     customised,
     oncolumns,
@@ -27,6 +29,8 @@
     showAll: boolean;
     selecting?: boolean;
     chosenCount?: number;
+    /** More controls for the bar (the Export menu). */
+    extra?: Snippet;
     columns: ColumnId[];
     customised: boolean;
     oncolumns: (columns: ColumnId[]) => void;
@@ -65,6 +69,7 @@
   <label><input type="checkbox" class="check" bind:checked={showAll} /> Show all text</label>
   <button type="button" class="select" aria-pressed={selecting} onclick={() => (selecting = !selecting)}>Select calls</button>
   {#if selecting}<span class="chosen" aria-live="polite">{chosenCount} selected</span>{/if}
+  {@render extra?.()}
   <ColumnMenu {columns} {customised} onchange={oncolumns} onreset={onresetcolumns} />
   <label class="size">
     Rows

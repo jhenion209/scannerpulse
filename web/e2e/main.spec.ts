@@ -1,4 +1,5 @@
 import AxeBuilder from '@axe-core/playwright';
+import { readFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 
 // Against e2e/seed.sql: calls 1 to 30 in the last 90 minutes (call 1 the
@@ -451,25 +452,25 @@ test('selection mode ticks calls of this page only, and holds new calls back whi
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-pressed', 'true');
   await expect(pause).toBeChecked();
-  await expect(page.getByText('0 selected')).toBeVisible();
+  await expect(page.locator('nav.pager .chosen')).toHaveText('0 selected');
   const boxes = page.locator('tbody td.c-select input');
   await expect(boxes).toHaveCount(10);
   await boxes.nth(0).check();
   await boxes.nth(2).check();
-  await expect(page.getByText('2 selected')).toBeVisible();
+  await expect(page.locator('nav.pager .chosen')).toHaveText('2 selected');
   const all = page.getByLabel('Select every call on this page');
   expect(await all.evaluate((box: HTMLInputElement) => box.indeterminate)).toBe(true);
   await all.check();
-  await expect(page.getByText('10 selected')).toBeVisible();
+  await expect(page.locator('nav.pager .chosen')).toHaveText('10 selected');
   await all.uncheck();
-  await expect(page.getByText('0 selected')).toBeVisible();
+  await expect(page.locator('nav.pager .chosen')).toHaveText('0 selected');
   // Another page starts with nothing chosen.
   await boxes.nth(1).check();
-  await expect(page.getByText('1 selected')).toBeVisible();
+  await expect(page.locator('nav.pager .chosen')).toHaveText('1 selected');
   const first = await ids(page);
   await page.getByRole('button', { name: 'Next' }).click();
   await expect.poll(() => ids(page)).not.toEqual(first);
-  await expect(page.getByText('0 selected')).toBeVisible();
+  await expect(page.locator('nav.pager .chosen')).toHaveText('0 selected');
   // Leaving selection puts Pause back as it was.
   await toggle.click();
   await expect(boxes).toHaveCount(0);
@@ -483,4 +484,89 @@ test('on a phone, selection mode fits the screen', async ({ page }) => {
   await page.getByRole('button', { name: 'Select calls' }).click();
   await expect(page.locator('tbody td.c-select input')).toHaveCount(30);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+});
+
+const exportMenu = (page: Page) => page.locator('details.export');
+const exportFile = async (page: Page, item: RegExp) => {
+  await exportMenu(page).locator('summary').click();
+  const [file] = await Promise.all([page.waitForEvent('download'), exportMenu(page).getByRole('button', { name: item }).click()]);
+  return file;
+};
+const NAME = /^\d{8}_\d{6}-\d{8}_\d{6}_ScannerPulse_TG-[^/]+\.(xlsx|csv|mp3)$/;
+
+test('Excel covers every match, built on the server, under the export name', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  const file = await exportFile(page, /^Excel/);
+  expect(file.suggestedFilename()).toMatch(NAME);
+  expect(file.suggestedFilename().endsWith('.xlsx')).toBe(true);
+  // An .xlsx is a zip.
+  expect(readFileSync(await file.path()).subarray(0, 2).toString()).toBe('PK');
+});
+
+test('CSV covers the page, or the chosen calls, with the text as it is', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  const file = await exportFile(page, /^CSV — this page/);
+  expect(file.suggestedFilename()).toMatch(NAME);
+  const lines = readFileSync(await file.path(), 'utf8').split('\r\n').filter(Boolean);
+  expect(lines[0]).toBe('\uFEFFDate,Time,Talkgroup,Site,Source,Length (s),Text');
+  expect(lines).toHaveLength(31);
+  expect(lines.some((l) => l.endsWith(',<b>not bold</b> & kept as typed'))).toBe(true);
+
+  await page.getByRole('button', { name: 'Select calls' }).click();
+  const boxes = page.locator('tbody td.c-select input');
+  await boxes.nth(0).check();
+  await boxes.nth(1).check();
+  const chosen = await exportFile(page, /^CSV — 2 selected/);
+  expect(readFileSync(await chosen.path(), 'utf8').split('\r\n').filter(Boolean)).toHaveLength(3);
+});
+
+test('call audio joins every match, and says which calls could not be read', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  const file = await exportFile(page, /^Call audio — every match/);
+  expect(file.suggestedFilename()).toMatch(NAME);
+  expect(readFileSync(await file.path()).length).toBeGreaterThan(1000);
+  // The seed's call 7 has no file.
+  await expect(page.getByRole('status')).toHaveText('1 call could not be read and was left out.');
+});
+
+test('call audio of the chosen calls joins only those', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.getByRole('button', { name: 'Select calls' }).click();
+  const boxes = page.locator('tbody td.c-select input');
+  await boxes.nth(0).check();
+  await boxes.nth(1).check();
+  const file = await exportFile(page, /^Call audio — 2 selected/);
+  expect(file.suggestedFilename()).toMatch(NAME);
+  const joined = readFileSync(await file.path()).length;
+  // Two silent 2-second calls of 56 frames of 144 bytes each.
+  expect(joined).toBe(2 * 56 * 144);
+});
+
+test('printing keeps the calls only, names the PDF by the export name, and prints only the chosen calls', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { printed: string[] }).printed = [];
+    window.print = () => (window as unknown as { printed: string[] }).printed.push(document.title);
+  });
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  const title = await page.title();
+  await page.getByRole('button', { name: 'Select calls' }).click();
+  await page.locator('tbody td.c-select input').nth(3).check();
+  await exportMenu(page).locator('summary').click();
+  await exportMenu(page).getByRole('button', { name: /^PDF — 1 selected/ }).click();
+  const printed = await page.evaluate(() => (window as unknown as { printed: string[] }).printed);
+  expect(printed).toHaveLength(1);
+  expect(`${printed[0]}.csv`).toMatch(NAME);
+  // As printed: the controls are gone and only the chosen call is left.
+  await page.emulateMedia({ media: 'print' });
+  await expect(page.locator('header.bar')).toBeHidden();
+  await expect(page.locator('nav.pager')).toBeHidden();
+  await expect(page.locator('tbody tr:visible')).toHaveCount(1);
+  await page.emulateMedia({ media: 'screen' });
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  await expect(page).toHaveTitle(title);
 });

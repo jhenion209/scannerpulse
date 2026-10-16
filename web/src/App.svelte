@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import { ApiError, fetchCall, type Call, type CallDetail } from './lib/api';
+  import { ApiError, fetchAudio, fetchCall, fetchExcel, type Call, type CallDetail } from './lib/api';
+  import { audioBody, csvText, exportName, exportQuery, pageTable, saveFile } from './lib/exporting';
+  import ExportMenu from './lib/ExportMenu.svelte';
   import { sharedCallId, shareUrl } from './lib/actions';
   import CallList from './lib/CallList.svelte';
   import { defaultColumns, type ColumnId } from './lib/columns';
@@ -10,7 +12,7 @@
   import { follow } from './lib/feed';
   import FilterRail from './lib/FilterRail.svelte';
   import { addCall, liveApplies, liveUrl, newestId, setTranscript, wanted, type LiveEvent } from './lib/live';
-  import { favoriteUnresolved, filtersToSearch, parseFilters, parsePage, talkgroupsAskedFor } from './lib/filters';
+  import { favoriteUnresolved, filtersToSearch, listQuery, parseFilters, parsePage, talkgroupsAskedFor } from './lib/filters';
   import EditDialog from './lib/EditDialog.svelte';
   import Pager from './lib/Pager.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
@@ -20,7 +22,7 @@
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
   import { loadPrefs, resetPref, savePref } from './lib/prefs';
-  import { noteCall, startStatus } from './lib/status.svelte';
+  import { noteCall, startStatus, status } from './lib/status.svelte';
   import StatusChips from './lib/StatusChips.svelte';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
 
@@ -231,6 +233,72 @@
     });
   });
 
+  // Export. Excel and call audio are built on the server from every match
+  // of the list (or, for audio, the chosen calls); CSV, PDF and print are the
+  // page on screen, or the chosen calls when some are ticked. A file of the
+  // page or the chosen calls is named by those calls' own time range, as the
+  // server names a file of chosen calls.
+  let exporting = $state(false);
+  let printChosen = $state(false);
+  const zone = () => status.data?.time_zone ?? 'UTC';
+  const listParams = () => listQuery(filters, choices.favorites, { size: prefs.pageSize }, new Date());
+  const pageRows = () =>
+    selecting && chosen.length ? view.calls.filter((c) => chosen.includes(c.id)) : view.calls;
+  const oldestFirst = (calls: Call[]) => [...calls].sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at));
+  const pageName = (ext: string) => exportName(oldestFirst(pageRows()), null, null, zone(), ext);
+  const why = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+  async function excel() {
+    exporting = true;
+    tell('Making the Excel file of every match…');
+    try {
+      const file = await fetchExcel(exportQuery(listParams()));
+      saveFile(file.blob, file.name);
+      tell(file.note ?? `Saved ${file.name}.`);
+    } catch (error) {
+      tell(`The Excel file could not be made: ${why(error)}`);
+    } finally {
+      exporting = false;
+    }
+  }
+
+  function csv() {
+    const name = pageName('csv');
+    saveFile(new Blob([csvText(pageTable(pageRows(), columns, zone()))], { type: 'text/csv' }), name);
+    tell(`Saved ${name}.`);
+  }
+
+  /** Prints the page (or the chosen calls); the file name the browser offers
+   * for a PDF is the export name, as the page's title. */
+  async function printPage(kind: 'pdf' | 'print') {
+    const title = document.title;
+    printChosen = selecting && chosen.length > 0;
+    document.title = pageName('pdf').replace(/\.pdf$/, '');
+    await tick();
+    const restore = () => {
+      document.title = title;
+      printChosen = false;
+    };
+    window.addEventListener('afterprint', restore, { once: true });
+    window.print();
+    if (kind === 'pdf') tell('Choose “Save as PDF” in the print dialog to keep a PDF.');
+  }
+
+  async function audio() {
+    exporting = true;
+    const ids = selecting && chosen.length ? chosen : undefined;
+    tell(ids ? `Joining the audio of ${ids.length} chosen calls…` : 'Joining the audio of every match…');
+    try {
+      const file = await fetchAudio(audioBody(listParams(), ids));
+      saveFile(file.blob, file.name);
+      tell(file.note ?? `Saved ${file.name}.`);
+    } catch (error) {
+      tell(`The call audio could not be made: ${why(error)}`);
+    } finally {
+      exporting = false;
+    }
+  }
+
   // The actions on one call.
   let editing = $state<Call | null>(null);
   let sharing = $state<string | null>(null);
@@ -307,7 +375,7 @@
   }
 </script>
 
-<div class="shell" class:rail-closed={!prefs.railOpen} class:menu-open={menuOpen}>
+<div class="shell" class:rail-closed={!prefs.railOpen} class:menu-open={menuOpen} class:print-chosen={printChosen}>
   <header class="bar">
     <button type="button" class="menu" onclick={toggleRail} aria-controls="filters" aria-expanded={narrow.current ? menuOpen : prefs.railOpen}>
       Filters
@@ -326,7 +394,12 @@
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} {columns} customised={prefs.columns !== null}
       oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go}
-      bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length} />
+      bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length}>
+      {#snippet extra()}
+        <ExportMenu chosenCount={selecting ? chosen.length : 0} busy={exporting}
+          onexcel={excel} oncsv={csv} onprint={printPage} onaudio={audio} />
+      {/snippet}
+    </Pager>
     {#if shared.open}
       <SharedCall call={shared.call} error={shared.error} onplay={(call) => play(call)} onclose={closeShared} />
     {/if}
@@ -373,6 +446,16 @@
   .notice { margin: 0; padding: 0 0.9rem; }
   .notice:not(:empty) { margin: 0.6rem 0.9rem 0; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--surface); border: 1px solid var(--field-border); }
   .player { grid-area: player; background: var(--bar); color: var(--bar-text); }
+  /* Printing (and a PDF saved from the print dialog) keeps the calls only:
+     every row's whole text, without the controls. */
+  @media print {
+    .bar, .rail, .player, .notice, .error, :global(.pager), :global(.c-actions), :global(.c-select),
+    :global(.calls .more) { display: none !important; }
+    .shell { display: block; height: auto; }
+    .list { overflow: visible; }
+    :global(.calls .snippet) { display: block !important; }
+    .print-chosen :global(tbody tr:not(.selected)) { display: none !important; }
+  }
   @media (max-width: 760px) {
     .bar { flex-wrap: wrap; row-gap: 0.4rem; }
     .shell, .shell.rail-closed { grid-template: 'bar' auto 'list' 1fr 'player' auto / 1fr; }

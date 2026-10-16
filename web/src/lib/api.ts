@@ -1,5 +1,7 @@
 // The calls of the sub-project 3 API that the main page uses.
 
+import { nameFromHeader } from './exporting';
+
 export interface Call {
   id: number;
   started_at: string;
@@ -98,4 +100,39 @@ export async function saveTranscript(id: number, text: string): Promise<{ id: nu
   });
   if (!response.ok) throw await apiError(response);
   return response.json();
+}
+
+/** A file the server built, with what the listener should know about it. */
+export interface Download {
+  blob: Blob;
+  name: string;
+  note: string | null;
+}
+
+/** The Excel file of every match of the list's query. */
+export async function fetchExcel(query: URLSearchParams): Promise<Download> {
+  const response = await fetch(`/api/export/xlsx?${query}`);
+  if (!response.ok) throw await apiError(response);
+  const capped = response.headers.get('x-export-capped-at');
+  return {
+    blob: await response.blob(),
+    name: nameFromHeader(response.headers.get('content-disposition'), 'ScannerPulse.xlsx'),
+    note: capped ? `Only the newest ${Number(capped).toLocaleString('en-US')} calls fit in one file.` : null,
+  };
+}
+
+/** The calls' audio joined into one file: every match of the filter, or the ids given. */
+export async function fetchAudio(body: Record<string, unknown>): Promise<Download> {
+  const response = await fetch('/api/export/audio', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await apiError(response);
+  const missing = Number(response.headers.get('x-export-missing') ?? 0);
+  return {
+    blob: await response.blob(),
+    name: nameFromHeader(response.headers.get('content-disposition'), 'ScannerPulse.mp3'),
+    note: missing ? `${missing} ${missing === 1 ? 'call' : 'calls'} could not be read and ${missing === 1 ? 'was' : 'were'} left out.` : null,
+  };
 }
