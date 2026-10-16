@@ -9,13 +9,14 @@
   --line: #d9e2ea;
   --bar: #12324a;
   --bar-text: #eaf4fb;
-  --accent: #0f7aa3;
+  --accent: #0e749b;
   --accent-strong: #5ec8e5;
   --playing: #e1f3fa;
   --played: #5f6f80;
   --warn-bg: #fff1c2;
   --warn-text: #5a4300;
-  --focus: #0f7aa3;
+  --focus: #0e749b;
+  --bar-focus: #5ec8e5;
   font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 :root[data-theme='dark'] {
@@ -34,6 +35,7 @@
   --warn-bg: #4a3b10;
   --warn-text: #ffe39a;
   --focus: #5ec8e5;
+  --bar-focus: #5ec8e5;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
@@ -52,11 +54,13 @@
     --warn-bg: #4a3b10;
     --warn-text: #ffe39a;
     --focus: #5ec8e5;
+    --bar-focus: #5ec8e5;
   }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.bar :focus-visible, .player :focus-visible { outline-color: var(--bar-focus); }
 button, input, select { font: inherit; color: inherit; }
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; overflow: hidden;

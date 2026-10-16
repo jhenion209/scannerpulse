@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULTS, applyTheme, loadPrefs, savePref } from './prefs';
 
 describe('prefs', () => {
   beforeEach(() => localStorage.clear());
+  afterEach(() => vi.restoreAllMocks());
 
   it('gives the defaults when nothing is stored', () => {
     expect(loadPrefs()).toEqual(DEFAULTS);
@@ -37,8 +38,6 @@ describe('prefs', () => {
     });
     expect(loadPrefs()).toEqual(DEFAULTS);
     expect(() => savePref('theme', 'light')).not.toThrow();
-    get.mockRestore();
-    set.mockRestore();
   });
 
   it('sets the theme on the page, and auto leaves it to the device', () => {
