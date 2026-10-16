@@ -16,15 +16,17 @@ export const CHOICES_RETRY_MS = 30_000;
 let retry: ReturnType<typeof setTimeout> | undefined;
 
 async function refresh(again = true) {
-  try {
-    const [filters, favorites] = await Promise.all([fetchFilterChoices(), fetchFavorites()]);
-    choices.filters = filters;
-    choices.favorites = favorites;
-    choices.error = null;
-  } catch (error) {
+  // Each read keeps what it got: a failed favorites read leaves good filter
+  // choices in place, and the other way round.
+  const [filters, favorites] = await Promise.allSettled([fetchFilterChoices(), fetchFavorites()]);
+  if (filters.status === 'fulfilled') choices.filters = filters.value;
+  if (favorites.status === 'fulfilled') choices.favorites = favorites.value;
+  const failed = [filters, favorites].find((r) => r.status === 'rejected');
+  if (failed) {
+    const error = failed.reason;
     choices.error = error instanceof Error ? error.message : String(error);
     if (again) retry = setTimeout(() => void refresh(false), CHOICES_RETRY_MS);
-  }
+  } else choices.error = null;
 }
 
 /** Reads the choices now and then on a timer; returns the stop. */

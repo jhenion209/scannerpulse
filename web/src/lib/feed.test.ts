@@ -31,6 +31,17 @@ describe('the live feed', () => {
     expect(events).toEqual([{ type: 'resync' }, { type: 'resync' }]);
   });
 
+  it('does not turn a fault in the handler into a resync', () => {
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const seen: unknown[] = [];
+    follow(() => 'ws://x/api/live', (e) => {
+      seen.push(e);
+      throw new Error('handler');
+    });
+    expect(() => FakeSocket.made[0].onmessage?.({ data: '{"type":"resync"}' })).toThrow('handler');
+    expect(seen).toHaveLength(1);
+  });
+
   it('opens again after a drop, later each time, asking the address again', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeSocket);

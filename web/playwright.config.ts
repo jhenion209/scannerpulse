@@ -3,7 +3,8 @@ import { defineConfig, devices } from '@playwright/test';
 // The tests run against a real `scannerpulse web` over a seeded database
 // (e2e/seed.sh). E2E_BASE_URL names one already running; otherwise the
 // binary named by E2E_BINARY (default: the workspace's debug build) is
-// started here, with DATABASE_URL from the environment.
+// started here, with DATABASE_URL from the environment. E2E_BINARY names the
+// program only; ` web` is added, and the server's log is shown on a failure.
 const external = process.env.E2E_BASE_URL;
 const listen = '127.0.0.1:8099';
 
@@ -17,7 +18,9 @@ export default defineConfig({
   webServer: external
     ? undefined
     : {
-        command: process.env.E2E_BINARY ?? '../target/debug/scannerpulse web',
+        command: `${process.env.E2E_BINARY ?? '../target/debug/scannerpulse'} web`,
+        stdout: 'pipe',
+        stderr: 'pipe',
         url: `http://${listen}/health`,
         env: { SCANNERPULSE_WEB_LISTEN: listen },
         reuseExistingServer: false,

@@ -41,15 +41,16 @@
   <tbody>
     {#each calls as call (call.id)}
       {@const open = showAll || expanded.has(call.id)}
+      {@const isPlayed = played.has(call.id) && call.id !== playingId}
       <tr
         class:playing={call.id === playingId}
-        class:played={played.has(call.id) && call.id !== playingId}
+        class:played={isPlayed}
         aria-current={call.id === playingId ? 'true' : undefined}
         data-id={call.id}
       >
         <td>
           <button type="button" class="play" onclick={() => onplay(call)}
-            aria-label={`Play ${talkgroup(call)} at ${callTime(call.started_at, now)}`}>▶</button>
+            aria-label={`Play ${talkgroup(call)} at ${callTime(call.started_at, now)}${isPlayed ? ' (played)' : ''}`}>{isPlayed ? '✓' : '▶'}</button>
         </td>
         <td class="time">{callTime(call.started_at, now)}</td>
         <td class="tg">{talkgroup(call)}</td>

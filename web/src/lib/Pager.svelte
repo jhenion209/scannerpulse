@@ -62,7 +62,7 @@
   .total { margin-right: auto; color: var(--muted); }
   form, label { display: flex; gap: 0.35rem; align-items: center; margin: 0; }
   button, input, select {
-    min-height: 2.25rem; padding: 0.2rem 0.6rem; border: 1px solid var(--line); border-radius: 4px; background: var(--bg);
+    min-height: 2.25rem; padding: 0.2rem 0.6rem; border: 1px solid var(--field-border); border-radius: 4px; background: var(--bg);
   }
   button { cursor: pointer; }
   button:disabled { cursor: default; opacity: 0.55; }

@@ -5,6 +5,7 @@ import {
   filtersToSearch,
   listQuery,
   parseFilters,
+  parsePage,
   talkgroupsAskedFor,
 } from './filters';
 
@@ -102,5 +103,27 @@ describe('a favorite that gives no talkgroups', () => {
   it('asks for no talkgroup rather than every one', () => {
     const query = listQuery({ ...NO_FILTERS, favorite: 99 }, favorites, { size: 25 }, now);
     expect(query.get('talkgroups')).toBe('0');
+  });
+});
+
+describe('the page in the URL', () => {
+  it('writes a page after the first, 1-based, and nothing for the first', () => {
+    expect(filtersToSearch(NO_FILTERS, 0)).toBe('');
+    expect(filtersToSearch(NO_FILTERS, 2)).toBe('?page=3');
+    expect(filtersToSearch({ ...NO_FILTERS, smart: true }, 1)).toBe('?smart=1&page=2');
+  });
+
+  it('reads the page back as an index from 0', () => {
+    expect(parsePage(filtersToSearch(NO_FILTERS, 4))).toBe(4);
+    expect(parsePage('?all=1&page=2')).toBe(1);
+  });
+
+  it('takes anything but a page of 2 or more for the first page', () => {
+    for (const search of ['', '?page=1', '?page=0', '?page=-3', '?page=x', '?page=2.5', '?page=', '?page=99999999999999999999'])
+      expect(parsePage(search), search).toBe(0);
+  });
+
+  it('leaves the filters alone', () => {
+    expect(parseFilters('?page=3')).toEqual(NO_FILTERS);
   });
 });

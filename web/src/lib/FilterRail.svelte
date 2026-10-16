@@ -12,12 +12,6 @@
 
   let search = $state('');
   const groups = $derived(matchGroups(choices.talkgroup_groups, search));
-  const chosenNames = $derived(
-    choices.talkgroup_groups
-      .flatMap((g) => g.talkgroups)
-      .filter((t) => filters.talkgroups.includes(t.id))
-      .map((t) => t.name),
-  );
 
   const set = (change: Partial<Filters>) => (filters = { ...filters, ...change });
   const number = (value: string) => (value === '' ? null : Number(value));
@@ -40,9 +34,9 @@
   <fieldset class="field">
     <legend>Talkgroups</legend>
     <input type="search" placeholder="Find a talkgroup" aria-label="Find a talkgroup" bind:value={search} />
-    {#if chosenNames.length}
+    {#if filters.talkgroups.length}
       <p class="chosen">
-        {chosenNames.length} chosen
+        {filters.talkgroups.length} chosen
         <button type="button" class="link" onclick={() => set({ talkgroups: [] })}>Clear</button>
       </p>
     {/if}
@@ -133,9 +127,9 @@
   .field { display: flex; flex-direction: column; gap: 0.3rem; border: 0; margin: 0; padding: 0; min-width: 0; }
   .field > span, legend { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; color: var(--muted); padding: 0; }
   select, input[type='search'], input[type='datetime-local'] {
-    background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.3rem 0.4rem; min-height: 2.25rem; width: 100%;
+    background: var(--bg); border: 1px solid var(--field-border); border-radius: 4px; padding: 0.3rem 0.4rem; min-height: 2.25rem; width: 100%;
   }
-  .groups { max-height: 18rem; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+  .groups { max-height: 18rem; overflow: auto; border: 1px solid var(--field-border); border-radius: 4px; background: var(--bg); }
   .system { position: sticky; top: 0; background: var(--surface); font-weight: 600; padding: 0.2rem 0.5rem; }
   .talkgroup { display: flex; gap: 0.4rem; align-items: center; padding: 0.2rem 0.5rem; min-height: 2rem; }
   .number { margin-left: auto; color: var(--muted); font-size: 0.85rem; }

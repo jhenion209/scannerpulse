@@ -7,6 +7,8 @@
   --text: #1b2430;
   --muted: #4a5868;
   --line: #d9e2ea;
+  /* The edge of a field: 3.3:1 or more on both the page and the rail. */
+  --field-border: #7a8896;
   --bar: #12324a;
   --bar-text: #eaf4fb;
   --accent: #0e749b;
@@ -26,6 +28,7 @@
   --text: #d7e3ec;
   --muted: #9fb2c2;
   --line: #22384a;
+  --field-border: #5d7890;
   --bar: #081119;
   --bar-text: #d7e3ec;
   --accent: #5ec8e5;
@@ -45,6 +48,7 @@
     --text: #d7e3ec;
     --muted: #9fb2c2;
     --line: #22384a;
+    --field-border: #5d7890;
     --bar: #081119;
     --bar-text: #d7e3ec;
     --accent: #5ec8e5;

@@ -13,11 +13,15 @@ export function follow(url: () => string, onEvent: (event: LiveEvent) => void): 
     socket = new WebSocket(url());
     socket.onopen = () => (delay = 1000);
     socket.onmessage = (message) => {
+      // Only a message that cannot be read is a resync; a fault in the
+      // handler is its own.
+      let event: LiveEvent;
       try {
-        onEvent(JSON.parse(message.data) as LiveEvent);
+        event = JSON.parse(message.data) as LiveEvent;
       } catch {
-        onEvent({ type: 'resync' });
+        event = { type: 'resync' };
       }
+      onEvent(event);
     };
     socket.onclose = () => {
       if (stopped) return;

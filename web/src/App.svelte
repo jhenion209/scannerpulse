@@ -8,7 +8,7 @@
   import { follow } from './lib/feed';
   import FilterRail from './lib/FilterRail.svelte';
   import { addCall, liveApplies, liveUrl, newestId, setTranscript, wanted, type LiveEvent } from './lib/live';
-  import { favoriteUnresolved, filtersToSearch, parseFilters, talkgroupsAskedFor } from './lib/filters';
+  import { favoriteUnresolved, filtersToSearch, parseFilters, parsePage, talkgroupsAskedFor } from './lib/filters';
   import Pager from './lib/Pager.svelte';
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
@@ -25,11 +25,14 @@
   const narrow = new MediaQuery('max-width: 760px');
 
   let smartSeen = untrack(() => filters.smart);
+  // The page a link names, until the first read has carried the list there.
+  let landing = $state(parsePage(location.search));
+  let firstRead = true;
 
   onMount(startChoices);
 
   $effect(() => {
-    const search = filtersToSearch(filters);
+    const search = filtersToSearch(filters, view.paging.index || landing);
     if (search !== location.search) history.replaceState(null, '', `${location.pathname}${search}${location.hash}`);
     // Only a change made after the page opened is saved: a link's value is
     // for this view alone.
@@ -56,27 +59,39 @@
 
   // The feed opens after the first page is read, saying the newest call on
   // it, so no call falls between the read and the feed.
-  async function readFirstPage() {
-    await show(ask(), FIRST_PAGE);
+  async function readFirstPage(open: boolean) {
+    // Only the read made on load carries the link's page; any change since
+    // then starts at page 1.
+    const target = open ? landing : 0;
+    const applied = await show(ask(), FIRST_PAGE);
+    landing = 0;
+    // A read that was superseded opens nothing: the newer one does.
+    if (!applied) return;
     lastId = newestId(view.calls, null);
     stopFeed?.();
     stopFeed = follow(() => liveUrl(location, asked(), lastId), onLive);
+    if (target > 0) await goTo(ask(), target);
   }
 
   $effect(() => {
     void listKey;
-    untrack(readFirstPage);
+    const open = firstRead;
+    firstRead = false;
+    untrack(() => readFirstPage(open));
   });
   onMount(() => () => {
     stopFeed?.();
     clearTimeout(reread);
   });
 
-  // Leaving "Pause updates" reads the first page again.
+  // Leaving "Pause updates" reads the first page again. "All dates" is not
+  // tracked here: changing it reads the list anew by itself.
   let wasPaused = false;
   $effect(() => {
-    const now = paused || filters.allDates;
-    if (wasPaused && !now && view.paging.index === 0) untrack(() => show(ask(), view.paging));
+    const now = paused;
+    untrack(() => {
+      if (wasPaused && !now && view.paging.index === 0) void show(ask(), view.paging);
+    });
     wasPaused = now;
   });
 

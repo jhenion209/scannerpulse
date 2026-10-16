@@ -65,8 +65,16 @@ export function parseFilters(search: string): Filters {
   };
 }
 
-/** The query that reproduces the filters; the defaults are left out. */
-export function filtersToSearch(filters: Filters): string {
+/** The page a URL's query names, as an index from 0; 0 when it names none
+ * (page 1 is never written) or names something that is not a page. */
+export function parsePage(search: string): number {
+  const page = id(new URLSearchParams(search).get('page'));
+  return page !== null && page >= 2 ? page - 1 : 0;
+}
+
+/** The query that reproduces the filters, and the page (an index from 0)
+ * when it is not the first; the defaults are left out. */
+export function filtersToSearch(filters: Filters, pageIndex = 0): string {
   const params = new URLSearchParams();
   if (filters.favorite !== null) params.set('favorite', String(filters.favorite));
   if (filters.talkgroups.length) params.set('talkgroups', filters.talkgroups.join(','));
@@ -77,6 +85,7 @@ export function filtersToSearch(filters: Filters): string {
     if (filters.to) params.set('to', filters.to);
   }
   if (filters.smart) params.set('smart', '1');
+  if (pageIndex > 0) params.set('page', String(pageIndex + 1));
   const text = params.toString();
   return text ? `?${text}` : '';
 }

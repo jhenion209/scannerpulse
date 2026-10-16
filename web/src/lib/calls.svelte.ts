@@ -23,11 +23,11 @@ let current: AbortController | null = null;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-/** Reads page `paging.index`; `count` is false on a page turn, which keeps
+/** Reads page `paging.index`; true when the read was not superseded; `count` is false on a page turn, which keeps
  * the total already shown. A newer read cancels an older one. A read of a
  * new list (the `FIRST_PAGE` object itself) forgets the old cursors and total
  * at once, so no page turn can pair them with the new filters. */
-export async function show(ask: Ask, paging: Paging, count = true): Promise<void> {
+export async function show(ask: Ask, paging: Paging, count = true): Promise<boolean> {
   current?.abort();
   const controller = (current = new AbortController());
   const fresh = paging === FIRST_PAGE;
@@ -60,6 +60,7 @@ export async function show(ask: Ask, paging: Paging, count = true): Promise<void
   } finally {
     if (current === controller) view.loading = false;
   }
+  return !controller.signal.aborted;
 }
 
 /** Goes to page `target` (from 0), reading the pages before it when their

@@ -26,6 +26,20 @@ describe('reading the filter choices', () => {
     stop();
   });
 
+  it('keeps the filter choices when only the favorites read fails', async () => {
+    vi.useFakeTimers();
+    const groups = { talkgroup_groups: [], systems: [{ id: 1, name: 'Kept' }], sites: [] };
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (url.includes('/api/filters')) return new Response(JSON.stringify(groups), { status: 200 });
+      throw new Error('favorites down');
+    });
+    const stop = startChoices();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(choices.filters.systems).toEqual([{ id: 1, name: 'Kept' }]);
+    expect(choices.error).toContain('favorites down');
+    stop();
+  });
+
   it('does not retry after the stop', async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn(async () => {

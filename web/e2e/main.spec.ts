@@ -144,3 +144,22 @@ test('on a phone the filters open from the Filters button', async ({ page }) => 
   await page.getByRole('button', { name: 'Filters' }).click();
   await expect(page.getByLabel('Find a talkgroup')).toBeVisible();
 });
+
+test('the page number is in the URL, and the link opens that page', async ({ page }) => {
+  await page.goto('/?all=1');
+  await page.getByLabel('Rows').selectOption('10');
+  await expect(rows(page)).toHaveCount(10);
+  const first = await ids(page);
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(() => ids(page)).not.toEqual(first);
+  await expect(page).toHaveURL(/page=2/);
+  const second = await ids(page);
+  await page.goto(page.url());
+  await expect(page.getByLabel('Page number')).toHaveValue('2');
+  await expect.poll(() => ids(page)).toEqual(second);
+  await expect(page).toHaveURL(/page=2/);
+  // The first page leaves no page in the URL.
+  await page.getByRole('button', { name: 'First' }).click();
+  await expect.poll(() => ids(page)).toEqual(first);
+  await expect(page).not.toHaveURL(/page=/);
+});

@@ -1,5 +1,5 @@
 // The live feed's rules: which new calls join the list on screen, where, and
-// how a transcript reaches its row. The connection is in live.svelte.ts.
+// how a transcript reaches its row. The connection is in feed.ts.
 
 import type { Call } from './api';
 import type { Filters } from './filters';
