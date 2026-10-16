@@ -677,9 +677,23 @@ async fn job_loop(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    log::warn(format!(
-                        "jobs paused: the database failed ({error}); trying again in 5 s"
-                    ));
+                    log::warn(format!("jobs wait: {error}; trying again in 5 s"));
+                    // Say why on the job at the head of the line, without
+                    // touching updated_at, which tells a stuck job apart.
+                    let why: String = format!("waiting: {error}").chars().take(300).collect();
+                    let _ = limited(
+                        db_limit,
+                        sqlx::query(
+                            "UPDATE jobs SET message = $1 \
+                             WHERE id = (SELECT id FROM jobs \
+                                         WHERE id = (SELECT min(id) FROM jobs \
+                                                     WHERE state IN ('queued', 'running')) \
+                                         FOR UPDATE SKIP LOCKED)",
+                        )
+                        .bind(why)
+                        .execute(&pool),
+                    )
+                    .await;
                     if wait(&mut stop, RETRY).await {
                         break;
                     }
