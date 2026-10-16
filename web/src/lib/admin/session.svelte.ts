@@ -51,7 +51,8 @@ export async function signOut(): Promise<void> {
 /** An admin request, JSON both ways; the answer's body, or undefined when it
  * has none. A change carries the CSRF token; refused for its token (a sign-in
  * in another tab gave the browser a new session), it reads the session again
- * and tries once more. A read the page makes on its own (`poll`) says so, and
+ * and, if it is the same admin's, tries once more; another admin's session
+ * refuses the change. A read the page makes on its own (`poll`) says so, and
  * the server does not count it as use of the session, so a page left open
  * cannot keep the session from ending. Throws the server's refusal. */
 export async function admin<T = undefined>(
@@ -69,6 +70,8 @@ export async function admin<T = undefined>(
     const me = await fetch('/api/auth/me', { headers: JSON_ONLY });
     if (me.ok) {
       const fresh = await me.json();
+      // Another admin signed in on this browser: the change is not made in their name.
+      if (fresh.login !== session.login) throw new Error('another admin signed in on this browser; sign in again');
       if (fresh.csrf !== headers['x-csrf-token']) {
         signedIn(fresh);
         headers['x-csrf-token'] = fresh.csrf;

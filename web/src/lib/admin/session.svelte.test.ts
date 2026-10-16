@@ -85,12 +85,23 @@ describe('an admin request', () => {
   it('reads the session again and tries once more when a change is refused for its token', async () => {
     fetched
       .mockResolvedValueOnce(answer(403, { error: 'forbidden', detail: "a change needs the session's x-csrf-token header" }))
-      .mockResolvedValueOnce(answer(200, { login: 'bob', csrf: 'new' }))
+      .mockResolvedValueOnce(answer(200, { login: 'ann', csrf: 'new' }))
       .mockResolvedValueOnce(answer(204));
     await admin('PUT', '/api/admin/settings/web.system_order', { value: ['B'] });
     expect(sent(1).path).toBe('/api/auth/me');
     expect(sent(2).headers['x-csrf-token']).toBe('new');
-    expect(session).toMatchObject({ login: 'bob', csrf: 'new' });
+    expect(session).toMatchObject({ login: 'ann', csrf: 'new' });
+  });
+
+  it('does not send a change again when another admin has signed in on this browser', async () => {
+    fetched
+      .mockResolvedValueOnce(answer(403, { error: 'forbidden', detail: "a change needs the session's x-csrf-token header" }))
+      .mockResolvedValueOnce(answer(200, { login: 'bob', csrf: 'new' }));
+    await expect(admin('PUT', '/api/admin/settings/web.system_order', { value: ['B'] }))
+      .rejects.toThrow('another admin signed in on this browser; sign in again');
+    expect(fetched).toHaveBeenCalledTimes(2);
+    // The page does not take the other admin's place: a change is never made in their name.
+    expect(session).toMatchObject({ login: 'ann', csrf: 'tok' });
   });
 
   it('gives a refusal that is not about the token in the server words, without trying again', async () => {
