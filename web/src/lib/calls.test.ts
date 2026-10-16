@@ -24,6 +24,24 @@ function serve() {
   return asked;
 }
 
+/** A server whose answers wait until the test releases them. A request
+ * whose signal aborts rejects, as fetch does. */
+function held() {
+  const waiting: { query: URLSearchParams; answer: (body: object) => void }[] = [];
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => new Promise((resolve, reject) => {
+    waiting.push({
+      query: new URLSearchParams(url.split('?')[1]),
+      answer: (body) => resolve(new Response(JSON.stringify(body), { status: 200 })),
+    });
+    init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  }));
+  return waiting;
+}
+
+const body = (ids: number[], next: string | null, total: number | null) => ({
+  calls: ids.map(call), next, total, total_capped: false,
+});
+
 const ask = { filters: { ...NO_FILTERS, allDates: true }, favorites: [], size: 10 };
 
 afterEach(() => vi.unstubAllGlobals());
@@ -65,5 +83,42 @@ describe('the call list', () => {
     await show(ask, { ...view.paging, index: 1 }, false);
     expect(view.error).toBe('size is one of [10]');
     expect(view.calls.map((c) => c.id)).toEqual([1, 2]);
+  });
+
+  it('forgets the old cursors and total as a new list starts reading', async () => {
+    serve();
+    await show(ask, FIRST_PAGE);
+    const waiting = held();
+    const read = show(ask, FIRST_PAGE);
+    expect(view.paging).toEqual({ cursors: [null], index: 0 });
+    expect(view.total).toBeNull();
+    waiting[0].answer(body([7], null, 1));
+    await read;
+    expect(view.calls.map((c) => c.id)).toEqual([7]);
+    expect(view.total).toBe(1);
+  });
+
+  it('leaves no rows when a new list cannot be read', async () => {
+    serve();
+    await show(ask, FIRST_PAGE);
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ error: 'bad request', detail: 'no such talkgroup' }), { status: 400 }));
+    await show(ask, FIRST_PAGE);
+    expect(view.calls).toEqual([]);
+    expect(view.error).toBe('no such talkgroup');
+  });
+
+  it('a jump superseded by a new list does not overwrite it or report an error', async () => {
+    serve();
+    await show(ask, FIRST_PAGE);
+    const waiting = held();
+    const jump = goTo(ask, 2);
+    expect(waiting).toHaveLength(1);
+    const fresh = show(ask, FIRST_PAGE);
+    waiting[1].answer(body([9, 10], null, 2));
+    await Promise.all([jump, fresh]);
+    expect(view.calls.map((c) => c.id)).toEqual([9, 10]);
+    expect(view.error).toBeNull();
+    expect(view.loading).toBe(false);
   });
 });
