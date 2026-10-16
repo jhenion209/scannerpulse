@@ -95,7 +95,9 @@
         </td>
         {#each shown as column (column.id)}
           {#if column.id === 'time'}
-            <td class="c-time time">{callTime(call.started_at, now)}</td>
+            {@const when = callTime(call.started_at, now)}
+            {@const gap = when.indexOf(' ')}
+            <td class="c-time time">{#if gap < 0}{when}{:else}<span class="date">{when.slice(0, gap)}</span> {when.slice(gap + 1)}{/if}</td>
           {:else if column.id === 'talkgroup'}
             <td class="c-talkgroup tg">{talkgroup(call)}</td>
           {:else if column.id === 'length'}
@@ -145,6 +147,7 @@
   .c-select input { width: 1.15rem; height: 1.15rem; margin: 0.4rem 0.1rem; }
   .play { background: none; border: 1px solid var(--line); border-radius: 50%; width: 2rem; height: 2rem; cursor: pointer; color: var(--accent); }
   .time, .len { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .date { white-space: nowrap; }
   .tg { font-weight: 600; }
   .tg, td.extra { white-space: nowrap; }
   .chips { display: none; }
@@ -161,7 +164,11 @@
   /* A phone shows each call on its own lines: play, time, talkgroup and
      length; then the text across the whole width; then any other chosen
      column as a labelled value. Each cell has a fixed grid column, so a
-     hidden one leaves its place empty. */
+     hidden one leaves its place empty. The time of a call from an earlier
+     day wraps at its space, the date above the time (the date itself never
+     breaks, for a browser would break it at its hyphens), so that the
+     talkgroup keeps the room; a call from today has no space and stays on
+     one line. */
   @media (max-width: 760px) {
     thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
     /* While selecting, the heading row shows with the box for the whole
@@ -170,16 +177,16 @@
     .selecting thead tr { grid-template-columns: auto; }
     .selecting th:not(.c-select) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); padding: 0; }
     tbody, tr, td { display: block; }
-    tr { display: grid; grid-template-columns: auto auto 1fr auto auto; align-items: center; border-bottom: 1px solid var(--line); }
+    tr { display: grid; grid-template-columns: auto min-content 1fr auto auto; align-items: center; border-bottom: 1px solid var(--line); }
     td { border: 0; padding: 0.2rem 0.4rem; }
     td.extra, th.extra { display: none; }
     .c-play { grid-column: 1; }
-    .c-time { grid-column: 2; }
+    .c-time { grid-column: 2; white-space: normal; }
     .c-talkgroup { grid-column: 3; overflow: hidden; text-overflow: ellipsis; }
     .c-length { grid-column: 4; }
     .c-actions { grid-column: 5; }
     /* Selecting puts a box in front of each row: everything moves one place on. */
-    .selecting tr { grid-template-columns: auto auto auto 1fr auto auto; }
+    .selecting tr { grid-template-columns: auto auto min-content 1fr auto auto; }
     .selecting .c-select { grid-column: 1; }
     .selecting .c-play { grid-column: 2; }
     .selecting .c-time { grid-column: 3; }

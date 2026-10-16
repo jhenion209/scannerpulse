@@ -499,12 +499,13 @@
   /* Printing (and a PDF saved from the print dialog) keeps the calls only:
      every row's whole text, without the controls. */
   @media print {
-    .bar, .rail, .player, .notice, .error, :global(.pager), :global(.c-actions), :global(.c-select),
+    .bar, .rail, .player, .notice, .error, :global(.pager), :global(.c-actions), :global(.c-select), :global(.c-play),
     :global(.calls .more) { display: none !important; }
     .shell { display: block; height: auto; }
     .list { overflow: visible; }
     :global(.calls .snippet) { display: block !important; }
     .print-chosen :global(tbody tr:not(.selected)) { display: none !important; }
+    :global(.calls tr.selected td) { background: none !important; }
   }
   @media (max-width: 760px) {
     /* A phone keeps the Search button; the panel has the words field. */

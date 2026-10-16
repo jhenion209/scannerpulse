@@ -566,6 +566,11 @@ test('printing keeps the calls only, names the PDF by the export name, and print
   await expect(page.locator('header.bar')).toBeHidden();
   await expect(page.locator('nav.pager')).toBeHidden();
   await expect(page.locator('tbody tr:visible')).toHaveCount(1);
+  // The play button and the tint of a chosen row stay on the screen.
+  const chosen = page.locator('tbody tr.selected');
+  await expect(chosen).toHaveCount(1);
+  await expect(chosen.locator('.c-play button')).toBeHidden();
+  expect(await chosen.locator('td.c-talkgroup').evaluate((td) => getComputedStyle(td).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
   await page.emulateMedia({ media: 'screen' });
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await expect(page).toHaveTitle(title);
@@ -575,6 +580,42 @@ const panel = (page: Page) => page.getByRole('dialog', { name: 'Search the archi
 const panelRows = (page: Page) => panel(page).locator('tbody tr');
 const exactCount = async (page: Page, words: string) =>
   (await (await page.request.get(`/api/calls?q=${encodeURIComponent(words)}&exact=true&size=10`)).json()).total as number;
+
+// The narrowest talkgroup cell among the rows whose time cell holds a date, in px; and the time cells'
+// line count (a date above its time is two lines: the date must not break at its hyphens).
+const datedRows = async (calls: Locator) => {
+  const found = await calls.evaluateAll((trs) =>
+    trs
+      .filter((tr) => /^\d{4}-\d\d-\d\d /.test(tr.querySelector('.c-time')?.textContent ?? ''))
+      .map((tr) => {
+        const time = document.createRange();
+        time.selectNodeContents(tr.querySelector('.c-time')!);
+        // The rows the text sits on: a gap of more than 8 px between two tops starts a new one.
+        const tops = Array.from(time.getClientRects(), (rect) => rect.top).sort((a, b) => a - b);
+        const lines = tops.filter((top, i) => i === 0 || top - tops[i - 1] > 8).length;
+        return { room: tr.querySelector('.c-talkgroup')!.getBoundingClientRect().width, lines };
+      }),
+  );
+  expect(found.length).toBeGreaterThan(0);
+  return { room: Math.min(...found.map((row) => row.room)), lines: found.map((row) => row.lines) };
+};
+// Seed calls past the 30th are three days older than the seed, so they carry a date whatever day this runs.
+const ROOM = 75;
+
+test('on a phone a dated call keeps room for its talkgroup', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/?all=1');
+  await expect(rows(page)).toHaveCount(35);
+  const main = await datedRows(rows(page));
+  expect(main.room, 'the main list').toBeGreaterThanOrEqual(ROOM);
+  expect(new Set(main.lines), 'the main list: date above time').toEqual(new Set([2]));
+  await page.goto('/?search=responding');
+  await expect(panelRows(page).first()).toBeVisible();
+  await expect(panelRows(page)).toHaveCount(await exactCount(page, 'responding'));
+  const found = await datedRows(panelRows(page));
+  expect(found.room, 'the search panel').toBeGreaterThanOrEqual(ROOM);
+  expect(new Set(found.lines), 'the search panel: date above time').toEqual(new Set([2]));
+});
 
 test('the bar\'s search opens the panel, with every date searched and an exact count', async ({ page }) => {
   await page.goto('/');
