@@ -15,6 +15,7 @@
   import Pager from './lib/Pager.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
   import SharedCall from './lib/SharedCall.svelte';
+  import { keepOnPage, toggleAll, toggleOne } from './lib/selection';
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
@@ -204,6 +205,32 @@
     savePref('autoplayNew', on);
   }
 
+  // Selection mode. While it is on, new calls are held back (as with Pause
+  // updates), so the rows do not move under the listener's pointer; leaving
+  // it puts Pause back as it was.
+  let selecting = $state(false);
+  let chosen = $state<number[]>([]);
+  let pausedBefore = false;
+  function setSelecting(on: boolean) {
+    if (on === selecting) return;
+    selecting = on;
+    if (on) {
+      pausedBefore = paused;
+      paused = true;
+    } else {
+      paused = pausedBefore;
+      chosen = [];
+    }
+  }
+  // The choice never reaches past the page on screen.
+  $effect(() => {
+    const page = view.calls.map((c) => c.id);
+    untrack(() => {
+      const kept = keepOnPage(chosen, page);
+      if (kept.length !== chosen.length) chosen = kept;
+    });
+  });
+
   // The actions on one call.
   let editing = $state<Call | null>(null);
   let sharing = $state<string | null>(null);
@@ -298,7 +325,8 @@
     <Pager index={view.paging.index} hasNext={view.paging.cursors.length > view.paging.index + 1}
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} {columns} customised={prefs.columns !== null}
-      oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go} />
+      oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go}
+      bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length} />
     {#if shared.open}
       <SharedCall call={shared.call} error={shared.error} onplay={(call) => play(call)} onclose={closeShared} />
     {/if}
@@ -309,7 +337,9 @@
       <p class="empty">No calls match these filters{filters.allDates || filters.from || filters.to ? '' : ' in the last 24 hours'}.</p>
     {/if}
     <CallList calls={view.calls} playingId={player.call?.id ?? null} {played} showAll={prefs.showAllRows} {columns} onplay={(call) => play(call)}
-      onedit={(call) => (editing = call)} ondownload={download} onshare={share} />
+      onedit={(call) => (editing = call)} ondownload={download} onshare={share}
+      {selecting} {chosen} onchoose={(id) => (chosen = toggleOne(chosen, id))}
+      onchooseall={() => (chosen = toggleAll(chosen, view.calls.map((c) => c.id)))} />
   </main>
   <footer class="player" aria-label="Player">
     <Player bind:continuous={() => prefs.continuous, setContinuous} bind:autoplayNew={() => prefs.autoplayNew, setAutoplayNew} />

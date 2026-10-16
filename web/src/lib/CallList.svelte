@@ -4,6 +4,7 @@
   import { COLUMNS, EXTRA_COLUMNS, extraText, isExtra, type ColumnId } from './columns';
   import { callTime, lengthPercent, seconds } from './format';
   import RowActions from './RowActions.svelte';
+  import { pageState } from './selection';
 
   let {
     calls,
@@ -11,6 +12,10 @@
     played,
     showAll,
     columns,
+    selecting = false,
+    chosen = [],
+    onchoose = () => {},
+    onchooseall = () => {},
     onplay,
     onedit,
     ondownload,
@@ -21,6 +26,11 @@
     played: Set<number>;
     showAll: boolean;
     columns: ColumnId[];
+    /** Selection mode: a box on each row and one for the page. */
+    selecting?: boolean;
+    chosen?: number[];
+    onchoose?: (id: number) => void;
+    onchooseall?: () => void;
     onplay: (call: Call) => void;
     onedit: (call: Call) => void;
     ondownload: (call: Call) => void;
@@ -41,12 +51,19 @@
     EXTRA_COLUMNS.filter(has)
       .map((id) => ({ id, text: extraText(call, id) }))
       .filter((c) => c.text !== '');
+  const state = $derived(pageState(chosen, calls.map((c) => c.id)));
   const talkgroup = (call: Call) => call.talkgroup_name ?? (call.talkgroup === null ? '' : String(call.talkgroup));
 </script>
 
-<table class="calls">
+<table class="calls" class:selecting>
   <thead>
     <tr>
+      {#if selecting}
+        <th scope="col" class="c-select">
+          <input type="checkbox" aria-label="Select every call on this page" checked={state === 'all'}
+            bind:indeterminate={() => state === 'some', () => {}} onchange={onchooseall} />
+        </th>
+      {/if}
       <th scope="col"><span class="visually-hidden">Play</span></th>
       {#each shown as column (column.id)}
         <th scope="col" class={`c-${column.id}`} class:extra={isExtra(column.id)} class:text={column.id === 'text'}>{column.label}</th>
@@ -62,9 +79,16 @@
       <tr
         class:playing={call.id === playingId}
         class:played={isPlayed}
+        class:selected={selecting && chosen.includes(call.id)}
         aria-current={call.id === playingId ? 'true' : undefined}
         data-id={call.id}
       >
+        {#if selecting}
+          <td class="c-select">
+            <input type="checkbox" aria-label={`Select ${talkgroup(call)} at ${callTime(call.started_at, now)}`}
+              checked={chosen.includes(call.id)} onchange={() => onchoose(call.id)} />
+          </td>
+        {/if}
         <td class="c-play">
           <button type="button" class="play" onclick={() => onplay(call)}
             aria-label={`Play ${talkgroup(call)} at ${callTime(call.started_at, now)}${isPlayed ? ' (played)' : ''}`}>{isPlayed ? '✓' : '▶'}</button>
@@ -117,6 +141,8 @@
   td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr.playing td { background: var(--playing); }
   tr.played td { color: var(--played); }
+  tr.selected td { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+  .c-select input { width: 1.15rem; height: 1.15rem; margin: 0.4rem 0.1rem; }
   .play { background: none; border: 1px solid var(--line); border-radius: 50%; width: 2rem; height: 2rem; cursor: pointer; color: var(--accent); }
   .time, .len { white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tg { font-weight: 600; }
@@ -147,6 +173,14 @@
     .c-talkgroup { grid-column: 3; overflow: hidden; text-overflow: ellipsis; }
     .c-length { grid-column: 4; }
     .c-actions { grid-column: 5; }
+    /* Selecting puts a box in front of each row: everything moves one place on. */
+    .selecting tr { grid-template-columns: auto auto auto 1fr auto auto; }
+    .selecting .c-select { grid-column: 1; }
+    .selecting .c-play { grid-column: 2; }
+    .selecting .c-time { grid-column: 3; }
+    .selecting .c-talkgroup { grid-column: 4; }
+    .selecting .c-length { grid-column: 5; }
+    .selecting .c-actions { grid-column: 6; }
     .bar { display: none; }
     td.text { grid-column: 1 / -1; padding-top: 0; }
     td.chips { display: flex; flex-wrap: wrap; gap: 0.1rem 0.9rem; grid-column: 1 / -1; padding-top: 0; font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; }

@@ -437,3 +437,50 @@ test('no accessibility fault with the edit dialog open', async ({ page }) => {
   const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
   expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
 });
+
+test('selection mode ticks calls of this page only, and holds new calls back while on', async ({ page }) => {
+  await page.goto('/?all=1');
+  await page.getByLabel('Rows').selectOption('10');
+  await expect(rows(page)).toHaveCount(10);
+  // Unpaused (All dates counts as paused, so this view is read without it first).
+  await page.getByLabel('All dates').uncheck();
+  await expect(rows(page)).toHaveCount(10);
+  const pause = page.getByLabel('Pause updates');
+  await expect(pause).not.toBeChecked();
+  const toggle = page.getByRole('button', { name: 'Select calls' });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(pause).toBeChecked();
+  await expect(page.getByText('0 selected')).toBeVisible();
+  const boxes = page.locator('tbody td.c-select input');
+  await expect(boxes).toHaveCount(10);
+  await boxes.nth(0).check();
+  await boxes.nth(2).check();
+  await expect(page.getByText('2 selected')).toBeVisible();
+  const all = page.getByLabel('Select every call on this page');
+  expect(await all.evaluate((box: HTMLInputElement) => box.indeterminate)).toBe(true);
+  await all.check();
+  await expect(page.getByText('10 selected')).toBeVisible();
+  await all.uncheck();
+  await expect(page.getByText('0 selected')).toBeVisible();
+  // Another page starts with nothing chosen.
+  await boxes.nth(1).check();
+  await expect(page.getByText('1 selected')).toBeVisible();
+  const first = await ids(page);
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(() => ids(page)).not.toEqual(first);
+  await expect(page.getByText('0 selected')).toBeVisible();
+  // Leaving selection puts Pause back as it was.
+  await toggle.click();
+  await expect(boxes).toHaveCount(0);
+  await expect(pause).not.toBeChecked();
+});
+
+test('on a phone, selection mode fits the screen', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.getByRole('button', { name: 'Select calls' }).click();
+  await expect(page.locator('tbody td.c-select input')).toHaveCount(30);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+});

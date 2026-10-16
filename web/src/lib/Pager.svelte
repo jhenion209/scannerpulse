@@ -11,6 +11,8 @@
     capped,
     size = $bindable(),
     showAll = $bindable(),
+    selecting = $bindable(false),
+    chosenCount = 0,
     columns,
     customised,
     oncolumns,
@@ -23,6 +25,8 @@
     capped: boolean;
     size: number;
     showAll: boolean;
+    selecting?: boolean;
+    chosenCount?: number;
     columns: ColumnId[];
     customised: boolean;
     oncolumns: (columns: ColumnId[]) => void;
@@ -59,6 +63,8 @@
   </form>
   <button type="button" onclick={() => ongo(index + 1)} disabled={!hasNext}>Next</button>
   <label><input type="checkbox" class="check" bind:checked={showAll} /> Show all text</label>
+  <button type="button" class="select" aria-pressed={selecting} onclick={() => (selecting = !selecting)}>Select calls</button>
+  {#if selecting}<span class="chosen" aria-live="polite">{chosenCount} selected</span>{/if}
   <ColumnMenu {columns} {customised} onchange={oncolumns} onreset={onresetcolumns} />
   <label class="size">
     Rows
@@ -78,5 +84,7 @@
   button { cursor: pointer; }
   button:disabled { cursor: default; opacity: 0.55; }
   input[type='text'] { width: 4.5rem; text-align: right; }
+  .select[aria-pressed='true'] { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  .chosen { color: var(--muted); }
   .check { min-height: 0; }
 </style>
