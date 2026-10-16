@@ -137,6 +137,7 @@ async fn the_embedded_page_is_served_when_no_folder_is_named(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["content-type"], "text/html; charset=utf-8");
     assert_eq!(headers["cache-control"], "no-cache");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
     assert!(body.contains("ScannerPulse"), "{body}");
     // A path without an extension is a page; the main one when it has no
     // page of its own.

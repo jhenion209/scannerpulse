@@ -88,6 +88,11 @@ pub async fn serve(method: Method, uri: Uri) -> Response<Body> {
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control(&name)),
     );
+    // The type named above is the one to use: a browser must not guess another.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     response
 }
 
