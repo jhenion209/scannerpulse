@@ -116,3 +116,36 @@ fn a_file_whose_talkgroup_cannot_be_rewritten_is_refused() {
     // A file without a system names no talkgroup at all.
     assert!(retag("20310115_120000.mp3", &common::frames(2), &tg(127, "A")).is_err());
 }
+
+#[test]
+fn older_tags_and_an_id3v1_tag_are_kept() {
+    for version in [id3::Version::Id3v23, id3::Version::Id3v22] {
+        let mut data = Vec::new();
+        if tag(Some("127\"Alpha\""))
+            .write_to(&mut data, version)
+            .is_err()
+        {
+            continue;
+        }
+        data.extend_from_slice(&common::frames(3));
+        // An ID3v1 tag at the end: "TAG" and 125 bytes.
+        data.extend_from_slice(b"TAG");
+        data.extend_from_slice(&[b'x'; 125]);
+        match retag("20310115_120000.mp3", &data, &tg(127, "Alpha 2")) {
+            Ok(done) => {
+                assert_eq!(
+                    audio(&done.data),
+                    audio(&data),
+                    "{version:?}: audio and v1 tag kept"
+                );
+                assert_eq!(
+                    reader::tags(&done.data).title.as_deref(),
+                    Some("127\"Alpha 2\""),
+                    "{version:?}"
+                );
+            }
+            // A tag the crate cannot write again refuses the file; it is never half written.
+            Err(why) => assert_eq!(version, id3::Version::Id3v22, "{why}"),
+        }
+    }
+}

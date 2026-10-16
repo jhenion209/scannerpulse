@@ -224,9 +224,13 @@ listen.
   the next step. A purge refuses to start without that setting and
   while any of the calls is in a read-only location. The holding folder is
   checked by the host that runs the job: a folder it cannot see, or one inside
-  an archive location or an ingest source (or holding one), fails the job; a
-  marker file in it shows the folder is still the same while the job runs. The talkgroup itself, its
-  transcription switch and its favorites stay. A stopped correction, merge
+  an archive location or an ingest source (or holding one), fails the job.
+  Put an empty file named `.scannerpulse-holding` in the holding folder:
+  a purge needs it there before every file it copies, so a share that is
+  not mounted (an empty mount point) is never written to; and a step during
+  which a location or the holding folder becomes another directory rolls
+  back. The talkgroup itself, its transcription switch and its favorites
+  stay. A stopped correction, merge
   or purge removes the files its last step replaced before it ends.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on
   each host) gives the calls per five minutes of the 120 days before today,

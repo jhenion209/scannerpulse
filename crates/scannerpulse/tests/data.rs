@@ -772,7 +772,12 @@ async fn a_stopped_merge_leaves_the_talkgroup_marked_from_its_first_move(pool: P
     assert!(!names(&pool, into).await.2, "marked from the first move");
 }
 
+/// Sets the holding folder; when it exists, puts the sentinel in it as an
+/// administrator would.
 async fn set_holding(pool: &PgPool, path: &std::path::Path) {
+    if path.is_dir() {
+        std::fs::write(path.join(scannerpulse::data::HOLDING_SENTINEL), b"").unwrap();
+    }
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('purge.holding_path', to_jsonb($1::text)) \
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -1079,12 +1084,51 @@ async fn a_stopped_purge_resumes_with_a_new_job(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(rows_missing, 0);
-    for job in [first, second] {
-        assert!(
-            !holding.join(format!(".scannerpulse-purge-{job}")).exists(),
-            "job {job}'s marker is gone"
-        );
-    }
+    let _ = (first, second);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_purge_needs_the_sentinel_in_the_holding_folder(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let holding = dir.path().join("holding");
+    std::fs::create_dir_all(&holding).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let (call, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3",
+        Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+        Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+    // An empty folder, as an unmounted share's mount point is: no sentinel.
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('purge.holding_path', to_jsonb($1::text))",
+    )
+    .bind(holding.to_str().unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "failed");
+    assert!(
+        ended.message.contains(".scannerpulse-holding"),
+        "{}",
+        ended.message
+    );
+    assert!(rel_of_opt(&pool, call).await.is_some(), "the call stays");
+    assert_eq!(
+        std::fs::read_dir(&holding).unwrap().count(),
+        0,
+        "nothing was copied"
+    );
 }
 
 async fn rel_of_opt(pool: &PgPool, call: i64) -> Option<String> {
@@ -1110,4 +1154,331 @@ async fn a_purge_waits_for_a_queued_merge_into_the_talkgroup(pool: PgPool) {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("merge"), "{refused}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn two_renames_to_one_name_at_once_take_turns(pool: PgPool) {
+    for round in 0..10 {
+        let a = common::talkgroup(&pool, "SYSA", 100 + round * 2).await;
+        let b = common::talkgroup(&pool, "SYSA", 101 + round * 2).await;
+        let name = format!("Same {round}");
+        let mut first = pool.acquire().await.unwrap();
+        let mut second = pool.acquire().await.unwrap();
+        let (one, two) = tokio::join!(
+            talkgroups::rename(&mut first, a, &name),
+            talkgroups::rename(&mut second, b, &name)
+        );
+        let outcomes = [one.unwrap(), two.unwrap()];
+        let done = outcomes
+            .iter()
+            .filter(|r| matches!(r, Renamed::Done { .. }))
+            .count();
+        let taken = outcomes
+            .iter()
+            .filter(|r| matches!(r, Renamed::Taken(..)))
+            .count();
+        assert_eq!((done, taken), (1, 1), "{outcomes:?}");
+    }
+}
+
+/// `n` calls of SYSA/127, one a minute from 2031-03-01 00:00, each with its
+/// file in `<day>/127-Alpha Fire/`; their ids and the talkgroup.
+async fn alpha_calls(
+    pool: &PgPool,
+    places: (i16, i16),
+    root: &std::path::Path,
+    n: i64,
+) -> (Vec<i64>, i32) {
+    let mut calls = Vec::new();
+    let mut talkgroup = 0;
+    for i in 0..n {
+        let at = Utc.with_ymd_and_hms(2031, 3, 1, 0, 0, 0).unwrap() + chrono::Duration::minutes(i);
+        let name = format!("{}SYSA.mp3", at.format("%Y%m%d_%H%M%S"));
+        let (call, id) = filed(
+            pool,
+            places,
+            root,
+            &format!("2031-03-01/127-Alpha Fire/{name}"),
+            Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+            at,
+        )
+        .await;
+        calls.push(call);
+        talkgroup = id;
+    }
+    (calls, talkgroup)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_rename_during_a_correction_is_finished_by_the_next_correction(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let (calls, talkgroup) = alpha_calls(
+        &pool,
+        places,
+        &root,
+        scannerpulse::data::FILES_PER_STEP + 10,
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    talkgroups::rename(&mut conn, talkgroup, "Alpha 2")
+        .await
+        .unwrap();
+    scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha 2", "ann")
+        .await
+        .unwrap();
+    let context = scannerpulse::jobs::Context::new(None);
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    // A rename between two steps: the rest goes to the newest name, and the
+    // files the first step moved are left for the next correction.
+    talkgroups::rename(&mut conn, talkgroup, "Alpha 3")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    assert!(!names(&pool, talkgroup).await.2, "still listed");
+    scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha 3", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    for call in calls {
+        let rel = rel_of(&pool, call).await;
+        assert!(rel.starts_with("2031-03-01/127-Alpha 3/"), "{rel}");
+        assert!(root.join(&rel).is_file(), "{rel} has its file");
+    }
+    assert!(names(&pool, talkgroup).await.2, "corrected");
+    assert!(!root.join("2031-03-01/127-Alpha 2").exists());
+    assert!(!root.join("2031-03-01/127-Alpha Fire").exists());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_correction_refuses_a_call_whose_folder_is_not_there(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let (calls, talkgroup) = alpha_calls(&pool, places, &root, 1).await;
+    // Its day's folder is not there, as on a share that is not mounted.
+    let (lost, _) = filed(
+        &pool,
+        places,
+        &root,
+        "2031-03-02/127-Alpha Fire/20310302_120000SYSA.mp3",
+        None,
+        Utc.with_ymd_and_hms(2031, 3, 2, 12, 0, 0).unwrap(),
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    talkgroups::rename(&mut conn, talkgroup, "Alpha 2")
+        .await
+        .unwrap();
+    let (job, _) = scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha 2", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert!(
+        ended
+            .message
+            .contains("1 files of SYSA/127 corrected; 1 refused, 0 missing"),
+        "{}",
+        ended.message
+    );
+    assert!(
+        ended.message.contains("its folder is not there"),
+        "{}",
+        ended.message
+    );
+    assert_eq!(
+        rel_of(&pool, lost).await,
+        "2031-03-02/127-Alpha Fire/20310302_120000SYSA.mp3"
+    );
+    assert!(
+        rel_of(&pool, calls[0])
+            .await
+            .starts_with("2031-03-01/127-Alpha 2/")
+    );
+}
+
+/// `n` calls of SYSA/7 with no files, one a second from 2031-03-01, put in
+/// with one statement; the talkgroup's id.
+async fn many_calls(pool: &PgPool, places: (i16, i16), n: i64) -> i32 {
+    let from = common::talkgroup(pool, "SYSA", 7).await;
+    let at = Utc.with_ymd_and_hms(2031, 3, 1, 0, 0, 0).unwrap();
+    scannerpulse::store::ensure_partition(pool, at)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+         SELECT $1 + make_interval(secs => n), 1000, $2, $3, $4, \
+                '2031-03-01/7-Group 7/f' || n || '.mp3' \
+         FROM generate_series(1, $5) n",
+    )
+    .bind(at)
+    .bind(from)
+    .bind(places.1)
+    .bind(places.0)
+    .bind(n)
+    .execute(pool)
+    .await
+    .unwrap();
+    from
+}
+
+async fn calls_of(pool: &PgPool, talkgroup: i32) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM calls WHERE talkgroup_id = $1")
+        .bind(talkgroup)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_large_merge_stopped_after_one_step_is_finished_by_another(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("archive")).unwrap();
+    let places =
+        common::seed_places(&pool, &dir.path().join("archive"), &dir.path().join("in")).await;
+    let n = scannerpulse::data::MERGE_CALLS_PER_STEP + 1;
+    let from = many_calls(&pool, places, n).await;
+    let into = common::talkgroup(&pool, "SYSA", 8).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, count) = scannerpulse::data::start_merge(&mut conn, from, into, "Group 7", "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, n);
+    let context = scannerpulse::jobs::Context::new(None);
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    scannerpulse::jobs::stop(&mut conn, job, "ann")
+        .await
+        .unwrap();
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        scannerpulse::jobs::get(&pool, job)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "stopped"
+    );
+    assert_eq!(
+        calls_of(&pool, into).await,
+        scannerpulse::data::MERGE_CALLS_PER_STEP
+    );
+    assert_eq!(calls_of(&pool, from).await, 1);
+    assert!(!names(&pool, into).await.2, "marked from the first move");
+    let (again, _) = scannerpulse::data::start_merge(&mut conn, from, into, "Group 7", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, again)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+    assert_eq!(calls_of(&pool, into).await, n);
+    assert!(
+        scannerpulse::data::named(&pool, from)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_merge_whose_talkgroup_went_after_its_calls_moved_finishes(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("archive")).unwrap();
+    let places =
+        common::seed_places(&pool, &dir.path().join("archive"), &dir.path().join("in")).await;
+    let from = many_calls(&pool, places, scannerpulse::data::MERGE_CALLS_PER_STEP + 1).await;
+    let into = common::talkgroup(&pool, "SYSA", 8).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, _) = scannerpulse::data::start_merge(&mut conn, from, into, "Group 7", "ann")
+        .await
+        .unwrap();
+    let context = scannerpulse::jobs::Context::new(None);
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    // Another job took the last call and the talkgroup in the meantime.
+    sqlx::query("UPDATE calls SET talkgroup_id = $2 WHERE talkgroup_id = $1")
+        .bind(from)
+        .bind(into)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM talkgroups WHERE id = $1")
+        .bind(from)
+        .execute(&pool)
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_holding_folder_in_an_ingest_source_fails_the_purge(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let source = dir.path().join("in");
+    std::fs::create_dir_all(source.join("held")).unwrap();
+    let places = common::seed_places(&pool, &root, &source).await;
+    let (_, talkgroup) = alpha_calls(&pool, places, &root, 1).await;
+    set_holding(&pool, &source.join("held")).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "failed");
+    assert!(
+        ended.message.contains("overlaps the ingest source"),
+        "{}",
+        ended.message
+    );
+    assert_eq!(calls_of(&pool, talkgroup).await, 1);
+}
+
+#[test]
+fn a_relative_holding_folder_is_refused() {
+    let none = std::collections::HashMap::new();
+    let check = |value: &str| {
+        scannerpulse::settings::check("purge.holding_path", Some(&json!(value)), &none)
+    };
+    assert!(check("held/calls").is_err());
+    assert!(check("/srv/held/../calls").is_err());
+    assert!(check("/srv/held").is_ok());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn migration_0007_marks_only_renamed_talkgroups_with_calls(pool: PgPool) {
+    let with_calls = common::talkgroup(&pool, "SYSA", 7).await;
+    let without = common::talkgroup(&pool, "SYSA", 8).await;
+    let never_renamed = common::talkgroup(&pool, "SYSA", 9).await;
+    let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();
+    common::call(&pool, with_calls, at, None).await;
+    common::call(&pool, never_renamed, at, None).await;
+    sqlx::query(
+        "UPDATE talkgroups SET files_name = 'Old', files_correct = true WHERE id IN ($1, $2)",
+    )
+    .bind(with_calls)
+    .bind(without)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0007_files_correct.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!names(&pool, with_calls).await.2);
+    assert!(names(&pool, without).await.2);
+    assert!(names(&pool, never_renamed).await.2);
 }

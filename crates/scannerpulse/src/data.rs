@@ -19,6 +19,11 @@ use crate::archive;
 use crate::jobs::{self, Job, JobError, Kind, Outcome};
 use crate::reader::Talkgroup;
 
+/// The file an administrator puts in the holding folder to show that it is
+/// the real one, mounted: an unmounted share's mount point is an empty folder
+/// without it.
+pub const HOLDING_SENTINEL: &str = ".scannerpulse-holding";
+
 /// The calls one step of a correction takes.
 pub const FILES_PER_STEP: i64 = 50;
 
@@ -163,7 +168,7 @@ struct FileWork {
     refused: i64,
     missing: i64,
     last_refusal: Option<String>,
-    /// A purge's first step has checked the holding folder and left its marker.
+    /// A purge's first step has checked the holding folder.
     #[serde(default)]
     marked: bool,
     /// The holding folder's canonical path, as the first step found it.
@@ -201,6 +206,34 @@ async fn writes() -> sqlx::Result<tokio::sync::MutexGuard<'static, ()>> {
     tokio::time::timeout(std::time::Duration::from_secs(5), archive::WRITES.lock())
         .await
         .map_err(|_| io_error(io::Error::other("the archive is busy; trying again")))
+}
+
+/// Which directory each folder is: its device and inode. A share unmounted
+/// (or mounted) while a step runs makes the same path a different directory.
+fn identities(folders: &[&Path]) -> Vec<Option<(u64, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+    folders
+        .iter()
+        .map(|folder| {
+            std::fs::metadata(folder)
+                .ok()
+                .map(|meta| (meta.dev(), meta.ino()))
+        })
+        .collect()
+}
+
+/// Err when a folder became another directory during the step: the step then
+/// rolls back, so no row names a file written under a mount point.
+fn same_identities(folders: &[&Path], before: &[Option<(u64, u64)>]) -> sqlx::Result<()> {
+    for (folder, (now, then)) in folders.iter().zip(identities(folders).iter().zip(before)) {
+        if now != then {
+            return Err(io_error(io::Error::other(format!(
+                "{} changed during the step (unmounted?)",
+                folder.display()
+            ))));
+        }
+    }
+    Ok(())
 }
 
 /// Removes the files a committed step replaced, unless a call names one
@@ -401,12 +434,6 @@ async fn correct_one(
 pub(crate) async fn release(conn: &mut PgConnection, job: &Job) -> sqlx::Result<()> {
     let work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
     let roots = roots(conn).await?;
-    if let Some(holding) = &work.holding {
-        // A stopped purge leaves no marker; the next one writes its own.
-        let _ = std::fs::remove_file(
-            Path::new(holding).join(format!(".scannerpulse-purge-{}", job.id)),
-        );
-    }
     remove_gone(conn, &roots, &work.remove).await
 }
 
@@ -490,6 +517,8 @@ async fn correct_files(
         return Ok(FileStep::Done(done, message));
     }
     let to = talkgroup.talkgroup();
+    let folders: Vec<&Path> = roots.values().map(PathBuf::as_path).collect();
+    let before = identities(&folders);
     for call in &batch {
         if let Some(root) = roots.get(&call.location_id) {
             if !root.is_dir() {
@@ -512,6 +541,7 @@ async fn correct_files(
         }
         work.after = Some((call.started_at, call.id));
     }
+    same_identities(&folders, &before)?;
     let done = done + batch.len() as i64;
     let total = total.map(|total| total.max(done));
     Ok(FileStep::More {
@@ -938,7 +968,6 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     let roots = roots(conn).await?;
     remove_gone(conn, &roots, &work.remove).await?;
     work.remove.clear();
-    let marker = format!(".scannerpulse-purge-{}", job.id);
     if !work.marked {
         // The first step runs on the host that holds the job's lease, which
         // is where the folder must be seen: check it here, once.
@@ -982,9 +1011,9 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
                 )));
             }
         }
-        if let Err(error) = std::fs::File::create(kept.join(&marker)) {
+        if !kept.join(HOLDING_SENTINEL).is_file() {
             return Ok(Outcome::Failed(format!(
-                "cannot write in the holding folder {}: {error}",
+                "the holding folder {} has no {HOLDING_SENTINEL} file: put an empty one there to show it is the real folder, mounted",
                 kept.display()
             )));
         }
@@ -1032,15 +1061,19 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
                 "; {remain} remain (refused, in read-only locations, or filed during the purge)"
             ));
         }
-        let _ = std::fs::remove_file(holding.join(&marker));
         return Ok(Outcome::Done(job.done, message));
     }
-    if !holding.join(&marker).is_file() {
-        // An unmounted share hides the marker: try again later rather than
-        // lose a file. Checked only when there is a file to copy, so a last
-        // step whose commit failed after it removed the marker still ends.
+    // Which directories these are now, before the sentinel is looked at: a
+    // share unmounted before this is caught by the sentinel, one unmounted
+    // after it by the check at the end of the step.
+    let mut folders: Vec<&Path> = roots.values().map(PathBuf::as_path).collect();
+    folders.push(&holding);
+    let before = identities(&folders);
+    if !holding.join(HOLDING_SENTINEL).is_file() {
+        // An unmounted share hides the sentinel: try again later rather than
+        // lose a file.
         return Err(io_error(io::Error::other(format!(
-            "the holding folder {holding_path} is not the one the purge started with (unmounted?)"
+            "the holding folder {holding_path} has no {HOLDING_SENTINEL} (unmounted?)"
         ))));
     }
     for call in &batch {
@@ -1065,6 +1098,7 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         }
         work.after = Some((call.started_at, call.id));
     }
+    same_identities(&folders, &before)?;
     let done = job.done + batch.len() as i64;
     let total = job.total.map(|total| total.max(done));
     Ok(Outcome::More {
@@ -1073,4 +1107,23 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         message: format!("{} calls purged", jobs::progress(done, total)),
         work: serde_json::to_value(&work).expect("plain data"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_swapped_during_a_step_is_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("share");
+        std::fs::create_dir(&folder).unwrap();
+        let folders = [folder.as_path()];
+        let before = identities(&folders);
+        assert!(same_identities(&folders, &before).is_ok());
+        // An unmount leaves the same path naming another directory.
+        std::fs::rename(&folder, dir.path().join("away")).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        assert!(same_identities(&folders, &before).is_err());
+    }
 }
