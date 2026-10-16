@@ -23,12 +23,13 @@ describe('a stored value in its field', () => {
     expect(showValue('10')).toBe('"10"');
     expect(showValue('')).toBe('""');
     expect(showValue(' x ')).toBe('" x "');
+    expect(showValue('a\nb')).toBe('"a\\nb"');
     expect(showValue(false)).toBe('false');
     expect(showValue(['a', 'b'])).toBe('["a","b"]');
   });
 
   it('comes back as the same value when saved unchanged', () => {
-    for (const value of ['Europe/Berlin', 'true', '10', '', ' x ', 7, true, ['x'], { url: 'http://h/' }]) {
+    for (const value of ['Europe/Berlin', 'true', '10', '', ' x ', 'a\nb', 7, true, ['x'], { url: 'http://h/' }]) {
       expect(parseValue(showValue(value))).toEqual({ value });
     }
   });

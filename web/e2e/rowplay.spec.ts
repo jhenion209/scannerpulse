@@ -170,3 +170,17 @@ test('the edge has enough contrast in both themes, and runs down the whole card 
     if (selecting) expect((await rows(page).first().locator('td.c-select input').boundingBox())!.x).toBeGreaterThan(edge.x + edge.width);
   }
 });
+
+test('the column headings stay over the rows, and their bars, as the list scrolls', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.locator('.list').evaluate((list) => (list.scrollTop = 150));
+  for (const heading of [page.locator('thead th').first(), page.getByRole('columnheader', { name: 'Talkgroup' })]) {
+    const covered = await heading.evaluate((th) => {
+      const box = th.getBoundingClientRect();
+      const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return !(top && th.contains(top));
+    });
+    expect(covered, 'a row paints over the heading').toBe(false);
+  }
+});

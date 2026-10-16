@@ -62,9 +62,11 @@ test('the status is read again every 15 seconds, and a failed read keeps the las
   await expect(page.getByRole('heading', { name: 'Newest calls' })).toBeVisible();
   const before = marks.length;
   const readNow = page.getByRole('button', { name: 'Read now' });
+  await readNow.focus();
   await page.clock.fastForward('00:15');
   await expect.poll(() => marks.length).toBe(before + 1);
   expect(marks[before], 'the timer reads as a poll, which the server does not count as use').toBe('1');
+  await expect(readNow, 'the timer does not take the keyboard focus away').toBeFocused();
   failing = true;
   // A click while a read is still under way starts none, so it is made again until one is.
   await expect(async () => {
@@ -78,6 +80,8 @@ test('the status is read again every 15 seconds, and a failed read keeps the las
 test('a session that ends brings the sign-in form back', async ({ page }) => {
   await signIn(page);
   await expect(statusHeading(page)).toBeVisible();
+  // Read now starts no read while one is under way: let the first one end.
+  await expect(page.getByText(/^Read at /)).toBeVisible();
   await page.route('**/api/admin/status', (route) => route.fulfill(refuse(401, 'sign in as an admin first')));
   await page.getByRole('button', { name: 'Read now' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'The session has ended' })).toBeVisible();

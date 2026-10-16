@@ -9,7 +9,7 @@
   let data = $state<AdminStatus | null>(null);
   let readAt = $state<Date | null>(null);
   let problem = $state<string | null>(null);
-  let reading = $state(false);
+  let reading = false;
 
   /** Reads the status; a read still under way is not started again. A
    * failed read keeps the last good one on screen, with the failure above it.
@@ -45,7 +45,7 @@
     <span>
       {#if readAt}Read at {callTime(readAt.toISOString(), new Date(), siteZone())}; read again every 15 s.{:else}Reading…{/if}
     </span>
-    <button type="button" onclick={() => read()} disabled={reading}>Read now</button>
+    <button type="button" onclick={() => read()}>Read now</button>
   </div>
   {#if problem}<p class="problem" role="alert">The status could not be read: {problem}</p>{/if}
 

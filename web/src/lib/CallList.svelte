@@ -145,7 +145,7 @@
 
 <style>
   .calls { width: 100%; border-collapse: collapse; table-layout: auto; }
-  th { position: sticky; top: 0; background: var(--surface); text-align: left; font-size: 0.85rem; color: var(--muted); padding: 0.35rem 0.5rem; }
+  th { position: sticky; top: 0; z-index: 1; background: var(--surface); text-align: left; font-size: 0.85rem; color: var(--muted); padding: 0.35rem 0.5rem; }
   td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   tbody tr { cursor: pointer; }
   tr.playing td { background: var(--playing); }

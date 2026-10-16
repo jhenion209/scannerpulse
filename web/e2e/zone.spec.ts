@@ -27,6 +27,8 @@ test("a browser in another zone shows the site's times", async ({ page }) => {
 test("a date typed in the filters is the site's", async ({ page }) => {
   await page.goto('/');
   await expect(rows(page)).toHaveCount(30);
+  // The site's zone comes with the status: a date typed before it is read is the browser's.
+  await expect(page.getByRole('list', { name: 'Status' }).locator('time')).toBeVisible();
   const asked = page.waitForRequest((r) => r.url().includes('/api/calls?') && new URL(r.url()).searchParams.has('until'));
   await page.getByRole('complementary', { name: 'Filters' }).getByLabel('To', { exact: true }).fill('2031-01-01T08:00');
   expect(new URL((await asked).url()).searchParams.get('until')).toBe('2031-01-01T08:00:00.000Z');
