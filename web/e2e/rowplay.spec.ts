@@ -72,12 +72,14 @@ test("a click on a search result's row plays it in the panel's player", async ({
   await expect(rows(page)).toHaveCount(30);
   await page.getByLabel('Words to search for').fill('Engine');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
-  const first = panel(page).locator('tbody tr').first();
-  await expect(first).toBeVisible();
+  // Call 9, not the first result: earlier tests edit calls 1 and 3, so the first
+  // result can be call 7, which has no file (e2e/seed.sql) and cannot be played.
+  const result = panel(page).locator('tbody tr', { hasText: 'Engine 9 responding' }).first();
+  await expect(result).toBeVisible();
   await expect(panel(page)).toContainText('No result playing');
-  await first.locator('td.c-talkgroup').click();
+  await result.locator('td.c-talkgroup').click();
+  await expect(result).toHaveClass(/playing/);
   await expect(panel(page)).not.toContainText('No result playing');
-  await expect(first).toHaveClass(/playing/);
 });
 
 test('the left edge says whether a call was played, by width and colour', async ({ page }) => {

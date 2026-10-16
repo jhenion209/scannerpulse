@@ -64,7 +64,7 @@
         <tbody>
           {#each data.lease.heartbeats as beat (beat.host)}
             <tr>
-              <td>{beat.host}</td>
+              <td class="long">{beat.host}</td>
               <td>{seconds(beat.age)} ago</td>
               <td>{beat.expires_in >= 0 ? `in ${seconds(beat.expires_in)}` : `${seconds(beat.expires_in)} ago`}</td>
             </tr>
@@ -94,7 +94,7 @@
         <thead><tr><th scope="col">Seen</th><th scope="col">Source</th><th scope="col">File</th><th scope="col">Why</th></tr></thead>
         <tbody>
           {#each data.ingest.recent_rejected as file, i (i)}
-            <tr><td>{when(file.seen_at)}</td><td>{file.source}</td><td class="long">{file.rel_path}</td><td class="long">{file.reason ?? ''}</td></tr>
+            <tr><td>{when(file.seen_at)}</td><td class="long">{file.source}</td><td class="long">{file.rel_path}</td><td class="long">{file.reason ?? ''}</td></tr>
           {/each}
         </tbody>
       </table>
@@ -180,7 +180,7 @@
         {#each data.recent_calls as call (call.id)}
           <tr>
             <td>{when(call.started_at)}</td>
-            <td>{call.talkgroup_name ?? call.talkgroup ?? ''}{call.system ? ` · ${call.system}` : ''}</td>
+            <td class="long">{call.talkgroup_name ?? call.talkgroup ?? ''}{call.system ? ` · ${call.system}` : ''}</td>
             <td>{transcriptState(call.transcript_state)}</td>
           </tr>
         {/each}
