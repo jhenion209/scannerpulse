@@ -27,10 +27,11 @@ export function parseValue(text: string): { value: unknown } | null {
   return { value: isJson(trimmed) ? JSON.parse(trimmed) : trimmed };
 }
 
-/** A stored value as a field shows it: text that cannot be mistaken for JSON
- * without its quotes, anything else as JSON. */
+/** A stored value as a field shows it: text bare, unless it is empty, has
+ * spaces at either end, or would read as JSON, which keeps its quotes; anything
+ * else as JSON. So saving it unchanged gives back the same value. */
 export const showValue = (value: unknown) =>
-  typeof value === 'string' && !isJson(value.trim()) ? value : JSON.stringify(value);
+  typeof value === 'string' && value !== '' && value === value.trim() && !isJson(value) ? value : JSON.stringify(value);
 
 /** The settings whose key starts with `prefix`. */
 export const withPrefix = (settings: Setting[], prefix: string) => settings.filter((s) => s.key.startsWith(prefix));

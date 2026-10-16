@@ -21,12 +21,14 @@ describe('a stored value in its field', () => {
     expect(showValue('Europe/Berlin')).toBe('Europe/Berlin');
     expect(showValue('true')).toBe('"true"');
     expect(showValue('10')).toBe('"10"');
+    expect(showValue('')).toBe('""');
+    expect(showValue(' x ')).toBe('" x "');
     expect(showValue(false)).toBe('false');
     expect(showValue(['a', 'b'])).toBe('["a","b"]');
   });
 
   it('comes back as the same value when saved unchanged', () => {
-    for (const value of ['Europe/Berlin', 'true', '10', 7, true, ['x'], { url: 'http://h/' }]) {
+    for (const value of ['Europe/Berlin', 'true', '10', '', ' x ', 7, true, ['x'], { url: 'http://h/' }]) {
       expect(parseValue(showValue(value))).toEqual({ value });
     }
   });
