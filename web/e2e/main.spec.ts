@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { readFileSync } from 'node:fs';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 // Against e2e/seed.sql: calls 1 to 30 in the last 90 minutes (call 1 the
 // newest), 31 to 35 three days ago; call 7 has no audio file; call 5's text
@@ -777,3 +777,51 @@ for (const width of [1280, 360]) {
     await seen(page, 'Link copied');
   });
 }
+
+/** Every item of the open menu is on screen, above the player and drawn on top. */
+const onScreen = async (page: Page, items: Locator) => {
+  const view = page.viewportSize()!;
+  const floor = (await page.locator('footer.player').boundingBox())!.y;
+  const count = await items.count();
+  expect(count).toBeGreaterThan(0);
+  for (let i = 0; i < count; i++) {
+    const item = items.nth(i);
+    await expect(item).toBeVisible();
+    const box = (await item.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(view.width);
+    expect(box.y + box.height).toBeLessThanOrEqual(floor);
+    expect(
+      await item.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return hit === el || el.contains(hit);
+      }),
+    ).toBe(true);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(view.width);
+};
+
+test('on a phone a row\'s menu opens on screen, however far the list is scrolled', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.locator('main.list').evaluate((list) => (list.scrollTop = list.scrollHeight));
+  const tr = rows(page).last();
+  await tr.locator('details.row-actions summary').click();
+  await onScreen(page, tr.locator('.menu button'));
+  await tr.getByRole('button', { name: 'Edit text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Edit the text' })).toBeVisible();
+});
+
+test('on a phone the Export and Columns menus open on screen', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await exportMenu(page).locator('summary').click();
+  await onScreen(page, exportMenu(page).locator('.menu button'));
+  await page.keyboard.press('Escape');
+  await page.locator('details.columns summary').click();
+  await onScreen(page, page.locator('details.columns .menu input'));
+});

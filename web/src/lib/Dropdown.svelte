@@ -17,10 +17,26 @@
   } = $props();
 
   let root: HTMLDetailsElement;
+  let button: HTMLElement;
+  let menu: HTMLElement;
   let open = $state(false);
   const close = () => {
     root.open = false;
   };
+
+  // On a phone the menu is fixed to the screen, so it is given its place here:
+  // just under its button, moved up as far as it needs to clear the player,
+  // and kept to the room there is. Fixed with no place of its own would sit
+  // where the button is without the list's scroll.
+  const GAP = 8;
+  function place() {
+    menu.style.top = menu.style.maxHeight = '';
+    if (!root.open || !matchMedia('(max-width: 760px)').matches) return;
+    const floor = (document.querySelector('footer.player')?.getBoundingClientRect().top ?? innerHeight) - GAP;
+    menu.style.maxHeight = `${floor - GAP}px`;
+    const below = button.getBoundingClientRect().bottom + 4;
+    menu.style.top = `${Math.max(GAP, Math.min(below, floor - menu.offsetHeight))}px`;
+  }
 
   // What an item is given to close the menu with: it also puts the focus on
   // the menu's button first, so a dialog the item opens gives the focus back
@@ -62,9 +78,9 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<details class="dropdown {className}" bind:this={root} ontoggle={() => (open = root.open)} onkeydown={key} onfocusout={left}>
-  <summary aria-label={label}>{summary}</summary>
-  <div class="menu" role="group" aria-label={label ?? summary}>
+<details class="dropdown {className}" bind:this={root} ontoggle={() => { open = root.open; place(); }} onkeydown={key} onfocusout={left}>
+  <summary bind:this={button} aria-label={label}>{summary}</summary>
+  <div class="menu" bind:this={menu} role="group" aria-label={label ?? summary}>
     {@render children(choose)}
   </div>
 </details>
@@ -85,8 +101,9 @@
     box-shadow: 0 4px 14px rgb(0 0 0 / 0.25);
   }
   /* On a phone the button can sit anywhere, so the menu spans the screen's
-     width, just under it, instead of hanging off one side. */
+     width instead of hanging off one side. Its height and place come from
+     `place()`; the top here is only where it shows until that has run. */
   @media (max-width: 760px) {
-    .menu { position: fixed; left: 0.5rem; right: 0.5rem; min-width: 0; max-height: 60vh; overflow: auto; }
+    .menu { position: fixed; top: 4rem; left: 0.5rem; right: 0.5rem; margin: 0; min-width: 0; max-height: 60vh; overflow: auto; }
   }
 </style>
