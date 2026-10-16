@@ -19,6 +19,11 @@ pub const FILTERS_FOR: Duration = Duration::from_secs(300);
 /// planner's estimate, which costs nothing on a large archive.
 pub const EXACT_CALLS_BELOW: i64 = 100_000;
 
+/// How long the status route's reads may run: the route is public and asked
+/// often, so a slow read, or a table held by a lock, fails fast with a 503
+/// instead of holding a connection until the read ends.
+pub const STATUS_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The window the transcription queue's speed is measured over, in seconds.
 pub const RATE_WINDOW_SECONDS: i64 = 600;
 
@@ -150,20 +155,24 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
             Ok::<bool, sqlx::Error>(value.and_then(|v| v.as_bool()).unwrap_or(false))
         }
     };
+    // The route's own reads share one connection and one transaction, under
+    // one statement time limit.
+    let mut conn = state.pool.acquire().await?;
+    let mut tx = crate::listing::begin(&mut conn, STATUS_READ_LIMIT).await?;
     let queued: i64 =
         sqlx::query_scalar("SELECT count(*) FROM transcription_queue WHERE state = 'queued'")
-            .fetch_one(&state.pool)
+            .fetch_one(&mut *tx)
             .await?;
     // The planner's estimate of every month's calls; a small archive is counted.
     let estimate: i64 = sqlx::query_scalar(
         "SELECT COALESCE(sum(GREATEST(c.reltuples, 0)), 0)::bigint FROM pg_inherits i \
          JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'calls'::regclass",
     )
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
     let (calls, calls_estimated) = if estimate < EXACT_CALLS_BELOW {
         let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
-            .fetch_one(&state.pool)
+            .fetch_one(&mut *tx)
             .await?;
         (counted, false)
     } else {
@@ -175,7 +184,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         sqlx::query_as(
             "SELECT (SELECT started_at FROM calls ORDER BY started_at DESC LIMIT 1), now()",
         )
-            .fetch_one(&state.pool)
+            .fetch_one(&mut *tx)
             .await?;
     // The queue's speed: machine texts written in the window. Only calls of
     // the last day are looked at (the transcriber takes the newest first), so
@@ -187,10 +196,12 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
          AND started_at > now() - interval '1 day'",
     )
     .bind(RATE_WINDOW_SECONDS as f64)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
     let eta_seconds =
         (queued > 0 && recent > 0).then(|| (queued * RATE_WINDOW_SECONDS + recent - 1) / recent);
+    tx.commit().await?;
+    drop(conn);
     let zone = super::audio::time_zone(&state).await?;
     Ok(Json(json!({
         "maintenance": flag("maintenance.enabled").await?,

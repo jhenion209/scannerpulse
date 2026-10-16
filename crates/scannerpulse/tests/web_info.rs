@@ -177,6 +177,30 @@ async fn the_status_tells_the_chips_the_calls_the_newest_the_time_and_the_queue(
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_status_read_held_by_a_lock_gives_up_with_a_503_at_the_time_limit(pool: PgPool) {
+    // Another session holds the queue's table: the status is public and
+    // asked often, so it must answer 503 when its limit (5 s) has run out,
+    // not wait on the lock until it is let go.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE transcription_queue IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (status, answer) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        get(&pool, "/api/status"),
+    )
+    .await
+    .expect("the status waited on the lock instead of giving up at its limit");
+    let waited = started.elapsed();
+    holder.rollback().await.unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert!(answer["error"].is_string(), "{answer}");
+    assert!(waited >= std::time::Duration::from_secs(4), "{waited:?}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_labelers_list_is_shown_only_when_it_is_public(pool: PgPool) {
     let tg = talkgroup(&pool, "SYSA", 1).await;
     let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();

@@ -281,7 +281,7 @@ pub async fn count(
 /// public, and any filter can be slow on a large archive. A read is tried
 /// once more when it was a deadlock's victim: ingest
 /// can create a month's partitions while it reads.
-async fn begin(
+pub(crate) async fn begin(
     conn: &mut PgConnection,
     limit: std::time::Duration,
 ) -> sqlx::Result<sqlx::Transaction<'_, Postgres>> {
