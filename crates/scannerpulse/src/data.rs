@@ -194,6 +194,15 @@ fn io_error(error: io::Error) -> sqlx::Error {
     sqlx::Error::Io(error)
 }
 
+/// The archive lock, or an error that makes the step roll back and try
+/// again: a step holds rows the filer may be waiting for while it waits for
+/// the lock, so it never waits long.
+async fn writes() -> sqlx::Result<tokio::sync::MutexGuard<'static, ()>> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), archive::WRITES.lock())
+        .await
+        .map_err(|_| io_error(io::Error::other("the archive is busy; trying again")))
+}
+
 /// Removes the files a committed step replaced, unless a call names one
 /// again, and then their folder when it is empty.
 async fn remove_gone(
@@ -204,7 +213,7 @@ async fn remove_gone(
     for file in gone {
         // Per file, so that the filer's write of the same name cannot slip
         // between the check and the removal.
-        let _writing = archive::WRITES.lock().await;
+        let _writing = writes().await?;
         let named: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM calls WHERE location_id = $1 AND rel_path = $2)",
         )
@@ -327,7 +336,7 @@ async fn correct_one(
     let dir = format!("{day}/{folder}");
     // The name is chosen and given under the lock, so that the filer, which
     // takes the same one, never takes it too.
-    let writing = archive::WRITES.lock().await;
+    let writing = writes().await?;
     let (rel, copy) = match free_rel(
         conn,
         root,
