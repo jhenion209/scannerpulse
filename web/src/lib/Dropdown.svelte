@@ -22,6 +22,15 @@
     root.open = false;
   };
 
+  // What an item is given to close the menu with: it also puts the focus on
+  // the menu's button first, so a dialog the item opens gives the focus back
+  // there when it closes. A click or Tab away uses `close` alone and leaves
+  // the focus where it went.
+  const choose = () => {
+    close();
+    root.querySelector('summary')?.focus();
+  };
+
   // While open, a click elsewhere closes the menu. The listener exists only
   // while a menu is open, so a long list of row menus costs nothing.
   $effect(() => {
@@ -56,7 +65,7 @@
 <details class="dropdown {className}" bind:this={root} ontoggle={() => (open = root.open)} onkeydown={key} onfocusout={left}>
   <summary aria-label={label}>{summary}</summary>
   <div class="menu" role="group" aria-label={label ?? summary}>
-    {@render children(close)}
+    {@render children(choose)}
   </div>
 </details>
 
