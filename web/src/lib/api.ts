@@ -75,7 +75,7 @@ export class ApiError extends Error {
 /** The error an answer of 400 or more carries, in the server's words. */
 export async function apiError(response: Response): Promise<ApiError> {
   const body = await response.json().catch(() => ({}));
-  return new ApiError(response.status, body?.error ?? response.statusText, body?.detail ?? '');
+  return new ApiError(response.status, body?.error ?? (response.statusText || `HTTP ${response.status}`), body?.detail ?? '');
 }
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {

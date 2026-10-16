@@ -825,3 +825,75 @@ test('on a phone the Export and Columns menus open on screen', async ({ page }) 
   await page.locator('details.columns summary').click();
   await onScreen(page, page.locator('details.columns .menu input'));
 });
+
+/** The element is drawn at its own centre, so a listener can see it and reach it: not clipped, not off the screen. */
+const reachable = (item: Locator) =>
+  item.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return hit === el || el.contains(hit);
+  });
+
+// A short screen, or a page zoomed in: the panel scrolls (with the wheel, as a
+// listener does), so its pager and its player can still be reached.
+for (const [width, height] of [[640, 360], [800, 450], [360, 640]]) {
+  test(`the search panel scrolls to its pager and its player at ${width} x ${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto('/?search=responding');
+    await expect(panelRows(page).first()).toBeVisible();
+    await panel(page).getByRole('heading').hover();
+    await page.mouse.wheel(0, 5000);
+    await expect
+      .poll(() => panel(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop <= 1), { timeout: 2000 })
+      .toBe(true);
+    for (const item of [panel(page).getByLabel('Rows'), panel(page).getByRole('button', { name: 'Next' }), panel(page).locator('audio'), panel(page).locator('.now')]) {
+      expect(await reachable(item)).toBe(true);
+    }
+    // Two pages of 10 calls; the second is read by Next.
+    await panel(page).getByLabel('Rows').selectOption('10');
+    await expect(panelRows(page)).toHaveCount(10);
+    const first = await panelRows(page).first().getAttribute('data-id');
+    await panel(page).getByRole('button', { name: 'Next' }).click();
+    await expect(panel(page)).toContainText(/Page 2\b/);
+    await expect(panelRows(page)).not.toHaveCount(0);
+    expect(await panelRows(page).first().getAttribute('data-id')).not.toBe(first);
+  });
+}
+
+/** WCAG 2.x contrast ratio of two `rgb(...)` or `rgba(...)` colours (alpha ignored). */
+const contrast = (a: string, b: string) => {
+  const luminance = (css: string) => {
+    const [r, g, bl] = (css.match(/[\d.]+/g) ?? []).slice(0, 3).map((v) => {
+      const c = Number(v) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+for (const theme of ['light', 'dark']) {
+  test(`the search panel's player has a focus ring of 3:1 or more in the ${theme} theme`, async ({ page }) => {
+    await page.addInitScript((t) => localStorage.setItem('scannerpulse.theme', t), theme);
+    await page.goto('/?search=responding');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    await expect(panelRows(page).first()).toBeVisible();
+    const result = panel(page).locator('audio');
+    await page.keyboard.press('Tab');
+    await result.focus();
+    expect(await result.evaluate((el) => el.matches(':focus-visible'))).toBe(true);
+    const ring = await result.evaluate((el) => getComputedStyle(el).outlineColor);
+    const ground = await panel(page).evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(contrast(ring, ground)).toBeGreaterThanOrEqual(3);
+  });
+}
+
+test('an open search panel is left out of a printout', async ({ page }) => {
+  await page.goto('/?search=responding');
+  await expect(panelRows(page).first()).toBeVisible();
+  await page.emulateMedia({ media: 'print' });
+  await expect(page.locator('dialog.panel')).toBeHidden();
+  await page.emulateMedia({ media: 'screen' });
+  await expect(panel(page)).toBeVisible();
+});

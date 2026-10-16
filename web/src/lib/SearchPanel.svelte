@@ -210,7 +210,7 @@
     </nav>
   {/if}
 
-  <div class="player">
+  <div class="result-player">
     <audio bind:this={audio} controls preload="none" aria-label="Search result player"
       onplay={() => (player.held = true)} onended={stop} onerror={failed}></audio>
     <p class="now" aria-live="polite">
@@ -225,8 +225,11 @@
     /* The browser's own dialog style sizes it to its content: the insets decide here. */
     height: auto; max-height: none; display: none; flex-direction: column; gap: 0.5rem; padding: 0.9rem;
     border: 1px solid var(--field-border); border-radius: 8px; background: var(--bg); color: var(--text);
-    box-shadow: 0 10px 30px rgb(0 0 0 / 0.35); overflow: hidden;
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);
+    /* A short screen or a zoomed page scrolls the panel; the results keep their floor. */
+    overflow: auto;
   }
+  @media print { .panel { display: none !important; } }
   .panel[open] { display: flex; }
   .head { display: flex; align-items: center; gap: 0.5rem; }
   h2 { margin: 0; font-size: 1.1rem; flex: 1; }
@@ -247,7 +250,7 @@
   .pages label { display: flex; gap: 0.35rem; align-items: center; margin-left: auto; }
   .results { flex: 1; min-height: 6rem; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
   .error { margin: 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
-  .player { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+  .result-player { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; border-top: 1px solid var(--line); padding-top: 0.5rem; }
   audio { height: 2.25rem; flex: 1 1 14rem; }
   .now { margin: 0; }
   @media (max-width: 760px) {
