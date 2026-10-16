@@ -8,6 +8,7 @@
 
 {#if status.data}
   <ul class="chips" aria-label="Status">
+    {#if status.error}<li class="chip warn">Status unavailable</li>{/if}
     {#if status.data.maintenance}<li class="chip warn">Maintenance</li>{/if}
     <li class="chip wide">{callsText(status.data.calls, status.data.calls_estimated)}</li>
     {#if status.data.transcription}
@@ -21,7 +22,7 @@
     <li class="chip wide"><time>{clockText(serverNow(), status.data.time_zone)}</time></li>
   </ul>
 {:else if status.error}
-  <ul class="chips" aria-label="Status"><li class="chip wide">Status unavailable</li></ul>
+  <ul class="chips" aria-label="Status"><li class="chip warn">Status unavailable</li></ul>
 {/if}
 
 <style>
