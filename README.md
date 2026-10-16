@@ -97,7 +97,8 @@ listen.
   - `/audio/<id>`: a call's file, with byte ranges;
   - `POST /api/export/audio`: up to 200 calls, by `ids` or by the filters,
     joined into one mp3 of at most 256 MiB of audio; `/api/export/xlsx`: a search's matches, newest
-    first, at most 100,000 rows, as an Excel file; two exports at a time;
+    first, at most 100,000 rows, as an Excel file, each row with a link to its
+    `/audio/<id>` on the address the request reached; two exports at a time;
   - `/api/live`: a websocket of new calls and transcripts (`talkgroups`, and
     `since`, the last call a reconnecting page saw);
   - `POST /api/auth/login` (`login`, `password`) signs an admin in: the
