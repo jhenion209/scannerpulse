@@ -61,6 +61,23 @@
     --bar-focus: #5ec8e5;
   }
 }
+/* On paper the listener's theme gives way to dark text on white, whichever
+   theme is chosen or the device prefers (a dark page prints faint). The
+   selector is repeated so that it outranks both dark sets above. */
+@media print {
+  :root:root:root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --text: #000000;
+    --muted: #333333;
+    --line: #999999;
+    --field-border: #767676;
+    --accent: #0e749b;
+    --playing: #e1f3fa;
+    --played: #333333;
+  }
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

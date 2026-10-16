@@ -1,7 +1,9 @@
 <script lang="ts">
   import Dropdown from './Dropdown.svelte';
 
-  let { chosenCount, busy, onexcel, oncsv, onprint, onaudio }: {
+  let { selecting, chosenCount, busy, onexcel, oncsv, onprint, onaudio }: {
+    /** Selection mode is on: the page's exports and call audio then cover the ticked calls only. */
+    selecting: boolean;
     /** Calls ticked in selection mode; the page's exports cover them when there are some. */
     chosenCount: number;
     /** A file is being made on the server. */
@@ -12,17 +14,20 @@
     onaudio: () => void;
   } = $props();
 
-  const scope = $derived(chosenCount ? `${chosenCount} selected` : 'this page');
+  const scope = $derived(selecting ? `${chosenCount} selected` : 'this page');
+  // Selection on and nothing ticked: no export of the page or of the audio
+  // (nothing never means everything). Excel is every match either way.
+  const nothing = $derived(selecting && chosenCount === 0);
 </script>
 
 <Dropdown summary="Export" class="export">
   {#snippet children(close)}
     <button type="button" disabled={busy} onclick={() => { close(); onexcel(); }}>Excel — every match</button>
-    <button type="button" onclick={() => { close(); oncsv(); }}>CSV — {scope}</button>
-    <button type="button" onclick={() => { close(); onprint('pdf'); }}>PDF — {scope}</button>
-    <button type="button" onclick={() => { close(); onprint('print'); }}>Print — {scope}</button>
-    <button type="button" disabled={busy} onclick={() => { close(); onaudio(); }}>
-      Call audio — {chosenCount ? `${chosenCount} selected` : 'every match'}
+    <button type="button" disabled={nothing} onclick={() => { close(); oncsv(); }}>CSV — {scope}</button>
+    <button type="button" disabled={nothing} onclick={() => { close(); onprint('pdf'); }}>PDF — {scope}</button>
+    <button type="button" disabled={nothing} onclick={() => { close(); onprint('print'); }}>Print — {scope}</button>
+    <button type="button" disabled={busy || nothing} onclick={() => { close(); onaudio(); }}>
+      Call audio — {selecting ? `${chosenCount} selected` : 'every match'}
     </button>
     <p class="hint">PDF opens the print dialog: choose “Save as PDF”.</p>
   {/snippet}

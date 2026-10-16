@@ -263,6 +263,7 @@
   }
 
   function csv() {
+    if (selecting && chosen.length === 0) return tell('Nothing is selected: tick calls first.');
     const name = pageName('csv');
     saveFile(new Blob([csvText(pageTable(pageRows(), columns, zone()))], { type: 'text/csv' }), name);
     tell(`Saved ${name}.`);
@@ -271,6 +272,7 @@
   /** Prints the page (or the chosen calls); the file name the browser offers
    * for a PDF is the export name, as the page's title. */
   async function printPage(kind: 'pdf' | 'print') {
+    if (selecting && chosen.length === 0) return tell('Nothing is selected: tick calls first.');
     const title = document.title;
     printChosen = selecting && chosen.length > 0;
     document.title = pageName('pdf').replace(/\.pdf$/, '');
@@ -285,6 +287,7 @@
   }
 
   async function audio() {
+    if (selecting && chosen.length === 0) return tell('Nothing is selected: tick calls first.');
     exporting = true;
     const ids = selecting && chosen.length ? chosen : undefined;
     tell(ids ? `Joining the audio of ${ids.length} chosen calls…` : 'Joining the audio of every match…');
@@ -396,7 +399,7 @@
       oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go}
       bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length}>
       {#snippet extra()}
-        <ExportMenu chosenCount={selecting ? chosen.length : 0} busy={exporting}
+        <ExportMenu {selecting} chosenCount={selecting ? chosen.length : 0} busy={exporting}
           onexcel={excel} oncsv={csv} onprint={printPage} onaudio={audio} />
       {/snippet}
     </Pager>
