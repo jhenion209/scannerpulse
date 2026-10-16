@@ -15,10 +15,11 @@
   import { loadPrefs } from './lib/prefs';
   import { startStatus } from './lib/status.svelte';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
+  import TranscriptionArea from './lib/admin/TranscriptionArea.svelte';
   import ViewersArea from './lib/admin/ViewersArea.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, accounts: AccountsArea, settings: SettingsArea,
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, accounts: AccountsArea, settings: SettingsArea,
     favorites: FavoritesArea, viewers: ViewersArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
