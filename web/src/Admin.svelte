@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, type Component } from 'svelte';
+  import AccountsArea from './lib/admin/AccountsArea.svelte';
   import { AREAS, areaOf, type AreaId } from './lib/admin/areas';
   import { activeCount } from './lib/admin/jobs';
   import { followJobs, jobs } from './lib/admin/jobs.svelte';
@@ -15,7 +16,7 @@
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, settings: SettingsArea, jobs: JobsArea };
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, accounts: AccountsArea, settings: SettingsArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
   let area = $state<AreaId>(areaOf(location.hash));
