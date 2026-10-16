@@ -14,6 +14,7 @@
   const canOlder = $derived(view.calls.length > 0 && (!onPage || step(view.calls, id, 'older') !== null));
 
   $effect(() => {
+    void player.request;
     if (id === null) return;
     audio.src = `/audio/${id}`;
     // A browser may refuse to start sound before the listener has clicked:
@@ -29,8 +30,9 @@
   }
 
   function failedToPlay() {
+    // An error from a source that has been replaced is not the new call's.
+    if (id === null || !audio.error || audio.getAttribute('src') !== `/audio/${id}`) return;
     player.busy = false;
-    if (id === null) return;
     failed.add(id);
     const next = afterFailure(view.calls, id, player.direction, failed);
     if (next) play(next, player.direction);

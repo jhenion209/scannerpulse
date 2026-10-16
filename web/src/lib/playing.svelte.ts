@@ -9,6 +9,8 @@ export const player = $state({
   direction: 'newer' as Direction,
   /** Sound is coming out: "Play new calls" waits for it to stop. */
   busy: false,
+  /** Counts every request to play; asking for the call already loaded still loads it again. */
+  request: 0,
 });
 
 /** Calls played or failed in this visit; nothing is kept after the page closes. */
@@ -18,7 +20,10 @@ export const failed = new SvelteSet<number>();
 export function play(call: Call, direction: Direction = 'newer') {
   player.call = call;
   player.direction = direction;
+  player.request += 1;
   played.add(call.id);
+  // Playing a call that failed is a retry.
+  failed.delete(call.id);
 }
 
 /** Plays the next row up or down; nothing at the page's edge. */

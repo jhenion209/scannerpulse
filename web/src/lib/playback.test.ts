@@ -29,6 +29,10 @@ describe('when a call ends or fails', () => {
     expect(afterEnd(calls, 5, true, new Set())).toBeNull();
   });
 
+  it('plays nothing when the ended call is no longer on the page', () => {
+    expect(afterEnd(calls, 99, true, new Set())).toBeNull();
+  });
+
   it('passes over a newer call that failed before', () => {
     expect(afterEnd(calls, 2, true, new Set([3]))?.id).toBe(4);
   });

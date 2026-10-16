@@ -12,9 +12,10 @@ export function step<T extends { id: number }>(calls: T[], id: number | null, di
 }
 
 /** What plays when `id` ends: in continuous play, the next newer call that
- * has not failed. */
+ * has not failed. Nothing when `id` has left the page: the list is another
+ * one now, and its top row is not the call that follows. */
 export const afterEnd = <T extends { id: number }>(calls: T[], id: number, continuous: boolean, failed: Set<number>) =>
-  continuous ? afterFailure(calls, id, 'newer', failed) : null;
+  continuous && calls.some((c) => c.id === id) ? afterFailure(calls, id, 'newer', failed) : null;
 
 /** What plays when `id` fails: the next call the same way that has not failed. */
 export function afterFailure<T extends { id: number }>(
