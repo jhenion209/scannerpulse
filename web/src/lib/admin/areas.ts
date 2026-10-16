@@ -5,6 +5,7 @@ export const AREAS = [
   { id: 'status', label: 'Status' },
   { id: 'maintenance', label: 'Maintenance' },
   { id: 'transcription', label: 'Transcription' },
+  { id: 'reports', label: 'Reports' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'settings', label: 'Settings' },
   { id: 'favorites', label: 'Favorites' },

@@ -8,6 +8,7 @@
   import JobsArea from './lib/admin/JobsArea.svelte';
   import { checkSession, session, signOut, why } from './lib/admin/session.svelte';
   import MaintenanceArea from './lib/admin/MaintenanceArea.svelte';
+  import ReportsArea from './lib/admin/ReportsArea.svelte';
   import SettingsArea from './lib/admin/SettingsArea.svelte';
   import SignIn from './lib/admin/SignIn.svelte';
   import StatusArea from './lib/admin/StatusArea.svelte';
@@ -19,7 +20,7 @@
   import ViewersArea from './lib/admin/ViewersArea.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, accounts: AccountsArea, settings: SettingsArea,
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, accounts: AccountsArea, settings: SettingsArea,
     favorites: FavoritesArea, viewers: ViewersArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
