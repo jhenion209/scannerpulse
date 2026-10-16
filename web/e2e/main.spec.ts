@@ -51,6 +51,7 @@ test('a talkgroup filter is in the URL, and the link reproduces it', async ({ pa
   await page.getByLabel('Find a talkgroup').fill('ambul');
   await page.getByRole('checkbox', { name: 'Valley Ambulance' }).check();
   await expect(rows(page)).toHaveCount(10);
+  await expect(page.locator('td.tg')).toHaveCount(10);
   await expect(page.locator('td.tg').filter({ hasNotText: 'Valley Ambulance' })).toHaveCount(0);
   const url = page.url();
   expect(url).toMatch(/talkgroups=\d+/);
@@ -95,7 +96,14 @@ test('the player steps with N and P, stops at the edges and passes over a call t
   await expect(playingRow(page)).toHaveAttribute('data-id', String(all[7]));
   await expect(rows(page).nth(6)).toHaveClass(/played/);
   // Keys typed into a field are the field's.
-  await page.getByLabel('Find a talkgroup').fill('np');
+  const field = page.getByLabel('Find a talkgroup');
+  await field.focus();
+  // One key at a time: N then P would step away and back to the same row.
+  await field.pressSequentially('n');
+  await expect(field).toHaveValue('n');
+  await expect(playingRow(page)).toHaveAttribute('data-id', String(all[7]));
+  await field.pressSequentially('p');
+  await expect(field).toHaveValue('np');
   await expect(playingRow(page)).toHaveAttribute('data-id', String(all[7]));
 });
 
@@ -120,6 +128,7 @@ for (const theme of ['light', 'dark']) {
       await page.setViewportSize({ width, height: 800 });
       await page.addInitScript((t) => localStorage.setItem('scannerpulse.theme', t), theme);
       await page.goto('/');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(rows(page)).toHaveCount(30);
       const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
       expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);

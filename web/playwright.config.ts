@@ -12,7 +12,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  use: { baseURL: external ?? `http://${listen}`, ...devices['Desktop Chrome'] },
+  reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
+  use: { baseURL: external ?? `http://${listen}`, trace: 'retain-on-failure', ...devices['Desktop Chrome'] },
   webServer: external
     ? undefined
     : {

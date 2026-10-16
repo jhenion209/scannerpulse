@@ -33,6 +33,10 @@ describe('when a call ends or fails', () => {
     expect(afterEnd(calls, 99, true, new Set())).toBeNull();
   });
 
+  it('plays nothing when every newer call has failed', () => {
+    expect(afterEnd(calls, 3, true, new Set([4, 5]))).toBeNull();
+  });
+
   it('passes over a newer call that failed before', () => {
     expect(afterEnd(calls, 2, true, new Set([3]))?.id).toBe(4);
   });
