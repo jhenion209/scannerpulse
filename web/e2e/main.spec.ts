@@ -319,3 +319,121 @@ test('the top bar shows the status: the calls, the newest call\'s age and the se
   await expect(chips).not.toContainText('Maintenance');
   await expect(chips).not.toContainText('Queue');
 });
+
+const actionsOf = async (page: Page, row: number) => {
+  await expect(rows(page)).toHaveCount(30);
+  const tr = rows(page).nth(row);
+  await tr.locator('details.row-actions summary').click();
+  return tr;
+};
+
+test('a call\'s text is edited in a dialog, checked as the server checks it, and kept', async ({ page }) => {
+  await page.goto('/');
+  // Row 3 is call 3, which has a text.
+  const tr = await actionsOf(page, 2);
+  await tr.getByRole('button', { name: 'Edit text' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit the text' });
+  await expect(dialog).toBeVisible();
+  const box = dialog.getByLabel('Text');
+  await box.fill('a <b> tag');
+  await expect(dialog.getByRole('alert')).toHaveText('a transcript cannot contain < or >');
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+  const text = `Corrected by a test ${Date.now()}`;
+  await box.fill(text);
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(tr.locator('td.c-text')).toContainText(text);
+  await page.reload();
+  await expect(rows(page).nth(2).locator('td.c-text')).toContainText(text);
+});
+
+test('a refused save shows the server\'s own words and keeps the dialog open', async ({ page }) => {
+  await page.route('**/api/calls/*/transcript', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'service unavailable', detail: 'the site is under maintenance: saving is paused' }),
+    }),
+  );
+  await page.goto('/');
+  const tr = await actionsOf(page, 2);
+  await tr.getByRole('button', { name: 'Edit text' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit the text' });
+  await dialog.getByLabel('Text').fill('A text that will not be saved');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('The text was not saved: the site is under maintenance: saving is paused');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+});
+
+test('a call downloads under its own file name', async ({ page }) => {
+  await page.goto('/');
+  const tr = await actionsOf(page, 0);
+  const id = await tr.getAttribute('data-id');
+  const [file] = await Promise.all([
+    page.waitForEvent('download'),
+    tr.getByRole('button', { name: 'Download' }).click(),
+  ]);
+  // The seed names call n's file call-n.mp3; row 1 is call 1.
+  expect(file.suggestedFilename()).toBe('call-1.mp3');
+  expect(file.url()).toMatch(new RegExp(`/audio/${id}$`));
+});
+
+test('sharing a call copies a link to its own page', async ({ page, context, baseURL }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/');
+  const tr = await actionsOf(page, 0);
+  const id = await tr.getAttribute('data-id');
+  await tr.getByRole('button', { name: 'Share link' }).click();
+  const url = `${baseURL}/calls/${id}`;
+  await expect(page.getByRole('status')).toHaveText(`Link copied: ${url}`);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(url);
+});
+
+test('where the browser will not copy, the link is shown selected to copy by hand', async ({ page, baseURL }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: () => Promise.reject(new Error('not allowed')) },
+    });
+  });
+  await page.goto('/');
+  const tr = await actionsOf(page, 0);
+  const id = await tr.getAttribute('data-id');
+  await tr.getByRole('button', { name: 'Share link' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Link to this call' });
+  const field = dialog.getByLabel('Copy the link');
+  await expect(field).toHaveValue(`${baseURL}/calls/${id}`);
+  expect(await field.evaluate((input: HTMLInputElement) => input.selectionEnd - input.selectionStart)).toBe(
+    `${baseURL}/calls/${id}`.length,
+  );
+});
+
+test('a shared link opens the call above the list, ready to play', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  const id = (await ids(page))[4];
+  await page.goto(`/calls/${id}`);
+  const card = page.getByRole('region', { name: 'Shared call' });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText(/Metro|Valley/);
+  await card.getByRole('button', { name: /^Play/ }).click();
+  await expect(page.locator('.now')).not.toHaveText('Nothing playing');
+  await card.getByRole('button', { name: 'Close' }).click();
+  await expect(card).toHaveCount(0);
+  await expect(page).toHaveURL(/\/(\?.*)?$/);
+});
+
+test('a link to a call that is gone says so', async ({ page }) => {
+  await page.goto('/calls/987654321');
+  await expect(page.getByRole('region', { name: 'Shared call' })).toContainText('That call is not in the archive.');
+});
+
+test('no accessibility fault with the edit dialog open', async ({ page }) => {
+  await page.goto('/');
+  const tr = await actionsOf(page, 2);
+  await tr.getByRole('button', { name: 'Edit text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Edit the text' })).toBeVisible();
+  const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
+  expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
+});

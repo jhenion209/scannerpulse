@@ -40,6 +40,12 @@ export interface Favorite {
   talkgroups: number[];
 }
 
+/** `/api/calls/<id>`: a call with its file's name. */
+export interface CallDetail extends Call {
+  file: string;
+  labeled: boolean;
+}
+
 /** `/api/status`: what the top bar's chips show. */
 export interface Status {
   maintenance: boolean;
@@ -64,12 +70,15 @@ export class ApiError extends Error {
   }
 }
 
+/** The error an answer of 400 or more carries, in the server's words. */
+export async function apiError(response: Response): Promise<ApiError> {
+  const body = await response.json().catch(() => ({}));
+  return new ApiError(response.status, body?.error ?? response.statusText, body?.detail ?? '');
+}
+
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, { signal, headers: { accept: 'application/json' } });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, body?.error ?? response.statusText, body?.detail ?? '');
-  }
+  if (!response.ok) throw await apiError(response);
   return response.json() as Promise<T>;
 }
 
@@ -78,3 +87,15 @@ export const fetchCalls = (query: URLSearchParams, signal?: AbortSignal) =>
 export const fetchFilterChoices = () => getJson<FilterChoices>('/api/filters');
 export const fetchFavorites = () => getJson<Favorite[]>('/api/favorites');
 export const fetchStatus = () => getJson<Status>('/api/status');
+export const fetchCall = (id: number) => getJson<CallDetail>(`/api/calls/${id}`);
+
+/** Saves a person's text for a call (the public edit); throws the server's refusal. */
+export async function saveTranscript(id: number, text: string): Promise<{ id: number; transcript: string; origin: string }> {
+  const response = await fetch(`/api/calls/${id}/transcript`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json();
+}

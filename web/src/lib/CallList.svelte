@@ -3,6 +3,7 @@
   import type { Call } from './api';
   import { COLUMNS, EXTRA_COLUMNS, extraText, isExtra, type ColumnId } from './columns';
   import { callTime, lengthPercent, seconds } from './format';
+  import RowActions from './RowActions.svelte';
 
   let {
     calls,
@@ -11,6 +12,9 @@
     showAll,
     columns,
     onplay,
+    onedit,
+    ondownload,
+    onshare,
   }: {
     calls: Call[];
     playingId: number | null;
@@ -18,6 +22,9 @@
     showAll: boolean;
     columns: ColumnId[];
     onplay: (call: Call) => void;
+    onedit: (call: Call) => void;
+    ondownload: (call: Call) => void;
+    onshare: (call: Call) => void;
   } = $props();
 
   const expanded = new SvelteSet<number>();
@@ -44,6 +51,7 @@
       {#each shown as column (column.id)}
         <th scope="col" class={`c-${column.id}`} class:extra={isExtra(column.id)} class:text={column.id === 'text'}>{column.label}</th>
       {/each}
+      <th scope="col" class="c-actions"><span class="visually-hidden">Actions</span></th>
     </tr>
   </thead>
   <tbody>
@@ -87,6 +95,10 @@
             <td class={`c-${column.id} extra`}>{extraText(call, column.id)}</td>
           {/if}
         {/each}
+        <td class="c-actions">
+          <RowActions label={`${talkgroup(call)} at ${callTime(call.started_at, now)}`}
+            onedit={() => onedit(call)} ondownload={() => ondownload(call)} onshare={() => onshare(call)} />
+        </td>
         {#if labels.length}
           <td class="chips">
             {#each labels as chip (chip.id)}
@@ -127,13 +139,14 @@
   @media (max-width: 760px) {
     thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
     tbody, tr, td { display: block; }
-    tr { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; border-bottom: 1px solid var(--line); }
+    tr { display: grid; grid-template-columns: auto auto 1fr auto auto; align-items: center; border-bottom: 1px solid var(--line); }
     td { border: 0; padding: 0.2rem 0.4rem; }
     td.extra, th.extra { display: none; }
     .c-play { grid-column: 1; }
     .c-time { grid-column: 2; }
     .c-talkgroup { grid-column: 3; overflow: hidden; text-overflow: ellipsis; }
     .c-length { grid-column: 4; }
+    .c-actions { grid-column: 5; }
     .bar { display: none; }
     td.text { grid-column: 1 / -1; padding-top: 0; }
     td.chips { display: flex; flex-wrap: wrap; gap: 0.1rem 0.9rem; grid-column: 1 / -1; padding-top: 0; font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; }

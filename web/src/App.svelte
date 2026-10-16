@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import type { Call } from './lib/api';
+  import { ApiError, fetchCall, type Call, type CallDetail } from './lib/api';
+  import { sharedCallId, shareUrl } from './lib/actions';
   import CallList from './lib/CallList.svelte';
   import { defaultColumns, type ColumnId } from './lib/columns';
   import { goTo, show, view } from './lib/calls.svelte';
@@ -10,7 +11,10 @@
   import FilterRail from './lib/FilterRail.svelte';
   import { addCall, liveApplies, liveUrl, newestId, setTranscript, wanted, type LiveEvent } from './lib/live';
   import { favoriteUnresolved, filtersToSearch, parseFilters, parsePage, talkgroupsAskedFor } from './lib/filters';
+  import EditDialog from './lib/EditDialog.svelte';
   import Pager from './lib/Pager.svelte';
+  import ShareDialog from './lib/ShareDialog.svelte';
+  import SharedCall from './lib/SharedCall.svelte';
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
   import { FIRST_PAGE } from './lib/paging';
@@ -200,6 +204,73 @@
     savePref('autoplayNew', on);
   }
 
+  // The actions on one call.
+  let editing = $state<Call | null>(null);
+  let sharing = $state<string | null>(null);
+  let notice = $state<string | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function tell(text: string) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), 6000);
+  }
+
+  function saved(id: number, transcript: string, origin: string) {
+    const rows = setTranscript(view.calls, { type: 'transcript', id, talkgroup_id: null, transcript, origin });
+    if (rows) view.calls = rows;
+    if (shared.call?.id === id) shared.call = { ...shared.call, transcript, origin };
+    tell('The text is saved.');
+  }
+
+  /** Downloads the call under its file's own name. */
+  async function download(call: Call) {
+    try {
+      const detail = await fetchCall(call.id);
+      const link = document.createElement('a');
+      link.href = `/audio/${call.id}`;
+      link.download = detail.file;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      tell(`The call could not be downloaded: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Copies a link to the call; where the browser will not, shows it to copy by hand. */
+  async function share(call: Call) {
+    const url = shareUrl(location.origin, call.id);
+    try {
+      await navigator.clipboard.writeText(url);
+      tell(`Link copied: ${url}`);
+    } catch {
+      sharing = url;
+    }
+  }
+
+  // A link to one call (`/calls/<id>`) shows it above the list.
+  const sharedId = sharedCallId(location.pathname);
+  const shared = $state<{ open: boolean; call: CallDetail | null; error: string | null }>({
+    open: sharedId !== null,
+    call: null,
+    error: null,
+  });
+  onMount(() => {
+    if (sharedId === null) return;
+    fetchCall(sharedId)
+      .then((call) => (shared.call = call))
+      .catch((error) => {
+        shared.error =
+          error instanceof ApiError && error.status === 404
+            ? 'That call is not in the archive.'
+            : `The call could not be read: ${error instanceof Error ? error.message : String(error)}`;
+      });
+  });
+  function closeShared() {
+    shared.open = false;
+    history.replaceState(null, '', `/${location.search}${location.hash}`);
+  }
+
   function toggleRail() {
     if (narrow.current) menuOpen = !menuOpen;
     else {
@@ -228,17 +299,24 @@
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} {columns} customised={prefs.columns !== null}
       oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go} />
+    {#if shared.open}
+      <SharedCall call={shared.call} error={shared.error} onplay={(call) => play(call)} onclose={closeShared} />
+    {/if}
+    <p class="notice" role="status">{notice ?? ''}</p>
     {#if choices.error}<p class="error" role="alert">The filter choices could not be read: {choices.error}</p>{/if}
     {#if view.error}<p class="error" role="alert">{view.error}</p>{/if}
     {#if !view.loading && !view.error && view.calls.length === 0}
       <p class="empty">No calls match these filters{filters.allDates || filters.from || filters.to ? '' : ' in the last 24 hours'}.</p>
     {/if}
-    <CallList calls={view.calls} playingId={player.call?.id ?? null} {played} showAll={prefs.showAllRows} {columns} onplay={(call) => play(call)} />
+    <CallList calls={view.calls} playingId={player.call?.id ?? null} {played} showAll={prefs.showAllRows} {columns} onplay={(call) => play(call)}
+      onedit={(call) => (editing = call)} ondownload={download} onshare={share} />
   </main>
   <footer class="player" aria-label="Player">
     <Player bind:continuous={() => prefs.continuous, setContinuous} bind:autoplayNew={() => prefs.autoplayNew, setAutoplayNew} />
   </footer>
 </div>
+<EditDialog call={editing} onclose={() => (editing = null)} onsaved={saved} />
+<ShareDialog url={sharing} onclose={() => (sharing = null)} />
 
 <style>
   .shell {
@@ -262,6 +340,8 @@
   .error { margin: 0.9rem 0.9rem 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
   .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; }
   .empty { margin: 1rem; color: var(--muted); }
+  .notice { margin: 0; padding: 0 0.9rem; }
+  .notice:not(:empty) { margin: 0.6rem 0.9rem 0; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--surface); border: 1px solid var(--field-border); }
   .player { grid-area: player; background: var(--bar); color: var(--bar-text); }
   @media (max-width: 760px) {
     .bar { flex-wrap: wrap; row-gap: 0.4rem; }
