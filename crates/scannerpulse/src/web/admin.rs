@@ -190,7 +190,16 @@ pub async fn settings_set(
     let mut conn = state.pool.acquire().await?;
     crate::settings::change(&mut conn, &key, Some(&body.value)).await?;
     record(&admin, format!("set {key} to {}", body.value));
+    forget_choices(&state, &key).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A new system order shows in this host's filter choices at once; another
+/// host's kept copy runs out within `info::FILTERS_FOR`.
+async fn forget_choices(state: &AppState, key: &str) {
+    if key == "web.system_order" {
+        *state.filters.lock().await = None;
+    }
 }
 
 pub async fn settings_unset(
@@ -201,6 +210,7 @@ pub async fn settings_unset(
     let mut conn = state.pool.acquire().await?;
     crate::settings::change(&mut conn, &key, None).await?;
     record(&admin, format!("removed {key}"));
+    forget_choices(&state, &key).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

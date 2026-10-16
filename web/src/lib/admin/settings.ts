@@ -38,3 +38,13 @@ export const showValue = (value: unknown) =>
 
 /** The settings whose key starts with `prefix`. */
 export const withPrefix = (settings: Setting[], prefix: string) => settings.filter((s) => s.key.startsWith(prefix));
+
+/** The list with the item at `index` swapped with its neighbour `by` away;
+ * unchanged when that would go past an end. */
+export function moved<T>(list: T[], index: number, by: -1 | 1): T[] {
+  const other = index + by;
+  if (other < 0 || other >= list.length) return list;
+  const copy = [...list];
+  [copy[index], copy[other]] = [copy[other], copy[index]];
+  return copy;
+}

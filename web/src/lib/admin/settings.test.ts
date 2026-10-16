@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseValue, showValue, withPrefix, type Setting } from './settings';
+import { moved, parseValue, showValue, withPrefix, type Setting } from './settings';
 
 describe('a typed value', () => {
   it('is JSON when it reads as JSON', () => {
@@ -39,5 +39,14 @@ describe('a group of settings', () => {
   it('is the settings under one prefix', () => {
     const rows: Setting[] = ['oidc.issuer', 'oidc.client_id', 'time_zone'].map((key) => ({ key, value: null, updated_at: null, known: true }));
     expect(withPrefix(rows, 'oidc.').map((s) => s.key)).toEqual(['oidc.issuer', 'oidc.client_id']);
+  });
+});
+
+describe('moving an item of a list', () => {
+  it('swaps it with its neighbour, and stays put at an end', () => {
+    expect(moved(['A', 'B', 'C'], 2, -1)).toEqual(['A', 'C', 'B']);
+    expect(moved(['A', 'B', 'C'], 0, 1)).toEqual(['B', 'A', 'C']);
+    expect(moved(['A', 'B', 'C'], 0, -1)).toEqual(['A', 'B', 'C']);
+    expect(moved(['A', 'B', 'C'], 2, 1)).toEqual(['A', 'B', 'C']);
   });
 });

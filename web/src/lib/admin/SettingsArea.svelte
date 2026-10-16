@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import SettingField from './SettingField.svelte';
+  import SystemOrder from './SystemOrder.svelte';
   import { admin, why } from './session.svelte';
   import type { Setting } from './settings';
 
@@ -25,6 +26,8 @@
     a bad one is refused before it is saved. Type JSON (<code>true</code>, <code>30</code>,
     <code>["a", "b"]</code>) or plain text, such as a time zone.
   </p>
+  <SystemOrder onsaved={read} />
+  <h2>Every setting</h2>
   {#if problem}<p class="problem" role="alert">The settings could not be read: {problem}</p>{/if}
   {#if settings === null}
     <p class="empty">Reading…</p>

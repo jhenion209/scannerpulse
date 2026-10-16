@@ -47,3 +47,18 @@ test("a refused value is shown beside its field, in the server's words", async (
   await switchField.getByRole('button', { name: 'Save' }).click();
   await expect(switchField.getByRole('alert')).toHaveText('Not saved: Type a value first, or remove the setting.');
 });
+
+test("the systems' order is set by moving them, and the talkgroup list follows it", async ({ page }) => {
+  await signIn(page, '#settings');
+  const items = page.getByRole('list', { name: 'Order of the systems' }).getByRole('listitem');
+  await expect(items).toHaveText([/^Metro/, /^Valley/]);
+  await expect(page.getByRole('button', { name: 'Move Metro up' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Save the order' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Move Valley up' }).click();
+  await expect(items).toHaveText([/^Valley/, /^Metro/]);
+  await page.getByRole('button', { name: 'Save the order' }).click();
+  await expect(page.getByText('Saved. The talkgroup list shows the systems in this order.')).toBeVisible();
+  await expect(field(page, 'web.system_order').locator('input')).toHaveValue('["Valley","Metro"]');
+  await page.goto('/');
+  await expect(page.locator('.groups .group .system')).toHaveText(['Valley', 'Metro']);
+});

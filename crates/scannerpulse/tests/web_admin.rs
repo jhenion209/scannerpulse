@@ -1,6 +1,6 @@
 mod common;
 
-use common::{admin, app, send, sign_in};
+use common::{admin, app, send, sign_in, talkgroup};
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -200,4 +200,50 @@ async fn an_admin_sets_and_removes_favorite_lists(pool: PgPool) {
             .status,
         404
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_new_system_order_shows_in_the_filter_choices_at_once(pool: PgPool) {
+    let app = app(&pool);
+    talkgroup(&pool, "ALPHA", 1).await;
+    talkgroup(&pool, "BRAVO", 2).await;
+    let systems = |body: &serde_json::Value| -> Vec<String> {
+        body["systems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // The choices are read once, and kept.
+    let before = send(&app, "GET", "/api/filters", &[], None).await;
+    assert_eq!(systems(&before.body), ["ALPHA", "BRAVO"]);
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let saved = send(
+        &app,
+        "PUT",
+        "/api/admin/settings/web.system_order",
+        &h,
+        Some(json!({"value": ["BRAVO"]})),
+    )
+    .await;
+    assert_eq!(saved.status, 204);
+    let after = send(&app, "GET", "/api/filters", &[], None).await;
+    assert_eq!(
+        systems(&after.body),
+        ["BRAVO", "ALPHA"],
+        "this host's kept choices are dropped"
+    );
+    let removed = send(
+        &app,
+        "DELETE",
+        "/api/admin/settings/web.system_order",
+        &h,
+        None,
+    )
+    .await;
+    assert_eq!(removed.status, 204);
+    let again = send(&app, "GET", "/api/filters", &[], None).await;
+    assert_eq!(systems(&again.body), ["ALPHA", "BRAVO"]);
 }
