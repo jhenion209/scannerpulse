@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { apiError } from './api';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { apiError, saveTranscript } from './api';
 
 describe('the error an answer carries', () => {
   it('speaks in the server\'s words: the detail, else the error', async () => {
@@ -19,5 +19,29 @@ describe('the error an answer carries', () => {
   it('keeps the status text when there is one', async () => {
     const proxy = new Response('gateway', { status: 504, statusText: 'Gateway Timeout' });
     expect((await apiError(proxy)).message).toBe('Gateway Timeout');
+  });
+});
+
+describe('a saved text', () => {
+  const saved = () => new Response(JSON.stringify({ id: 3, transcript: 'x', origin: 'human' }), { status: 200 });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("carries a signed-in admin's token, so it is saved under their name", async () => {
+    const fetched = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ login: 'ann', csrf: 'tok' }), { status: 200 }))
+      .mockResolvedValueOnce(saved());
+    vi.stubGlobal('fetch', fetched);
+    await saveTranscript(3, 'x');
+    expect(fetched.mock.calls[0][0]).toBe('/api/auth/me');
+    expect((fetched.mock.calls[1][1]?.headers as Record<string, string>)['x-csrf-token']).toBe('tok');
+  });
+
+  it("is a visitor's when nobody is signed in", async () => {
+    const fetched = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unauthorized', detail: '' }), { status: 401 }))
+      .mockResolvedValueOnce(saved());
+    vi.stubGlobal('fetch', fetched);
+    await saveTranscript(3, 'x');
+    expect((fetched.mock.calls[1][1]?.headers as Record<string, string>)['x-csrf-token']).toBeUndefined();
   });
 });

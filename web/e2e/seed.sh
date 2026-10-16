@@ -7,6 +7,9 @@ binary=$1
 archive=$(mkdir -p "$2/e2e" && cd "$2" && pwd)
 "$binary" db-update --quiet
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -o /dev/null -v archive="$archive" -f "$(dirname "$0")/seed.sql"
+# The admin the admin page's tests sign in as (e2e/admin.ts); the password is
+# made up for the tests.
+printf 'e2e admin password\ne2e admin password\n' | "$binary" admin add e2e-admin >/dev/null
 # 56 silent MPEG-2 layer III frames (16 kHz mono, 36 ms each): about 2 s.
 python3 - "$archive/e2e" <<'PY'
 import sys

@@ -1,0 +1,37 @@
+/* The admin page's shared look: the areas, their sections, tables and
+   lists of facts, buttons and fields, and a refusal next to its control. */
+.area { padding: 1rem 1.25rem 2.5rem; max-width: 72rem; }
+.area h1 { margin: 0 0 0.3rem; font-size: 1.35rem; }
+.area h2 { margin: 1.5rem 0 0.5rem; font-size: 1.1rem; }
+.area .lead { margin: 0 0 1rem; color: var(--muted); }
+.area .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.area table { border-collapse: collapse; width: 100%; }
+/* A table wraps its cells rather than scroll sideways, down to a phone's width. */
+.area th, .area td {
+  text-align: left; vertical-align: top; padding: 0.35rem 0.75rem 0.35rem 0;
+  border-bottom: 1px solid var(--line); overflow-wrap: anywhere;
+}
+.area th { color: var(--muted); font-weight: 600; }
+.area td.num, .area th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.area dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; }
+.area dl.facts dt { color: var(--muted); }
+.area dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+.area .empty { color: var(--muted); margin: 0.3rem 0; }
+.area .flag { display: inline-block; padding: 0 0.4rem; border-radius: 3px; background: var(--warn-bg); color: var(--warn-text); }
+.area button, .signin button, .signin .button {
+  min-height: 2.25rem; padding: 0 0.9rem; border: 1px solid var(--field-border); border-radius: 4px;
+  background: var(--bg); color: var(--text); font: inherit; cursor: pointer; text-decoration: none;
+  display: inline-flex; align-items: center;
+}
+.area button.primary, .signin button.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600;
+}
+.area button:disabled, .signin button:disabled { opacity: 0.55; cursor: default; }
+.area input:not([type='checkbox']), .area select, .area textarea, .signin input {
+  min-height: 2.25rem; padding: 0.2rem 0.5rem; border: 1px solid var(--field-border); border-radius: 4px;
+  background: var(--bg); color: var(--text); font: inherit;
+}
+.problem {
+  margin: 0.5rem 0; padding: 0.4rem 0.6rem; border-radius: 4px;
+  background: var(--warn-bg); color: var(--warn-text); overflow-wrap: anywhere;
+}

@@ -91,11 +91,16 @@ export const fetchFavorites = () => getJson<Favorite[]>('/api/favorites');
 export const fetchStatus = () => getJson<Status>('/api/status');
 export const fetchCall = (id: number) => getJson<CallDetail>(`/api/calls/${id}`);
 
-/** Saves a person's text for a call (the public edit); throws the server's refusal. */
+/** Saves a person's text for a call (the public edit); throws the server's
+ * refusal. An admin signed in on this browser saves under their own name:
+ * the save then carries the session's token. */
 export async function saveTranscript(id: number, text: string): Promise<{ id: number; transcript: string; origin: string }> {
+  const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' };
+  const me = await fetch('/api/auth/me', { headers: { accept: 'application/json' } }).catch(() => null);
+  if (me?.ok) headers['x-csrf-token'] = (await me.json()).csrf;
   const response = await fetch(`/api/calls/${id}/transcript`, {
     method: 'PATCH',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    headers,
     body: JSON.stringify({ text }),
   });
   if (!response.ok) throw await apiError(response);
