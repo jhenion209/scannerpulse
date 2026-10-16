@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
+  import type { Call } from './lib/api';
   import CallList from './lib/CallList.svelte';
   import { goTo, show, view } from './lib/calls.svelte';
   import { choices, startChoices } from './lib/choices.svelte';
@@ -66,7 +67,10 @@
     void listKey;
     untrack(readFirstPage);
   });
-  onMount(() => () => stopFeed?.());
+  onMount(() => () => {
+    stopFeed?.();
+    clearTimeout(reread);
+  });
 
   // Leaving "Pause updates" reads the first page again.
   let wasPaused = false;
@@ -84,12 +88,27 @@
     if (listEl.scrollTop > 0) listEl.scrollTop += listEl.scrollHeight - before;
   }
 
-  // SmartSort orders a page on the server: a new call reads the page again,
-  // at most once a second.
+  /** "Play new calls": once the page holds the call, play it if the player is free. */
+  function playNew(call: Call | null) {
+    const row = call && view.calls.find((c) => c.id === call.id);
+    if (row && prefs.autoplayNew && !player.busy) play(row);
+  }
+
+  // SmartSort orders a page on the server: new calls read the page again,
+  // at most once a second. A read already waiting is left alone, so a steady
+  // stream of calls cannot hold the read back; it plays the newest call.
   let reread: ReturnType<typeof setTimeout> | undefined;
-  const readAgain = () => {
-    clearTimeout(reread);
-    reread = setTimeout(() => void show(ask(), view.paging), 1000);
+  let fresh: Call | null = null;
+  const readAgain = (call: Call) => {
+    fresh = call;
+    if (reread !== undefined) return;
+    reread = setTimeout(async () => {
+      reread = undefined;
+      const newest = fresh;
+      fresh = null;
+      await show(ask(), view.paging);
+      playNew(newest);
+    }, 1000);
   };
 
   function onLive(event: LiveEvent) {
@@ -102,16 +121,19 @@
     }
     lastId = newestId([event.call], lastId);
     if (favoriteUnresolved(filters, choices.favorites)) return;
+    // A system that cannot be named yet (choices unread, or an unknown id)
+    // would let every system's calls in.
+    if (filters.system !== null && systemName() === null) return;
     if (!liveApplies(filters, view.paging.index, paused, new Date())) return;
     if (!wanted(event.call, asked(), systemName())) return;
-    if (filters.smart) return readAgain();
+    if (filters.smart) return readAgain(event.call);
     const rows = addCall(view.calls, event.call, prefs.pageSize);
     if (!rows) return;
     // The page grows until it is twice its size, then is read again.
-    if (rows.length >= 2 * prefs.pageSize) return void show(ask(), FIRST_PAGE);
+    if (rows.length >= 2 * prefs.pageSize) return void show(ask(), FIRST_PAGE).then(() => playNew(event.call));
     void keepScroll(() => (view.calls = rows));
     if (view.total !== null && !view.capped) view.total += 1;
-    if (prefs.autoplayNew && !player.busy) play(event.call);
+    playNew(event.call);
   }
 
   function setSize(size: number) {
@@ -198,7 +220,7 @@
   .admin { color: var(--bar-text); }
   .rail { grid-area: rail; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; }
   .error { margin: 0.9rem 0.9rem 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
-  .list { grid-area: list; min-width: 0; overflow: auto; }
+  .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; }
   .empty { margin: 1rem; color: var(--muted); }
   .player { grid-area: player; background: var(--bar); color: var(--bar-text); }
   @media (max-width: 760px) {

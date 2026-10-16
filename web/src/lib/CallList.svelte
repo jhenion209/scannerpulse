@@ -91,7 +91,7 @@
   .text { width: 100%; }
   .line { display: flex; gap: 0.5rem; align-items: baseline; }
   .snippet { flex: 1; min-width: 0; }
-  .snippet { display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+  .snippet { display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
   .snippet.open { display: block; }
   .more { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; }
   .none { color: var(--muted); font-style: italic; }
