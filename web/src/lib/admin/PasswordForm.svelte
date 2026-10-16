@@ -26,10 +26,12 @@
     busy = true;
     try {
       await onsubmit(login.trim(), password);
-      login = password = again = '';
+      login = '';
     } catch (error) {
       refusal = why(error);
     } finally {
+      // A password never stays in the page once it is sent, whatever the answer.
+      password = again = '';
       busy = false;
     }
   }

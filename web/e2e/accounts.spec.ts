@@ -48,6 +48,10 @@ test("a refused account is shown beside its form, in the server's words", async 
   await add.getByLabel('Password again').fill('short');
   await add.getByRole('button', { name: 'Add the admin' }).click();
   await expect(add.getByRole('alert')).toHaveText('Not saved: a password has at least 12 characters');
+  // A refused send leaves no password in the page; the name stays for another try.
+  await expect(add.getByLabel('Password', { exact: true })).toHaveValue('');
+  await expect(add.getByLabel('Password again')).toHaveValue('');
+  await expect(add.getByLabel('Name')).toHaveValue('someone');
 });
 
 test("the last enabled admin's refusal shows beside its account", async ({ page }) => {
