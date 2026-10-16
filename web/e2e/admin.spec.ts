@@ -22,6 +22,7 @@ test("the admin page asks to sign in, and shows a refusal in the server's words"
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('alert')).toHaveText('the name or the password is wrong');
   await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  await expect(page.getByLabel('Password')).toHaveValue('');
 });
 
 test('an admin signs in, sees the status, and signs out', async ({ page }) => {
@@ -81,6 +82,20 @@ test('on a phone the areas open from the Menu button', async ({ page }) => {
   await signIn(page);
   const menu = page.getByRole('navigation', { name: 'Admin areas' });
   await expect(menu).toBeHidden();
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await expect(menu).toBeVisible();
+  // The bar wraps to two rows here: the open menu must not cover the second.
+  const out = page.getByRole('button', { name: 'Sign out' });
+  await expect(out).toBeVisible();
+  const covered = await out.evaluate((button) => {
+    const box = button.getBoundingClientRect();
+    const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return !(top && button.contains(top));
+  });
+  expect(covered).toBe(false);
+  await menu.getByRole('link', { name: 'Status' }).click();
+  await expect(menu).toBeHidden();
+  // Choosing the area already shown changes no address, yet closes the menu.
   await page.getByRole('button', { name: 'Menu' }).click();
   await expect(menu).toBeVisible();
   await menu.getByRole('link', { name: 'Status' }).click();

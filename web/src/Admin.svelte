@@ -75,7 +75,7 @@
     </header>
     <nav id="areas" class="side" aria-label="Admin areas">
       {#each AREAS as item (item.id)}
-        <a href={`#${item.id}`} aria-current={area === item.id ? 'page' : undefined}>{item.label}</a>
+        <a href={`#${item.id}`} aria-current={area === item.id ? 'page' : undefined} onclick={() => (menuOpen = false)}>{item.label}</a>
       {/each}
     </nav>
     <main class="main">
@@ -114,7 +114,7 @@
   .side a[aria-current='page'] { background: var(--bg); color: var(--accent); font-weight: 700; box-shadow: inset 3px 0 0 var(--accent); }
   .main { grid-area: main; min-width: 0; }
   .notice {
-    position: fixed; top: 3.5rem; left: 50%; transform: translateX(-50%); z-index: 30; margin: 0;
+    position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 30; margin: 0;
     max-width: calc(100% - 2rem); overflow-wrap: anywhere; pointer-events: none;
   }
   .notice:not(:empty) {
@@ -123,8 +123,9 @@
   }
   @media (max-width: 760px) {
     .shell { grid-template: 'bar' auto 'main' 1fr / 1fr; }
+    .shell.menu-open { grid-template: 'bar' auto 'side' auto 'main' 1fr / 1fr; }
     .menu { display: inline-block; }
     .side { display: none; }
-    .menu-open .side { display: flex; position: fixed; inset: 3.25rem 0 0 0; z-index: 10; border-right: 0; }
+    .menu-open .side { display: flex; border-right: 0; border-bottom: 1px solid var(--line); }
   }
 </style>

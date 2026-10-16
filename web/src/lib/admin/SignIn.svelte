@@ -28,10 +28,10 @@
     refusal = null;
     try {
       await signIn(login.trim(), password);
-      password = '';
     } catch (error) {
       refusal = why(error);
     } finally {
+      password = '';
       busy = false;
     }
   }
