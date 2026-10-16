@@ -65,3 +65,34 @@ test('the failed calls are put back in the queue', async ({ page }) => {
   await page.getByRole('button', { name: 'Try the failed calls again' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'No failed call to try again.' })).toBeVisible();
 });
+
+test('a refused switch goes back to the saved state beside its reason', async ({ page }) => {
+  await signIn(page, '#transcription');
+  await page.route('**/api/admin/talkgroups/*/transcribe', (route) => route.fulfill(json({ error: 'The talkgroup is locked.' }, 409)));
+  const fire = switchOf(page, /^Transcribe Metro Fire Dispatch/);
+  await expect(page.getByText(/ on$/)).toHaveText('0 of 3 on');
+  await fire.check();
+  await expect(page.getByRole('alert')).toHaveText(/^Not changed: .+/);
+  await expect(fire).not.toBeChecked();
+  await expect(page.getByText(/ on$/)).toHaveText('0 of 3 on');
+});
+
+test('a count that comes back after a field changed is dropped', async ({ page }) => {
+  await signIn(page, '#transcription');
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/admin/jobs/queue*', async (route) => {
+    await held;
+    await route.fulfill(json({ count: 42, min_ms: 1000 }));
+  });
+  const counting = page.waitForRequest((r) => r.url().includes('/api/admin/jobs/queue'));
+  const count = page.getByRole('button', { name: 'Count the calls' });
+  await count.click();
+  await counting;
+  await page.getByLabel('From').fill('2031-07-01');
+  release();
+  // The button is free again when the answer has been handled.
+  await expect(count).toBeEnabled();
+  await expect(page.getByRole('button', { name: /^Queue / })).toHaveCount(0);
+  await expect(page.getByText(/would be queued/)).toHaveCount(0);
+});

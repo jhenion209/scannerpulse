@@ -22,19 +22,23 @@
   }
   onMount(read);
 
-  async function setSwitch(talkgroup: AdminTalkgroup, value: boolean) {
+  async function setSwitch(talkgroup: AdminTalkgroup, box: HTMLInputElement) {
+    const value = box.checked;
     delete refusals[talkgroup.id];
     try {
       await admin('PUT', `/api/admin/talkgroups/${talkgroup.id}/transcribe`, { on: value });
       talkgroup.transcribe = value;
     } catch (error) {
       refusals[talkgroup.id] = why(error);
+      // `checked` is one-way: nothing writes the saved state back to a box the person toggled.
+      box.checked = talkgroup.transcribe;
     }
   }
 
   // The queue job: counted first, then asked for.
   const fields = $state<QueueFields>({ talkgroup: null, from: '', to: '' });
-  let preview = $state<{ count: number; min_ms: number } | null>(null);
+  // The count, with the request it was counted for: that request is what gets queued.
+  let preview = $state<{ count: number; min_ms: number; body: ReturnType<typeof queueBody> } | null>(null);
   let queueRefusal = $state<string | null>(null);
   let busy = $state(false);
   // A changed field makes the count stale: it must be counted again.
@@ -47,20 +51,25 @@
     event.preventDefault();
     queueRefusal = null;
     busy = true;
+    const body = queueBody(fields);
+    // An answer for fields that have changed since is dropped.
+    const current = () => JSON.stringify(body) === JSON.stringify(queueBody(fields));
     try {
-      preview = await admin<{ count: number; min_ms: number }>('GET', `/api/admin/jobs/queue?${queueQuery(fields)}`);
+      const found = await admin<{ count: number; min_ms: number }>('GET', `/api/admin/jobs/queue?${queueQuery(fields)}`);
+      if (current()) preview = { ...found, body };
     } catch (error) {
-      queueRefusal = why(error);
+      if (current()) queueRefusal = why(error);
     } finally {
       busy = false;
     }
   }
 
   async function queue() {
+    if (!preview) return;
     queueRefusal = null;
     busy = true;
     try {
-      const job = await admin<{ id: number; count: number }>('POST', '/api/admin/jobs/queue', queueBody(fields));
+      const job = await admin<{ id: number; count: number }>('POST', '/api/admin/jobs/queue', preview.body);
       tell(`Job #${job.id} queues ${job.count.toLocaleString('en-US')} calls; follow it in Jobs.`);
       preview = null;
     } catch (error) {
@@ -110,7 +119,7 @@
             <td class="long">{talkgroup.name}</td>
             <td>
               <input type="checkbox" aria-label={`Transcribe ${talkgroup.name} (${talkgroup.system} ${talkgroup.number})`}
-                checked={talkgroup.transcribe} onchange={(event) => setSwitch(talkgroup, event.currentTarget.checked)} />
+                checked={talkgroup.transcribe} onchange={(event) => setSwitch(talkgroup, event.currentTarget)} />
               {#if refusals[talkgroup.id]}<p class="problem" role="alert">Not changed: {refusals[talkgroup.id]}</p>{/if}
             </td>
           </tr>
