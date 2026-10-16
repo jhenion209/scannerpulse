@@ -78,9 +78,15 @@ listen.
     previous page), `smart=true` (SmartSort) and `exact=true`; a count stops
     at 10,000 unless it is exact, and each read of a page or a count has
     30 seconds;
-  - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, `/api/status`, and
+  - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, and
     `/api/labels/todo?set=NAME` (for admins, and for everyone when the
     labelers' list is public);
+  - `/api/status`: whether maintenance and transcription are on, the
+    calls waiting to be transcribed (`queue`) and an estimate of when they
+    will be done (`eta_seconds`, from the machine texts of the last ten
+    minutes), the number of calls (`calls`, the planner's estimate from
+    100,000 on, with `calls_estimated`), the newest call's time, the
+    server's time and the site's time zone;
   - `PATCH /api/calls/<id>/transcript` (`text`): anyone may correct a
     transcript; the machine's first output is kept beside it, with the
     admin's name when an admin saves it (only when the request carries the

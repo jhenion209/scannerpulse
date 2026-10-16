@@ -15,6 +15,13 @@ use super::{ApiError, AppState};
 /// How long the filter choices are kept before they are read again.
 pub const FILTERS_FOR: Duration = Duration::from_secs(300);
 
+/// Below this many calls the status counts them; above, it gives the
+/// planner's estimate, which costs nothing on a large archive.
+pub const EXACT_CALLS_BELOW: i64 = 100_000;
+
+/// The window the transcription queue's speed is measured over, in seconds.
+pub const RATE_WINDOW_SECONDS: i64 = 600;
+
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct CallDetail {
     pub id: i64,
@@ -147,10 +154,54 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         sqlx::query_scalar("SELECT count(*) FROM transcription_queue WHERE state = 'queued'")
             .fetch_one(&state.pool)
             .await?;
+    // The planner's estimate of every month's calls; a small archive is counted.
+    let estimate: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(GREATEST(c.reltuples, 0)), 0)::bigint FROM pg_inherits i \
+         JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'calls'::regclass",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    let (calls, calls_estimated) = if estimate < EXACT_CALLS_BELOW {
+        let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
+            .fetch_one(&state.pool)
+            .await?;
+        (counted, false)
+    } else {
+        (estimate, true)
+    };
+    let (newest_call, server_time): (Option<DateTime<Utc>>, DateTime<Utc>) =
+        // Ordered and limited, so each month's listing index answers: a plain
+        // max() reads far more of a large archive.
+        sqlx::query_as(
+            "SELECT (SELECT started_at FROM calls ORDER BY started_at DESC LIMIT 1), now()",
+        )
+            .fetch_one(&state.pool)
+            .await?;
+    // The queue's speed: machine texts written in the window. Only calls of
+    // the last day are looked at (the transcriber takes the newest first), so
+    // the read stays on the newest month's index; a backlog of older calls
+    // does not count toward the speed.
+    let recent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM transcripts WHERE origin = 'machine' \
+         AND updated_at > now() - make_interval(secs => $1) \
+         AND started_at > now() - interval '1 day'",
+    )
+    .bind(RATE_WINDOW_SECONDS as f64)
+    .fetch_one(&state.pool)
+    .await?;
+    let eta_seconds =
+        (queued > 0 && recent > 0).then(|| (queued * RATE_WINDOW_SECONDS + recent - 1) / recent);
+    let zone = super::audio::time_zone(&state).await?;
     Ok(Json(json!({
         "maintenance": flag("maintenance.enabled").await?,
         "transcription": flag("transcription.enabled").await?,
         "queue": queued,
+        "eta_seconds": eta_seconds,
+        "calls": calls,
+        "calls_estimated": calls_estimated,
+        "newest_call": newest_call,
+        "server_time": server_time,
+        "time_zone": zone.name(),
     })))
 }
 

@@ -87,8 +87,12 @@ async fn the_favorites_list_their_talkgroups(pool: PgPool) {
 async fn the_status_tells_the_banner_what_is_on(pool: PgPool) {
     let (_, off) = get(&pool, "/api/status").await;
     assert_eq!(
-        off,
-        serde_json::json!({"maintenance": false, "transcription": false, "queue": 0})
+        (&off["maintenance"], &off["transcription"], &off["queue"]),
+        (
+            &serde_json::json!(false),
+            &serde_json::json!(false),
+            &serde_json::json!(0)
+        )
     );
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('maintenance.enabled', 'true'), \
@@ -102,6 +106,74 @@ async fn the_status_tells_the_banner_what_is_on(pool: PgPool) {
         (on["maintenance"].as_bool(), on["transcription"].as_bool()),
         (Some(true), Some(true))
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_status_tells_the_chips_the_calls_the_newest_the_time_and_the_queue(pool: PgPool) {
+    // Nothing yet: no calls, no newest call, no estimate of the queue's end.
+    let (status, empty) = get(&pool, "/api/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["calls"], 0);
+    assert_eq!(empty["calls_estimated"], false);
+    assert!(empty["newest_call"].is_null(), "{empty}");
+    assert!(empty["eta_seconds"].is_null(), "{empty}");
+    assert_eq!(empty["time_zone"], "UTC");
+    let server_time = empty["server_time"].as_str().unwrap();
+    let server_time = chrono::DateTime::parse_from_rfc3339(server_time).unwrap();
+    assert!(
+        (Utc::now() - server_time.with_timezone(&Utc))
+            .num_seconds()
+            .abs()
+            < 60
+    );
+
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    let older = Utc::now() - chrono::Duration::minutes(30);
+    let newer = Utc::now() - chrono::Duration::minutes(2);
+    let a = call(&pool, tg, older, Some("one")).await;
+    let b = call(&pool, tg, newer, Some("two")).await;
+    // Two machine texts written just now; three calls wait in the queue.
+    sqlx::query("UPDATE transcripts SET updated_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (id, at) in [(a, older), (b, newer), (a, older)] {
+        sqlx::query(
+            "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+             VALUES ($1, $2, now(), now(), 'queued') ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let third = call(&pool, tg, older - chrono::Duration::minutes(1), None).await;
+    sqlx::query(
+        "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+         SELECT id, started_at, now(), now(), 'queued' FROM calls WHERE id = $1",
+    )
+    .bind(third)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('time_zone', to_jsonb('America/Chicago'::text))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_, now) = get(&pool, "/api/status").await;
+    assert_eq!(now["calls"], 3);
+    assert_eq!(now["calls_estimated"], false);
+    let newest =
+        chrono::DateTime::parse_from_rfc3339(now["newest_call"].as_str().unwrap()).unwrap();
+    assert_eq!(newest.with_timezone(&Utc).timestamp(), newer.timestamp());
+    assert_eq!(now["queue"], 3);
+    // Three waiting, two done in the last 600 s: 900 s to go.
+    assert_eq!(now["eta_seconds"], 900);
+    assert_eq!(now["time_zone"], "America/Chicago");
 }
 
 #[sqlx::test(migrations = "./migrations")]
