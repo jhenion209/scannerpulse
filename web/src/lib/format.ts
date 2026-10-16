@@ -7,6 +7,9 @@ export const LENGTH_FULL_MS = 8000;
 export const lengthPercent = (ms: number | null) =>
   ms === null ? 0 : Math.min(100, (ms / LENGTH_FULL_MS) * 100);
 
+/** A count with its noun: `1 call`, `1,234 calls`. */
+export const counted = (n: number, noun: string) => `${n.toLocaleString('en-US')} ${n === 1 ? noun : `${noun}s`}`;
+
 export const seconds = (ms: number | null) => (ms === null ? '' : `${(ms / 1000).toFixed(1)} s`);
 
 const two = (n: number) => String(n).padStart(2, '0');

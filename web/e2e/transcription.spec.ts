@@ -13,15 +13,21 @@ const switchOf = (page: Page, name: RegExp) => page.getByRole('checkbox', { name
 
 test("each talkgroup's switch turns its transcription on and off, and is kept", async ({ page }) => {
   await signIn(page, '#transcription');
-  const fire = switchOf(page, /^Transcribe Metro Fire Dispatch/);
-  await expect(fire).not.toBeChecked();
+  const name = /^Transcribe Metro Fire Dispatch/;
+  await expect(switchOf(page, name)).not.toBeChecked();
   const saved = () => page.waitForResponse((r) => r.url().endsWith('/transcribe') && r.request().method() === 'PUT');
-  await Promise.all([saved(), fire.check()]);
+  try {
+    await Promise.all([saved(), switchOf(page, name).check()]);
+    await page.reload();
+    await expect(switchOf(page, name)).toBeChecked();
+  } finally {
+    // The server is not reseeded between runs: the switch goes back off, whatever failed above.
+    await page.reload();
+    const on = switchOf(page, name);
+    if (await on.isChecked()) await Promise.all([saved(), on.uncheck()]);
+  }
   await page.reload();
-  await expect(switchOf(page, /^Transcribe Metro Fire Dispatch/)).toBeChecked();
-  await Promise.all([saved(), switchOf(page, /^Transcribe Metro Fire Dispatch/).uncheck()]);
-  await page.reload();
-  await expect(switchOf(page, /^Transcribe Metro Fire Dispatch/)).not.toBeChecked();
+  await expect(switchOf(page, name)).not.toBeChecked();
 });
 
 test('the list finds a talkgroup by name or number', async ({ page }) => {
@@ -34,9 +40,14 @@ test('the list finds a talkgroup by name or number', async ({ page }) => {
 });
 
 test("a queue job is counted first, refused in the server's words, and asked for only after", async ({ page }) => {
+  let reads = 0;
+  page.on('request', (r) => { if (r.method() === 'GET' && r.url().endsWith('/api/admin/talkgroups')) reads += 1; });
   await signIn(page, '#transcription');
   // The seed sets neither a time zone nor transcription: the server refuses to count.
   await page.getByRole('button', { name: 'Count the calls' }).click();
+  await expect(page.getByRole('alert')).toHaveText(/^Not queued: .+/);
+  // A refusal may come of a talkgroup that is gone: the list is read again.
+  await expect.poll(() => reads).toBe(2);
   await expect(page.getByRole('alert')).toHaveText(/^Not queued: .+/);
   await expect(page.getByRole('button', { name: /^Queue / })).toHaveCount(0);
 
@@ -66,7 +77,30 @@ test('the failed calls are put back in the queue', async ({ page }) => {
   await expect(page.getByRole('status').filter({ hasText: 'No failed call to try again.' })).toBeVisible();
 });
 
-test('a refused switch goes back to the saved state beside its reason', async ({ page }) => {
+test('a double click puts the failed calls back once, and one call reads in the singular', async ({ page }) => {
+  let posts = 0;
+  await page.route('**/api/admin/queue/retry', async (route) => {
+    posts += 1;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.fulfill(json({ retried: 1 }));
+  });
+  await signIn(page, '#transcription');
+  await page.getByRole('button', { name: 'Try the failed calls again' }).dblclick();
+  await expect(page.getByRole('status').filter({ hasText: '1 failed call is back in the queue.' })).toBeVisible();
+  expect(posts).toBe(1);
+});
+
+test('a refusal to put the failed calls back is an alert, apart from the status', async ({ page }) => {
+  await page.route('**/api/admin/queue/retry', (route) => route.fulfill(json({ error: 'service unavailable', detail: 'maintenance is on' }, 503)));
+  await signIn(page, '#transcription');
+  await page.getByRole('button', { name: 'Try the failed calls again' }).click();
+  await expect(page.getByRole('alert')).toHaveText('The failed calls were not put back: maintenance is on');
+  await expect(page.getByRole('status').filter({ hasText: 'failed call' })).toHaveCount(0);
+});
+
+test('a refused switch goes back to the saved state beside its reason, and the list is read again', async ({ page }) => {
+  let reads = 0;
+  page.on('request', (r) => { if (r.method() === 'GET' && r.url().endsWith('/api/admin/talkgroups')) reads += 1; });
   await signIn(page, '#transcription');
   await page.route('**/api/admin/talkgroups/*/transcribe', (route) => route.fulfill(json({ error: 'The talkgroup is locked.' }, 409)));
   const fire = switchOf(page, /^Transcribe Metro Fire Dispatch/);
@@ -75,6 +109,8 @@ test('a refused switch goes back to the saved state beside its reason', async ({
   await expect(page.getByRole('alert')).toHaveText(/^Not changed: .+/);
   await expect(fire).not.toBeChecked();
   await expect(page.getByText(/ on$/)).toHaveText('0 of 3 on');
+  await expect.poll(() => reads).toBe(2);
+  await expect(page.getByRole('alert')).toHaveText(/^Not changed: .+/);
 });
 
 test('a count that comes back after a field changed is dropped', async ({ page }) => {
@@ -140,4 +176,18 @@ test("with the module on, a set's report and runs show, and a candidate's run st
   await page.getByRole('button', { name: 'Start the run' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Job #9 runs 20 calls of the set autumn; follow it in Jobs.' })).toBeVisible();
   expect(asked[1]).toEqual({ set: 'autumn', server: 'http://192.0.2.11:8000', model: 'medium' });
+});
+
+test('a failed read of the sets says so', async ({ page }) => {
+  await page.route('**/api/admin/asr/sets', (route) => route.fulfill(json({ error: 'service unavailable', detail: 'the database does not answer' }, 503)));
+  await signIn(page, '#transcription');
+  await expect(page.getByRole('alert')).toHaveText('The sets could not be read: the database does not answer');
+});
+
+test('a failed read of a report says so', async ({ page }) => {
+  await page.route('**/api/admin/asr/sets', (route) => route.fulfill(json([{ set: 'autumn', size: 1, labeled: 1, runs: 0 }])));
+  await page.route('**/api/admin/asr/report?*', (route) => route.fulfill(json({ error: 'service unavailable', detail: 'the database does not answer' }, 503)));
+  await signIn(page, '#transcription');
+  await page.getByRole('button', { name: 'Show the report of autumn' }).click();
+  await expect(page.getByRole('alert')).toHaveText('The report could not be read: the database does not answer');
 });

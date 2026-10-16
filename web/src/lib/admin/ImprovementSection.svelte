@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { ApiError } from '../api';
-  import { callTime } from '../format';
+  import { callTime, counted } from '../format';
   import { tell } from '../notice.svelte';
   import { siteZone } from '../status.svelte';
   import { admin, why } from './session.svelte';
@@ -18,7 +18,7 @@
       sets = await admin<AsrSet[]>('GET', '/api/admin/asr/sets');
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) off = why(error);
-      else problem = why(error);
+      else problem = `The sets could not be read: ${why(error)}`;
     }
   });
 
@@ -27,7 +27,7 @@
     try {
       report = await admin<AsrReport>('GET', `/api/admin/asr/report?${new URLSearchParams({ set })}`);
     } catch (error) {
-      problem = why(error);
+      problem = `The report could not be read: ${why(error)}`;
     }
   }
 
@@ -47,7 +47,7 @@
         model: candidate.model,
         prompt: candidate.prompt.trim() || undefined,
       });
-      tell(`Job #${job.id} runs ${job.count.toLocaleString('en-US')} calls of the set ${set}; follow it in Jobs.`);
+      tell(`Job #${job.id} runs ${counted(job.count, 'call')} of the set ${set}; follow it in Jobs.`);
     } catch (error) {
       refusal = why(error);
     } finally {
@@ -91,7 +91,7 @@
 {#if report}
   <h3>The set {report.set}</h3>
   <p>
-    {report.size.toLocaleString('en-US')} calls, {report.labeled.toLocaleString('en-US')} with a person's text.<br />
+    {counted(report.size, 'call')}, {report.labeled.toLocaleString('en-US')} with a person's text.<br />
     Production on its calls: {report.production.summary}
   </p>
   {#if report.runs.length === 0}

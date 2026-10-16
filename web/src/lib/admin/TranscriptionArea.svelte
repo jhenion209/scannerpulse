@@ -1,9 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { counted } from '../format';
   import { tell } from '../notice.svelte';
   import ImprovementSection from './ImprovementSection.svelte';
   import { admin, why } from './session.svelte';
-  import { matchTalkgroups, previewText, queueBody, queueQuery, type AdminTalkgroup, type QueueFields } from './transcription';
+  import {
+    matchTalkgroups, previewText, queueBody, queueQuery, retriedText, type AdminTalkgroup, type QueueFields,
+  } from './transcription';
 
   let talkgroups = $state<AdminTalkgroup[] | null>(null);
   let problem = $state<string | null>(null);
@@ -13,6 +16,7 @@
   /** A refusal beside the switch that asked for it. */
   let refusals = $state<Record<number, string>>({});
 
+  /** Another admin may have changed the talkgroups since they were read: after a refusal or a start they are read again. */
   async function read() {
     try {
       talkgroups = await admin<AdminTalkgroup[]>('GET', '/api/admin/talkgroups');
@@ -33,6 +37,7 @@
       refusals[talkgroup.id] = why(error);
       // `checked` is one-way: nothing writes the saved state back to a box the person toggled.
       box.checked = talkgroup.transcribe;
+      await read();
     }
   }
 
@@ -59,7 +64,10 @@
       const found = await admin<{ count: number; min_ms: number }>('GET', `/api/admin/jobs/queue?${queueQuery(fields)}`);
       if (current()) preview = { ...found, body };
     } catch (error) {
-      if (current()) queueRefusal = why(error);
+      if (current()) {
+        queueRefusal = why(error);
+        await read();
+      }
     } finally {
       busy = false;
     }
@@ -71,23 +79,31 @@
     busy = true;
     try {
       const job = await admin<{ id: number; count: number }>('POST', '/api/admin/jobs/queue', preview.body);
-      tell(`Job #${job.id} queues ${job.count.toLocaleString('en-US')} calls; follow it in Jobs.`);
+      tell(`Job #${job.id} queues ${counted(job.count, 'call')}; follow it in Jobs.`);
       preview = null;
+      await read();
     } catch (error) {
       queueRefusal = why(error);
+      await read();
     } finally {
       busy = false;
     }
   }
 
   let retried = $state<string | null>(null);
+  let retryRefusal = $state<string | null>(null);
+  let retrying = $state(false);
   async function retry() {
-    retried = null;
+    if (retrying) return;
+    retried = retryRefusal = null;
+    retrying = true;
     try {
       const answer = await admin<{ retried: number }>('POST', '/api/admin/queue/retry');
-      retried = answer.retried === 0 ? 'No failed call to try again.' : `${answer.retried.toLocaleString('en-US')} failed calls are back in the queue.`;
+      retried = retriedText(answer.retried);
     } catch (error) {
-      retried = `The failed calls were not put back: ${why(error)}`;
+      retryRefusal = why(error);
+    } finally {
+      retrying = false;
     }
   }
 </script>
@@ -146,7 +162,7 @@
     <div class="row">
       <button type="submit" disabled={busy}>Count the calls</button>
       {#if preview && preview.count > 0}
-        <button type="button" class="primary" disabled={busy} onclick={queue}>Queue {preview.count.toLocaleString('en-US')} calls</button>
+        <button type="button" class="primary" disabled={busy} onclick={queue}>Queue {counted(preview.count, 'call')}</button>
       {/if}
     </div>
     {#if preview}<p role="status">{previewText(preview.count, preview.min_ms)}</p>{/if}
@@ -155,8 +171,9 @@
 
   <h2>Failed calls</h2>
   <p>A call fails after its tries run out. This puts every failed call back in the queue; a call of a talkgroup whose transcription is off stays failed.</p>
-  <button type="button" onclick={retry}>Try the failed calls again</button>
+  <button type="button" disabled={retrying} onclick={retry}>Try the failed calls again</button>
   {#if retried}<p role="status">{retried}</p>{/if}
+  {#if retryRefusal}<p class="problem" role="alert">The failed calls were not put back: {retryRefusal}</p>{/if}
 
   <ImprovementSection />
 </section>

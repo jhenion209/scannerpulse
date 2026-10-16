@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LENGTH_FULL_MS, callTime, lengthPercent, seconds, source, zonedInstant } from './format';
+import { LENGTH_FULL_MS, callTime, counted, lengthPercent, seconds, source, zonedInstant } from './format';
 
 describe('a row', () => {
   it('fills the length bar up to 8 seconds, then stays full', () => {
@@ -52,5 +52,19 @@ describe('a row', () => {
     expect(source({ radio_alias: 'Engine 7', radio_id: 4021 })).toBe('Engine 7');
     expect(source({ radio_alias: null, radio_id: 4021 })).toBe('4021');
     expect(source({ radio_alias: null, radio_id: null })).toBe('');
+  });
+});
+
+describe('a count with its noun', () => {
+  it('is in the singular for one and in the plural for any other number', () => {
+    expect(counted(1, 'call')).toBe('1 call');
+    expect(counted(0, 'call')).toBe('0 calls');
+    expect(counted(2, 'file')).toBe('2 files');
+    expect(counted(2, 'failed call')).toBe('2 failed calls');
+  });
+
+  it('groups the thousands', () => {
+    expect(counted(1234, 'call')).toBe('1,234 calls');
+    expect(counted(1_000_001, 'file')).toBe('1,000,001 files');
   });
 });

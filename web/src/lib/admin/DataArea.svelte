@@ -1,40 +1,57 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { ApiError } from '../api';
+  import { counted } from '../format';
   import { tell } from '../notice.svelte';
   import { admin, why } from './session.svelte';
   import {
-    takenBy, written, type CorrectPreview, type MergePreview, type PurgePreview, type Started, type Uncorrected,
+    correctText, mergeText, purgeText, readOnlyText, takenBy,
+    type CorrectPreview, type MergePreview, type PurgePreview, type Started, type Uncorrected,
   } from './data';
   import type { AdminTalkgroup } from './transcription';
   import TypedConfirm from './TypedConfirm.svelte';
 
   let talkgroups = $state<AdminTalkgroup[]>([]);
   let uncorrected = $state<Uncorrected[] | null>(null);
+  /** Why each list could not be read, in the server's words. */
   let problem = $state<string | null>(null);
+  let filesProblem = $state<string | null>(null);
   const byId = (id: number | null) => talkgroups.find((t) => t.id === id);
   const label = (t: AdminTalkgroup) => `${t.name} · ${t.system} ${t.number}`;
-  const count = (n: number) => n.toLocaleString('en-US');
 
+  let reads = 0;
+  /** Reads both lists, each on its own: one that fails does not empty the other. */
   async function read() {
-    try {
-      const [all, files] = await Promise.all([
-        admin<AdminTalkgroup[]>('GET', '/api/admin/talkgroups'),
-        admin<Uncorrected[]>('GET', '/api/admin/data/uncorrected'),
-      ]);
-      talkgroups = all;
-      uncorrected = files;
+    const mine = ++reads;
+    const [all, files] = await Promise.allSettled([
+      admin<AdminTalkgroup[]>('GET', '/api/admin/talkgroups'),
+      admin<Uncorrected[]>('GET', '/api/admin/data/uncorrected'),
+    ]);
+    // An answer to a read that a later one has replaced is dropped.
+    if (mine !== reads) return;
+    if (all.status === 'fulfilled') {
+      talkgroups = all.value;
       problem = null;
-    } catch (error) {
-      problem = why(error);
-    }
+    } else problem = why(all.reason);
+    if (files.status === 'fulfilled') {
+      uncorrected = files.value;
+      filesProblem = null;
+    } else filesProblem = why(files.reason);
   }
   onMount(read);
+
+  /** Another admin may have renamed, merged or purged a talkgroup since the lists were read: after a refusal
+   * or a start they are read again. The fields that hang on them settle before the caller goes on. */
+  async function reread() {
+    await read();
+    await tick();
+  }
 
   // Rename.
   const renaming = $state<{ id: number | null; name: string }>({ id: null, name: '' });
   let renamed = $state<string | null>(null);
   let renameRefusal = $state<string | null>(null);
+  let renameBusy = $state(false);
   /** The talkgroup that has the name already, after a refused rename. */
   let taken = $state<AdminTalkgroup | null>(null);
 
@@ -47,9 +64,10 @@
   async function rename(event: SubmitEvent) {
     event.preventDefault();
     const subject = byId(renaming.id);
-    if (!subject) return;
+    if (!subject || renameBusy) return;
     renamed = renameRefusal = null;
     taken = null;
+    renameBusy = true;
     try {
       const answer = await admin<{ name: string; files_correct?: boolean; unchanged?: boolean }>(
         'POST', `/api/admin/talkgroups/${subject.id}/rename`, { name: renaming.name });
@@ -61,10 +79,10 @@
       await read();
     } catch (error) {
       renameRefusal = why(error);
-      if (error instanceof ApiError && error.status === 409) {
-        await read();
-        taken = takenBy(talkgroups, subject, renaming.name) ?? null;
-      }
+      await read();
+      if (error instanceof ApiError && error.status === 409) taken = takenBy(talkgroups, subject, renaming.name) ?? null;
+    } finally {
+      renameBusy = false;
     }
   }
 
@@ -92,7 +110,12 @@
       const found = await admin<MergePreview>('GET', `/api/admin/talkgroups/${from}/merge?into=${into}`);
       if (current()) mergePreview = found;
     } catch (error) {
-      if (current()) mergeRefusal = why(error);
+      if (!current()) return;
+      const words = why(error);
+      await reread();
+      // The list may no longer offer the talkgroup counted, which empties its select and so clears a
+      // refusal: it is shown after, unless the person has chosen another since.
+      if (merge.from === from && (merge.into === into || merge.into === null)) mergeRefusal = words;
     }
   }
 
@@ -115,12 +138,15 @@
         into: mergePreview.into.id,
         confirm,
       });
-      tell(`Job #${job.id} merges ${count(job.count)} calls; follow it in Jobs.`);
+      tell(`Job #${job.id} merges ${counted(job.count, 'call')}; follow it in Jobs.`);
       mergePreview = null;
       // The confirm box goes; focus must not go with it.
       document.getElementById('merge-from')?.focus();
+      await read();
     } catch (error) {
-      mergeRefusal = why(error);
+      const words = why(error);
+      await reread();
+      mergeRefusal = words;
     }
   }
 
@@ -140,7 +166,10 @@
       const found = await admin<CorrectPreview>('GET', `/api/admin/talkgroups/${id}/correct`);
       if (current()) correctPreview = found;
     } catch (error) {
-      if (current()) correctRefusal = why(error);
+      if (current()) {
+        correctRefusal = why(error);
+        await read();
+      }
     }
   }
 
@@ -149,11 +178,13 @@
     correctRefusal = null;
     try {
       const job = await admin<Started>('POST', `/api/admin/talkgroups/${correctPreview.talkgroup.id}/correct`, { confirm });
-      tell(`Job #${job.id} corrects ${count(job.count)} files; follow it in Jobs.`);
+      tell(`Job #${job.id} corrects ${counted(job.count, 'file')}; follow it in Jobs.`);
       correctPreview = null;
       (filesTable?.querySelector('button') ?? correctHeading)?.focus();
+      await read();
     } catch (error) {
       correctRefusal = why(error);
+      await read();
     }
   }
 
@@ -177,7 +208,10 @@
       const found = await admin<PurgePreview>('GET', `/api/admin/talkgroups/${id}/purge`);
       if (current()) purgePreview = found;
     } catch (error) {
-      if (current()) purgeRefusal = why(error);
+      if (current()) {
+        purgeRefusal = why(error);
+        await read();
+      }
     }
   }
 
@@ -186,11 +220,13 @@
     purgeRefusal = null;
     try {
       const job = await admin<Started>('POST', `/api/admin/talkgroups/${purgePreview.talkgroup.id}/purge`, { confirm });
-      tell(`Job #${job.id} purges ${count(job.count)} calls; follow it in Jobs.`);
+      tell(`Job #${job.id} purges ${counted(job.count, 'call')}; follow it in Jobs.`);
       purgePreview = null;
       document.getElementById('purge-talkgroup')?.focus();
+      await read();
     } catch (error) {
       purgeRefusal = why(error);
+      await read();
     }
   }
 </script>
@@ -216,7 +252,7 @@
     </select>
     <label for="rename-name">New name</label>
     <input id="rename-name" type="text" autocomplete="off" bind:value={renaming.name} />
-    <div class="row"><button type="submit" disabled={renaming.id === null}>Rename</button></div>
+    <div class="row"><button type="submit" disabled={renaming.id === null || renameBusy}>Rename</button></div>
     {#if renamed}<p role="status">{renamed}</p>{/if}
     {#if renameRefusal}
       <p class="problem" role="alert">Not renamed: {renameRefusal}</p>
@@ -229,8 +265,9 @@
     Talkgroups renamed since their files were named. A correction moves each call's file to the folder of the
     talkgroup's name; files in read-only locations stay where they are.
   </p>
+  {#if filesProblem}<p class="problem" role="alert">The files not yet corrected could not be read: {filesProblem}</p>{/if}
   {#if uncorrected === null}
-    <p class="empty">Reading…</p>
+    {#if !filesProblem}<p class="empty">Reading…</p>{/if}
   {:else if uncorrected.length === 0}
     <p class="empty">Every talkgroup's files carry its name.</p>
   {:else}
@@ -243,15 +280,15 @@
             <td class="long">{t.name}</td>
             <td>{t.system} {t.number}</td>
             <td class="long">{t.files_name ?? '—'}</td>
-            <td class="num">{count(t.calls)}</td>
-            <td><button type="button" aria-label={`Correct the files of ${t.name}`} onclick={() => countCorrect(t.id)}>Correct</button></td>
+            <td class="num">{t.calls.toLocaleString('en-US')}</td>
+            <td><button type="button" aria-label={`Correct the files of ${t.name} (${t.system} ${t.number})`} onclick={() => countCorrect(t.id)}>Correct</button></td>
           </tr>
         {/each}
       </tbody>
     </table>
   {/if}
   {#if correctPreview}
-    <p role="status">{count(correctPreview.calls)} files of {written(correctPreview.talkgroup)} move to its name's folder{correctPreview.read_only > 0 ? `; ${count(correctPreview.read_only)} in read-only locations stay` : ''}.</p>
+    <p role="status">{correctText(correctPreview)}</p>
     {#key correctPreview}<TypedConfirm name={correctPreview.talkgroup.name} action="Correct the files" start={startCorrect} />{/key}
   {/if}
   {#if correctRefusal}<p class="problem" role="alert">Not corrected: {correctRefusal}</p>{/if}
@@ -272,7 +309,7 @@
     <div class="row"><button type="submit" disabled={merge.from === null || merge.into === null}>Count the calls to move</button></div>
   </form>
   {#if mergePreview}
-    <p role="status">{count(mergePreview.calls)} calls of {written(mergePreview.from)} go to {written(mergePreview.into)}; {mergePreview.from.name} goes.</p>
+    <p role="status">{mergeText(mergePreview)}</p>
     {#key mergePreview}<TypedConfirm name={mergePreview.from.name} action="Merge" start={startMerge} />{/key}
   {/if}
   {#if mergeRefusal}<p class="problem" role="alert">Not merged: {mergeRefusal}</p>{/if}
@@ -296,9 +333,9 @@
     {#if purgePreview.holding_path === null}
       <p class="problem" role="alert">Set <code>purge.holding_path</code> in Settings first: the purged calls' files are kept there.</p>
     {:else if purgePreview.read_only > 0}
-      <p class="problem" role="alert">{count(purgePreview.read_only)} of the calls are in read-only locations, whose files a purge cannot move.</p>
+      <p class="problem" role="alert">{readOnlyText(purgePreview.read_only)}</p>
     {:else}
-      <p role="status">{count(purgePreview.calls)} calls of {written(purgePreview.talkgroup)} are deleted; their files go to {purgePreview.holding_path}.</p>
+      <p role="status" class="wrap">{purgeText(purgePreview)}</p>
       {#key purgePreview}<TypedConfirm name={purgePreview.talkgroup.name} action="Purge" start={startPurge} />{/key}
     {/if}
   {/if}
@@ -309,4 +346,6 @@
   .grid { display: grid; gap: 0.4rem; max-width: 36rem; }
   .grid label { font-weight: 600; }
   select { max-width: 100%; }
+  /* The holding folder's path is one long word. */
+  .wrap { overflow-wrap: anywhere; }
 </style>

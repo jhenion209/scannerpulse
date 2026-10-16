@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchTalkgroups, previewText, queueBody, queueQuery, type AdminTalkgroup } from './transcription';
+import { matchTalkgroups, previewText, queueBody, queueQuery, retriedText, type AdminTalkgroup } from './transcription';
 
 const tg = (id: number, number: number, name: string, system = 'Metro'): AdminTalkgroup => ({
   id, system, number, name, transcribe: false, files_correct: true,
@@ -26,5 +26,13 @@ describe('the queue job', () => {
     expect(previewText(1234, 1000)).toBe('1,234 calls would be queued (calls shorter than 1 s are left out).');
     expect(previewText(1, 0)).toBe('1 call would be queued.');
     expect(previewText(0, 1500)).toBe('No call to queue (calls shorter than 1.5 s are left out).');
+  });
+});
+
+describe('the failed calls put back', () => {
+  it('says how many, in the singular for one', () => {
+    expect(retriedText(0)).toBe('No failed call to try again.');
+    expect(retriedText(1)).toBe('1 failed call is back in the queue.');
+    expect(retriedText(1234)).toBe('1,234 failed calls are back in the queue.');
   });
 });

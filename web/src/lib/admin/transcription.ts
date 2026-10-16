@@ -1,5 +1,6 @@
 // The Transcription area's pure parts: finding a talkgroup in the list, the
 // queue job's request, and the words for its preview.
+import { counted } from '../format';
 
 /** A talkgroup as `/api/admin/talkgroups` gives it. */
 export interface AdminTalkgroup {
@@ -45,7 +46,10 @@ export const queueQuery = (fields: QueueFields) =>
 
 /** What the preview found, in words. */
 export function previewText(count: number, minMs: number): string {
-  const calls = `${count.toLocaleString('en-US')} ${count === 1 ? 'call' : 'calls'}`;
   const floor = minMs > 0 ? ` (calls shorter than ${(minMs / 1000).toLocaleString('en-US')} s are left out)` : '';
-  return count === 0 ? `No call to queue${floor}.` : `${calls} would be queued${floor}.`;
+  return count === 0 ? `No call to queue${floor}.` : `${counted(count, 'call')} would be queued${floor}.`;
 }
+
+/** What putting the failed calls back did, in words. */
+export const retriedText = (n: number) =>
+  n === 0 ? 'No failed call to try again.' : `${counted(n, 'failed call')} ${n === 1 ? 'is' : 'are'} back in the queue.`;

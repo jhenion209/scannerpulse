@@ -1,5 +1,6 @@
 // The Data area: renames, and the jobs that move or delete files, each started
 // only with the talkgroup's name typed exactly.
+import { counted } from '../format';
 import type { AdminTalkgroup } from './transcription';
 
 /** A talkgroup as a preview names it. */
@@ -43,6 +44,26 @@ export interface Started {
 
 /** `NAME (SYSTEM/NUMBER)`, as the server writes a talkgroup. */
 export const written = (t: Named) => `${t.name} (${t.system}/${t.number})`;
+
+/** What a correction moves, in words. */
+export const correctText = (p: CorrectPreview) => {
+  const stay = p.read_only === 1 ? '; 1 in a read-only location stays' : `; ${p.read_only.toLocaleString('en-US')} in read-only locations stay`;
+  return `${counted(p.calls, 'file')} of ${written(p.talkgroup)} ${p.calls === 1 ? 'moves' : 'move'} to its name's folder${p.read_only > 0 ? stay : ''}.`;
+};
+
+/** What a merge moves, in words. */
+export const mergeText = (p: MergePreview) =>
+  `${counted(p.calls, 'call')} of ${written(p.from)} ${p.calls === 1 ? 'goes' : 'go'} to ${written(p.into)}; ${p.from.name} goes.`;
+
+/** What a purge deletes, in words; the holding folder is set. */
+export const purgeText = (p: PurgePreview) =>
+  `${counted(p.calls, 'call')} of ${written(p.talkgroup)} ${p.calls === 1 ? 'is' : 'are'} deleted; ${p.calls === 1 ? 'its file goes' : 'their files go'} to ${p.holding_path}.`;
+
+/** The calls a purge cannot move, in words. */
+export const readOnlyText = (n: number) =>
+  n === 1
+    ? '1 of the calls is in a read-only location, whose file a purge cannot move.'
+    : `${n.toLocaleString('en-US')} of the calls are in read-only locations, whose files a purge cannot move.`;
 
 /** The talkgroup a refused rename names: the same system's, with the name
  * exactly, the lowest number first, as the server picks it. */
