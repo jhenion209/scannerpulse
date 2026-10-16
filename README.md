@@ -221,9 +221,11 @@ listen.
   (setting `purge.holding_path`, which the administrator empties), with the
   archive's layout so that an import could bring it back, read back and
   compared; then the call's row goes, and the archived file is removed by
-  the next step. A purge refuses to start without that setting, with a
-  holding folder inside an archive location (or holding one), and while any
-  of the calls is in a read-only location. The talkgroup itself, its
+  the next step. A purge refuses to start without that setting and
+  while any of the calls is in a read-only location. The holding folder is
+  checked by the host that runs the job: a folder it cannot see, or one inside
+  an archive location or an ingest source (or holding one), fails the job; a
+  marker file in it shows the folder is still the same while the job runs. The talkgroup itself, its
   transcription switch and its favorites stay. A stopped correction, merge
   or purge removes the files its last step replaced before it ends.
 - `report traffic` (and `/api/admin/reports/traffic`, kept ten minutes on

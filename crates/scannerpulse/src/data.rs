@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -164,6 +163,12 @@ struct FileWork {
     refused: i64,
     missing: i64,
     last_refusal: Option<String>,
+    /// A purge's first step has checked the holding folder and left its marker.
+    #[serde(default)]
+    marked: bool,
+    /// The holding folder's canonical path, as the first step found it.
+    #[serde(default)]
+    holding: Option<String>,
 }
 
 /// A call whose file a step handles.
@@ -387,6 +392,12 @@ async fn correct_one(
 pub(crate) async fn release(conn: &mut PgConnection, job: &Job) -> sqlx::Result<()> {
     let work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
     let roots = roots(conn).await?;
+    if let Some(holding) = &work.holding {
+        // A stopped purge leaves no marker; the next one writes its own.
+        let _ = std::fs::remove_file(
+            Path::new(holding).join(format!(".scannerpulse-purge-{}", job.id)),
+        );
+    }
     remove_gone(conn, &roots, &work.remove).await
 }
 
@@ -790,11 +801,9 @@ pub async fn purge_preview(conn: &mut PgConnection, id: i32) -> Result<PurgePrev
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Purge {
     talkgroup_id: i32,
-    /// The holding folder as it was when the job started.
+    /// The setting as it was when the job started; the host that runs the job
+    /// checks it.
     holding: String,
-    /// The holding folder's device, so that an unmounted share is noticed.
-    #[serde(default)]
-    holding_dev: u64,
 }
 
 /// Adds a job that purges the talkgroup, once its name is typed exactly.
@@ -811,29 +820,11 @@ pub async fn start_purge(
             "set purge.holding_path first: the purged calls' files are kept there".into(),
         ));
     };
-    if !Path::new(&holding).is_dir() {
-        return Err(JobError::Refused(format!(
-            "the holding folder {holding} is not a folder this host can see"
-        )));
-    }
     if preview.read_only > 0 {
         return Err(JobError::Refused(format!(
             "{} of the calls are in read-only locations, whose files a purge cannot move",
             preview.read_only
         )));
-    }
-    // A file kept in a location's own tree would be the file the purge then
-    // removes.
-    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let kept = real(Path::new(&holding));
-    for root in roots(conn).await?.values() {
-        let root = real(root);
-        if kept.starts_with(&root) || root.starts_with(&kept) {
-            return Err(JobError::Refused(format!(
-                "the holding folder {holding} overlaps the archive location {}",
-                root.display()
-            )));
-        }
     }
     confirmed(&preview.talkgroup, confirm)?;
     let filling: Option<i32> = sqlx::query_scalar(
@@ -848,13 +839,9 @@ pub async fn start_purge(
             "a merge into this talkgroup is waiting or running; purge after it".into(),
         ));
     }
-    let holding_dev = std::fs::metadata(&kept)
-        .map_err(|error| JobError::Refused(format!("cannot read the holding folder: {error}")))?
-        .dev();
     let params = serde_json::to_value(Purge {
         talkgroup_id: id,
-        holding: kept.to_string_lossy().into_owned(),
-        holding_dev,
+        holding,
     })
     .expect("plain data");
     let job = jobs::create(
@@ -942,20 +929,66 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     let roots = roots(conn).await?;
     remove_gone(conn, &roots, &work.remove).await?;
     work.remove.clear();
-    let holding = PathBuf::from(&params.holding);
-    if !holding.is_dir() {
-        // An unmounted share: try again later rather than lose a file.
-        return Err(io_error(io::Error::other(format!(
-            "the holding folder {} is not there",
-            params.holding
-        ))));
+    let marker = format!(".scannerpulse-purge-{}", job.id);
+    if !work.marked {
+        // The first step runs on the host that holds the job's lease, which
+        // is where the folder must be seen: check it here, once.
+        let raw = Path::new(&params.holding);
+        if !raw.is_dir() {
+            return Ok(Outcome::Failed(format!(
+                "the holding folder {} is not a folder this host can see",
+                params.holding
+            )));
+        }
+        let kept = match std::fs::canonicalize(raw) {
+            Ok(kept) => kept,
+            Err(error) => {
+                return Ok(Outcome::Failed(format!(
+                    "cannot read the holding folder {}: {error}",
+                    params.holding
+                )));
+            }
+        };
+        // A file kept in an archive tree would be the file the purge then
+        // removes, and a held file in an ingest source would be ingested again.
+        let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let sources: Vec<String> = sqlx::query_scalar("SELECT path FROM sources")
+            .fetch_all(&mut *conn)
+            .await?;
+        let others = roots
+            .values()
+            .map(|root| ("archive location", root.clone()))
+            .chain(
+                sources
+                    .into_iter()
+                    .map(|path| ("ingest source", path.into())),
+            );
+        for (what, other) in others {
+            let other = real(&other);
+            if kept.starts_with(&other) || other.starts_with(&kept) {
+                return Ok(Outcome::Failed(format!(
+                    "the holding folder {} overlaps the {what} {}",
+                    kept.display(),
+                    other.display()
+                )));
+            }
+        }
+        if let Err(error) = std::fs::File::create(kept.join(&marker)) {
+            return Ok(Outcome::Failed(format!(
+                "cannot write in the holding folder {}: {error}",
+                kept.display()
+            )));
+        }
+        work.marked = true;
+        work.holding = Some(kept.to_string_lossy().into_owned());
     }
-    if params.holding_dev != 0
-        && std::fs::metadata(&holding).map_err(io_error)?.dev() != params.holding_dev
-    {
+    let holding_path = work.holding.clone().unwrap_or_default();
+    let holding = PathBuf::from(&holding_path);
+    if !holding.join(&marker).is_file() {
+        // An unmounted share hides the marker: try again later rather than
+        // lose a file.
         return Err(io_error(io::Error::other(format!(
-            "the holding folder {} is not the one the purge started with (unmounted?)",
-            params.holding
+            "the holding folder {holding_path} is not the one the purge started with (unmounted?)"
         ))));
     }
     let (after_at, after_id) = work.after.unzip();
@@ -979,7 +1012,7 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
         let mut message = format!(
             "{} calls of {written} purged, their files kept in {}; {} had no file",
             work.moved + work.missing,
-            params.holding,
+            holding_path,
             work.missing
         );
         if work.refused > 0 {
@@ -997,6 +1030,7 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
                 "; {remain} remain (refused, in read-only locations, or filed during the purge)"
             ));
         }
+        let _ = std::fs::remove_file(holding.join(&marker));
         return Ok(Outcome::Done(job.done, message));
     }
     for call in &batch {

@@ -831,12 +831,18 @@ async fn a_purge_keeps_the_files_in_the_holding_folder(pool: PgPool) {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("purge.holding_path"), "{refused}");
+    // The folder checks run on the host that runs the job.
     set_holding(&pool, &root.join("2031-03-01")).await;
-    let refused = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+    let (overlap, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("overlaps"), "{refused}");
+        .unwrap();
+    run_jobs(&pool).await;
+    let failed = scannerpulse::jobs::get(&pool, overlap)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert!(failed.message.contains("overlaps"), "{}", failed.message);
     set_holding(&pool, &holding).await;
     assert!(
         scannerpulse::data::start_purge(&mut conn, talkgroup, "alpha fire", "ann")
@@ -1004,4 +1010,104 @@ async fn a_purge_refuses_a_call_whose_folder_is_not_there(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(left, 1, "the row stays");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stopped_purge_resumes_with_a_new_job(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let holding = dir.path().join("holding");
+    std::fs::create_dir_all(&holding).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    set_holding(&pool, &holding).await;
+    let n = scannerpulse::data::FILES_PER_STEP + 10;
+    let mut calls = Vec::new();
+    let mut talkgroup = 0;
+    for i in 0..n {
+        let at = Utc.with_ymd_and_hms(2031, 3, 1, 0, 0, 0).unwrap() + chrono::Duration::minutes(i);
+        let name = format!("{}SYSA.mp3", at.format("%Y%m%d_%H%M%S"));
+        let rel = format!("2031-03-01/127-Alpha Fire/{name}");
+        let (call, id) = filed(
+            &pool,
+            places,
+            &root,
+            &rel,
+            Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+            at,
+        )
+        .await;
+        calls.push((call, rel));
+        talkgroup = id;
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    let (first, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    let context = scannerpulse::jobs::Context::new(None);
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    scannerpulse::jobs::stop(&mut conn, first, "ann")
+        .await
+        .unwrap();
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    let stopped = scannerpulse::jobs::get(&pool, first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.state, "stopped");
+    let (second, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, second)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+    for (call, rel) in &calls {
+        assert!(holding.join(rel).exists(), "{rel} is held");
+        assert!(!root.join(rel).exists(), "{rel} left the archive");
+        assert_eq!(rel_of_opt(&pool, *call).await, None, "its row is gone");
+    }
+    let rows_missing: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM calls WHERE talkgroup_id = $1")
+            .bind(talkgroup)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows_missing, 0);
+    for job in [first, second] {
+        assert!(
+            !holding.join(format!(".scannerpulse-purge-{job}")).exists(),
+            "job {job}'s marker is gone"
+        );
+    }
+}
+
+async fn rel_of_opt(pool: &PgPool, call: i64) -> Option<String> {
+    sqlx::query_scalar("SELECT rel_path FROM calls WHERE id = $1")
+        .bind(call)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_purge_waits_for_a_queued_merge_into_the_talkgroup(pool: PgPool) {
+    let a = common::talkgroup(&pool, "SYSA", 1).await;
+    let b = common::talkgroup(&pool, "SYSA", 2).await;
+    let dir = tempfile::tempdir().unwrap();
+    set_holding(&pool, dir.path()).await;
+    let mut conn = pool.acquire().await.unwrap();
+    scannerpulse::data::start_merge(&mut conn, a, b, "Group 1", "ann")
+        .await
+        .unwrap();
+    let refused = scannerpulse::data::start_purge(&mut conn, b, "Group 2", "ann")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("merge"), "{refused}");
 }
