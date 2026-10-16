@@ -419,7 +419,7 @@ test('a shared link opens the call above the list, ready to play', async ({ page
   await expect(card).toBeVisible();
   await expect(card).toContainText(/Metro|Valley/);
   await card.getByRole('button', { name: /^Play/ }).click();
-  await expect(page.locator('.now')).not.toHaveText('Nothing playing');
+  await expect(page.locator('footer.player .now')).not.toHaveText('Nothing playing');
   await card.getByRole('button', { name: 'Close' }).click();
   await expect(card).toHaveCount(0);
   await expect(page).toHaveURL(/\/(\?.*)?$/);
@@ -570,3 +570,98 @@ test('printing keeps the calls only, names the PDF by the export name, and print
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await expect(page).toHaveTitle(title);
 });
+
+const panel = (page: Page) => page.getByRole('dialog', { name: 'Search the archive' });
+const panelRows = (page: Page) => panel(page).locator('tbody tr');
+const exactCount = async (page: Page, words: string) =>
+  (await (await page.request.get(`/api/calls?q=${encodeURIComponent(words)}&exact=true&size=10`)).json()).total as number;
+
+test('the bar\'s search opens the panel, with every date searched and an exact count', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  const expected = await exactCount(page, 'responding');
+  expect(expected).toBeGreaterThan(10);
+  await page.getByLabel('Words to search for').fill('responding');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(panel(page)).toBeVisible();
+  await expect(panel(page)).toContainText(`${expected} matches`);
+  await expect(page).toHaveURL(/search=responding/);
+  // The live list behind it is the live list still.
+  await expect(rows(page)).toHaveCount(30 + (await panelRows(page).count()));
+});
+
+test('a link with words opens the panel and searches them', async ({ page }) => {
+  const expected = await exactCount(page, 'station');
+  await page.goto('/?search=station');
+  await expect(panel(page)).toBeVisible();
+  await expect(panel(page)).toContainText(`${expected} matches`);
+  await expect(panel(page).getByLabel('Words')).toHaveValue('station');
+});
+
+test('a result holds the live player, which goes on when the result ends', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.getByLabel('Continuous').uncheck();
+  const live = page.locator('footer.player audio');
+  const result = page.locator('dialog.panel audio');
+  const paused = (audio: typeof live) => audio.evaluate((a: HTMLAudioElement) => a.paused);
+  await rows(page).nth(0).getByRole('button', { name: /^Play/ }).click();
+  await expect.poll(() => paused(live)).toBe(false);
+  await page.getByLabel('Words to search for').fill('responding');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(panelRows(page).first()).toBeVisible();
+  await panelRows(page).first().getByRole('button', { name: /^Play/ }).click();
+  await expect.poll(() => paused(result)).toBe(false);
+  await expect.poll(() => paused(live)).toBe(true);
+  // The result is 2 s long: when it ends, the live call goes on.
+  await expect.poll(() => paused(live), { timeout: 8000, intervals: [100] }).toBe(false);
+});
+
+test('starting the live player by hand stops the result', async ({ page }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(30);
+  await page.getByLabel('Words to search for').fill('responding');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await panelRows(page).first().getByRole('button', { name: /^Play/ }).click();
+  const result = page.locator('dialog.panel audio');
+  await expect.poll(() => result.evaluate((a: HTMLAudioElement) => a.paused)).toBe(false);
+  await page.locator('footer.player audio').evaluate((a: HTMLAudioElement) => {
+    a.src = a.src || '/audio/1';
+    return a.play();
+  }).catch(() => {});
+  await expect.poll(() => result.evaluate((a: HTMLAudioElement) => a.paused)).toBe(true);
+  await expect(panel(page)).toContainText('No result playing');
+});
+
+test('Escape closes the panel, takes the words out of the address and gives the focus back', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Words to search for').fill('station');
+  const button = page.getByRole('button', { name: 'Search', exact: true });
+  await button.click();
+  await expect(panel(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toBeHidden();
+  await expect(page).not.toHaveURL(/search=/);
+  await expect(button).toBeFocused();
+});
+
+test('the panel\'s results export to Excel', async ({ page }) => {
+  await page.goto('/?search=responding');
+  await expect(panelRows(page).first()).toBeVisible();
+  const [file] = await Promise.all([
+    page.waitForEvent('download'),
+    panel(page).getByRole('button', { name: 'Excel — every match' }).click(),
+  ]);
+  expect(file.suggestedFilename()).toMatch(/ScannerPulse.*\.xlsx$/);
+});
+
+for (const width of [1280, 360]) {
+  test(`no accessibility fault with the search panel open at ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto('/?search=responding');
+    await expect(panelRows(page).first()).toBeVisible();
+    const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
+    expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  });
+}

@@ -22,6 +22,30 @@
     audio.play().catch(() => {});
   });
 
+  // A hold (a search result playing) pauses the live call; when it ends the
+  // live call goes on where it stopped, if it was sounding.
+  let resume = false;
+  $effect(() => {
+    if (player.held) {
+      if (!audio.paused) {
+        resume = true;
+        audio.pause();
+      }
+    } else if (resume) {
+      resume = false;
+      audio.play().catch(() => {});
+    }
+  });
+
+  /** The live player started during a hold can only be the listener's hand:
+   * live wins, and the panel stops its result. */
+  function started() {
+    if (!player.held) return;
+    resume = false;
+    player.held = false;
+    player.takenBack += 1;
+  }
+
   function ended() {
     player.busy = false;
     if (id === null) return;
@@ -54,7 +78,7 @@
     <button type="button" onclick={() => stepTo('older')} disabled={!canOlder} aria-label="Older call (P)" title="Older call (P)">▼</button>
   </div>
   <audio bind:this={audio} controls preload="none" onended={ended} onerror={failedToPlay}
-    onplaying={() => (player.busy = true)} onpause={() => (player.busy = false)}></audio>
+    onplay={started} onplaying={() => (player.busy = true)} onpause={() => (player.busy = false)}></audio>
   <p class="now" aria-live="polite">
     {#if player.call}
       <b>{player.call.talkgroup_name ?? player.call.talkgroup}</b>

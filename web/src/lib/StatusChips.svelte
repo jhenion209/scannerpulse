@@ -34,10 +34,10 @@
   }
   .warn { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-text); font-weight: 600; }
   /* A phone keeps only what needs attention, maintenance and a stale feed,
-     on a row of its own under the bar; with nothing to show, no row. */
+     at the end of the bar; with nothing to show, nothing. */
   @media (max-width: 760px) {
     .wide { display: none; }
-    .chips { flex-basis: 100%; order: 10; }
+    .chips { order: 10; }
     .chips:not(:has(.chip:not(.wide))) { display: none; }
     .chip { white-space: normal; }
   }

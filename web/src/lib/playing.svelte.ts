@@ -11,6 +11,12 @@ export const player = $state({
   busy: false,
   /** Counts every request to play; asking for the call already loaded still loads it again. */
   request: 0,
+  /** The search panel is playing a result: the live player waits, and goes
+   * on where it stopped once the hold ends. */
+  held: false,
+  /** Counts the times the listener started the live player by hand during a
+   * hold: the panel stops its result then. */
+  takenBack: 0,
 });
 
 /** Calls played or failed in this visit; nothing is kept after the page closes. */

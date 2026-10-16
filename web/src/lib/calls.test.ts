@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NO_FILTERS } from './filters';
 import { FIRST_PAGE } from './paging';
-import { goTo, show, view } from './calls.svelte';
+import { createList, goTo, show, view } from './calls.svelte';
 
 const call = (id: number) => ({ id, started_at: '2026-10-15T12:00:00Z', duration_ms: 1000, talkgroup_id: 1, talkgroup: 101,
   talkgroup_name: 'Fire Dispatch', system: 'SYSA', site: null, radio_id: null, radio_alias: null, transcript: null, origin: null });
@@ -120,5 +120,40 @@ describe('the call list', () => {
     expect(view.calls.map((c) => c.id)).toEqual([9, 10]);
     expect(view.error).toBeNull();
     expect(view.loading).toBe(false);
+  });
+});
+
+describe('a second list (the search panel\'s)', () => {
+  it('reads by its own words and counts exactly on a new search, never touching the main list', async () => {
+    const asked = serve();
+    await show(ask, FIRST_PAGE);
+    const mainCalls = view.calls.map((c) => c.id);
+    const search = createList();
+    await search.show({ ...ask, text: 'engine 7', exact: true }, FIRST_PAGE);
+    const query = asked[asked.length - 1];
+    expect(query.get('q')).toBe('engine 7');
+    expect(query.get('exact')).toBe('true');
+    expect(search.view.total).toBe(6);
+    expect(view.calls.map((c) => c.id)).toEqual(mainCalls);
+    // A page turn does not count again, so it asks for no exact count.
+    await search.show({ ...ask, text: 'engine 7', exact: true }, { ...search.view.paging, index: 1 }, false);
+    const turn = asked[asked.length - 1];
+    expect(turn.get('count')).toBe('false');
+    expect(turn.get('exact')).toBeNull();
+    expect(turn.get('q')).toBe('engine 7');
+  });
+
+  it('does not cancel the main list\'s read, nor the main list its', async () => {
+    const waiting = held();
+    const search = createList();
+    const main = show(ask, FIRST_PAGE);
+    const other = search.show({ ...ask, text: 'x' }, FIRST_PAGE);
+    expect(waiting).toHaveLength(2);
+    waiting[0].answer(body([1], null, 1));
+    waiting[1].answer(body([2], null, 1));
+    expect(await main).toBe(true);
+    expect(await other).toBe(true);
+    expect(view.calls.map((c) => c.id)).toEqual([1]);
+    expect(search.view.calls.map((c) => c.id)).toEqual([2]);
   });
 });

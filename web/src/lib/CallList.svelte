@@ -188,6 +188,10 @@
     .selecting .c-actions { grid-column: 6; }
     .bar { display: none; }
     td.text { grid-column: 1 / -1; padding-top: 0; }
+    /* Each cell's line is set, so none falls to a later line. */
+    .c-select, .c-play, .c-time, .c-talkgroup, .c-length, .c-actions { grid-row: 1; }
+    td.text { grid-row: 2; }
+    td.chips { grid-row: 3; }
     td.chips { display: flex; flex-wrap: wrap; gap: 0.1rem 0.9rem; grid-column: 1 / -1; padding-top: 0; font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; }
     .chip-name { font-weight: 600; }
   }

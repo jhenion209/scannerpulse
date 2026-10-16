@@ -17,6 +17,8 @@
   import Pager from './lib/Pager.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
   import SharedCall from './lib/SharedCall.svelte';
+  import SearchPanel from './lib/SearchPanel.svelte';
+  import { searchOf, withSearch } from './lib/search';
   import { keepOnPage, toggleAll, toggleOne } from './lib/selection';
   import Player from './lib/Player.svelte';
   import { play, played, player } from './lib/playing.svelte';
@@ -47,8 +49,20 @@
   onMount(startChoices);
   onMount(startStatus);
 
+  // The search panel: open when a link names words (`search=`), or from the
+  // bar's search box.
+  const linkWords = searchOf(location.search) ?? '';
+  let searchText = $state(linkWords);
+  let searchOpen = $state(linkWords !== '');
+  let barText = $state(linkWords);
+  function openSearch(event: SubmitEvent) {
+    event.preventDefault();
+    if (barText.trim()) searchText = barText.trim();
+    searchOpen = true;
+  }
+
   $effect(() => {
-    const search = filtersToSearch(filters, view.paging.index || landingPage());
+    const search = withSearch(filtersToSearch(filters, view.paging.index || landingPage()), searchOpen ? searchText : null);
     if (search !== location.search) history.replaceState(null, '', `${location.pathname}${search}${location.hash}`);
     // Only a change made after the page opened is saved: a link's value is
     // for this view alone.
@@ -125,7 +139,8 @@
   /** "Play new calls": once the page holds the call, play it if the player is free. */
   function playNew(call: Call | null) {
     const row = call && view.calls.find((c) => c.id === call.id);
-    if (row && prefs.autoplayNew && !player.busy) play(row);
+    // A search result playing holds the live player: new calls wait too.
+    if (row && prefs.autoplayNew && !player.busy && !player.held) play(row);
   }
 
   // SmartSort orders a page on the server: new calls read the page again,
@@ -384,6 +399,10 @@
       Filters
     </button>
     <span class="name">ScannerPulse</span>
+    <form class="find" role="search" aria-label="Search calls" onsubmit={openSearch}>
+      <input type="search" aria-label="Words to search for" placeholder="Search calls" bind:value={barText} />
+      <button type="submit">Search</button>
+    </form>
     <span class="spacer"></span>
     <StatusChips />
     <ThemeSwitch bind:theme={prefs.theme} />
@@ -423,6 +442,8 @@
 </div>
 <EditDialog call={editing} onclose={() => (editing = null)} onsaved={saved} />
 <ShareDialog url={sharing} onclose={() => (sharing = null)} />
+<SearchPanel bind:open={searchOpen} bind:text={searchText} choices={choices.filters}
+  onedit={(call) => (editing = call)} ondownload={download} onshare={share} {tell} />
 
 <style>
   .shell {
@@ -440,6 +461,16 @@
     padding: 0.25rem 0.6rem; min-height: 2.25rem; cursor: pointer;
   }
   .name { font-weight: 700; color: var(--accent-strong); }
+  .bar { flex-wrap: wrap; row-gap: 0.4rem; }
+  .find { display: flex; gap: 0.3rem; }
+  .find input {
+    min-height: 2.25rem; width: 14rem; padding: 0.2rem 0.5rem; border-radius: 4px;
+    border: 1px solid var(--bar-text); background: var(--bg); color: var(--text); font: inherit;
+  }
+  .find button {
+    min-height: 2.25rem; padding: 0 0.7rem; border-radius: 4px; border: 1px solid var(--bar-text);
+    background: none; color: var(--bar-text); font: inherit; cursor: pointer;
+  }
   .spacer { flex: 1; }
   .admin { color: var(--bar-text); }
   .rail { grid-area: rail; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; }
@@ -460,7 +491,8 @@
     .print-chosen :global(tbody tr:not(.selected)) { display: none !important; }
   }
   @media (max-width: 760px) {
-    .bar { flex-wrap: wrap; row-gap: 0.4rem; }
+    /* A phone keeps the Search button; the panel has the words field. */
+    .find input { display: none; }
     .shell, .shell.rail-closed { grid-template: 'bar' auto 'list' 1fr 'player' auto / 1fr; }
     .rail, .shell.rail-closed .rail { display: none; }
     .shell.menu-open .rail {
