@@ -262,7 +262,8 @@ pub fn verify(
     Ok(claims)
 }
 
-/// `GET /api/auth/oidc/callback`: the provider sends the browser back here.
+/// `GET /api/auth/oidc/callback`: the provider sends the browser back here,
+/// and a signed-in admin goes on to the admin page.
 pub async fn callback(
     State(state): State<AppState>,
     Client(address): Client,
@@ -338,5 +339,5 @@ pub async fn callback(
     ));
     let ended =
         format!("{STATE_COOKIE}=; Path=/api/auth/oidc; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
-    redirect("/", &[auth::session_cookie(&token), ended])
+    redirect("/admin", &[auth::session_cookie(&token), ended])
 }

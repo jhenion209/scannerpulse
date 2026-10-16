@@ -63,10 +63,10 @@ listen.
 - `web` serves the web interface and its API. It reads `DATABASE_URL`,
   `SCANNERPULSE_WEB_LISTEN` (default `127.0.0.1:8080`),
   `SCANNERPULSE_WEB_STATIC` (a folder of the frontend's built files, served
-  in place of the copy built into the binary, answering every path that has
-  no file there with that folder's `index.html`, so the admin page is served
-  only by the embedded copy until it is built; the binary carries the page
-  that `web/` builds, or one saying it was not built) and
+  in place of the copy built into the binary and by the same rules: a file by
+  its path, a page by its name, such as `/admin` for `admin.html`, and the
+  main page for any other path without an extension; the binary carries the
+  page that `web/` builds, or one saying it was not built) and
   `SCANNERPULSE_HOST` (its name in the list of open pages; default: the
   host's name) and `SCANNERPULSE_OIDC_CLIENT_SECRET`. It never writes to
   the archive and needs no lease, so several hosts can serve the same site
@@ -118,12 +118,16 @@ listen.
     goes in the database. The ID token's signature, issuer, audience, expiry
     and nonce are checked, and its `groups` claim must hold the admin group
     at every sign-in; an OIDC session ends 12 hours after signing in,
-    whatever its use, so the group is checked again at least that often. The
+    whatever its use, so the group is checked again at least that often. A
+    signed-in admin goes on to the admin page. The
     first sign-in creates the account; an existing
     account of the same name is never taken over. Password sign-in stays
     the way in when the provider is down, and `admin password-signin off`
     turns it off once OIDC works;
-  - `/api/admin/settings` lists the settings, and `PUT` or `DELETE`
+  - `/api/admin/settings` lists every setting: each stored one with the time
+    it was changed, each one that a part reads but that is not stored with a
+    null `value` and `updated_at`, and a stored one that no part reads with
+    `known` false (it can only be removed); `PUT` or `DELETE`
     `/api/admin/settings/<key>` (`value`) changes one, as `settings` does;
   - `PUT /api/admin/favorites/<name>` (`talkgroups`, a list of talkgroup
     ids) creates a favorite list or replaces its talkgroups, and `DELETE`

@@ -400,6 +400,15 @@ pub const WEB_KEYS: [&str; 9] = [
     "oidc.redirect_url",
 ];
 
+/// Every setting some part of the program reads.
+pub fn known() -> impl Iterator<Item = &'static str> {
+    KEYS.iter()
+        .chain(&TRANSCRIPTION_KEYS)
+        .chain(&IMPROVEMENT_KEYS)
+        .chain(&WEB_KEYS)
+        .copied()
+}
+
 /// An address of the OIDC provider or of this site's sign-in callback:
 /// https, or http to this machine only (a provider under test).
 pub fn oidc_url_ok(url: &str) -> bool {

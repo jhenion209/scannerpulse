@@ -1,6 +1,9 @@
-//! The frontend's built files, embedded in the binary at build time, and how
-//! they are served: a file by its path, a page by its name (`/admin` is
-//! `admin.html`), and the main page for any other path without an extension.
+//! The frontend's built files, embedded in the binary at build time or read
+//! from a folder that replaces them, and how they are served: a file by its
+//! path, a page by its name (`/admin` is `admin.html`), and the main page for
+//! any other path without an extension.
+
+use std::path::PathBuf;
 
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Response, StatusCode, Uri, header};
@@ -59,34 +62,29 @@ fn cache_control(name: &str) -> &'static str {
     }
 }
 
-/// Serves an embedded file to a GET or a HEAD; any other method is refused.
-pub async fn serve(method: Method, uri: Uri) -> Response<Body> {
-    if method != Method::GET && method != Method::HEAD {
-        // The API's error layer writes the JSON answer.
-        return Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .header(header::ALLOW, "GET, HEAD")
-            .body(Body::empty())
-            .expect("a fixed answer is valid");
+/// An answer the API's error layer turns into its JSON form.
+fn refused(status: StatusCode) -> Response<Body> {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = status;
+    if status == StatusCode::METHOD_NOT_ALLOWED {
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
     }
-    let found = resolve(uri.path(), |name| WEB.get_file(name).is_some())
-        .and_then(|name| WEB.get_file(&name).map(|file| (file.contents(), name)));
-    let Some((bytes, name)) = found else {
-        // The API's error layer writes the JSON answer.
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .expect("a fixed answer is valid");
-    };
-    let mut response = Response::new(Body::from(bytes));
+    response
+}
+
+/// The file `name` with its type and how long it may be kept.
+fn file(bytes: impl Into<Body>, name: &str) -> Response<Body> {
+    let mut response = Response::new(bytes.into());
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type(&name)),
+        HeaderValue::from_static(content_type(name)),
     );
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(cache_control(&name)),
+        HeaderValue::from_static(cache_control(name)),
     );
     // The type named above is the one to use: a browser must not guess another.
     headers.insert(
@@ -94,6 +92,38 @@ pub async fn serve(method: Method, uri: Uri) -> Response<Body> {
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+/// Serves an embedded file to a GET or a HEAD; any other method is refused.
+pub async fn serve(method: Method, uri: Uri) -> Response<Body> {
+    if method != Method::GET && method != Method::HEAD {
+        return refused(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    match resolve(uri.path(), |name| WEB.get_file(name).is_some())
+        .and_then(|name| WEB.get_file(&name).map(|found| (found.contents(), name)))
+    {
+        Some((bytes, name)) => file(bytes, &name),
+        None => refused(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Serves a file of `dir` in place of the embedded copy, by the same rules.
+/// A path that names a parent or the current folder is never a file of it.
+pub async fn serve_folder(dir: PathBuf, method: Method, uri: Uri) -> Response<Body> {
+    if method != Method::GET && method != Method::HEAD {
+        return refused(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let path = uri.path();
+    if path.split('/').any(|part| part == ".." || part == ".") || path.contains('\\') {
+        return refused(StatusCode::NOT_FOUND);
+    }
+    let Some(name) = resolve(path, |name| dir.join(name).is_file()) else {
+        return refused(StatusCode::NOT_FOUND);
+    };
+    match tokio::fs::read(dir.join(&name)).await {
+        Ok(bytes) => file(bytes, &name),
+        Err(_) => refused(StatusCode::NOT_FOUND),
+    }
 }
 
 #[cfg(test)]

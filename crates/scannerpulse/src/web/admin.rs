@@ -151,20 +151,29 @@ pub async fn rescan(admin: Admin, State(state): State<AppState>) -> Result<Statu
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Every stored setting, with the time it was changed.
+/// Every setting: each stored one with the time it was changed, and each one
+/// a part reads that is not stored, with neither (`value` and `updated_at`
+/// null). A stored row that no part reads (`known` false) can only be removed.
 pub async fn settings_list(
     _: Admin,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, Value, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("SELECT key, value, updated_at FROM settings ORDER BY key")
+    let stored: Vec<(String, Value, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT key, value, updated_at FROM settings")
             .fetch_all(&state.pool)
             .await?;
-    Ok(Json(json!(
-        rows.into_iter()
-            .map(|(key, value, updated_at)| json!({"key": key, "value": value, "updated_at": updated_at}))
-            .collect::<Vec<_>>()
-    )))
+    let mut rows: std::collections::BTreeMap<String, Value> = crate::settings::known()
+        .map(|key| {
+            let row = json!({"key": key, "value": null, "updated_at": null, "known": true});
+            (key.to_string(), row)
+        })
+        .collect();
+    for (key, value, updated_at) in stored {
+        let known = crate::settings::known().any(|k| k == key);
+        let row = json!({"key": key, "value": value, "updated_at": updated_at, "known": known});
+        rows.insert(key, row);
+    }
+    Ok(Json(json!(rows.into_values().collect::<Vec<_>>())))
 }
 
 #[derive(Debug, Deserialize)]

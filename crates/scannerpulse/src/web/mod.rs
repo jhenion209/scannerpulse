@@ -258,12 +258,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state);
     // Every other path is the frontend's: a file it built, or its page,
     // which reads the path itself; from the folder when one is named,
-    // otherwise from the files embedded at build time.
+    // otherwise from the files embedded at build time, by the same rules.
     let routes = match files {
-        Some(dir) => routes.fallback_service(
-            tower_http::services::ServeDir::new(&dir)
-                .fallback(tower_http::services::ServeFile::new(dir.join("index.html"))),
-        ),
+        Some(dir) => {
+            routes.fallback(move |method, uri| embedded::serve_folder(dir.clone(), method, uri))
+        }
         None => routes.fallback(embedded::serve),
     };
     // Last, so that it also sees the answers no handler wrote: a refused

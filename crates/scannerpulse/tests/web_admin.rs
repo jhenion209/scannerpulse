@@ -60,9 +60,47 @@ async fn an_admin_changes_settings_through_their_checks(pool: PgPool) {
     )
     .await;
     assert_eq!(list.status, 200);
-    assert_eq!(list.body[0]["key"], "time_zone");
-    assert_eq!(list.body[0]["value"], "UTC");
-    assert!(list.body[0]["updated_at"].is_string());
+    let row = |key: &str| {
+        list.body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for {key}: {:?}", list.body))
+    };
+    assert_eq!(row("time_zone")["value"], "UTC");
+    assert!(row("time_zone")["updated_at"].is_string());
+    assert_eq!(row("time_zone")["known"], true);
+    // Every setting a part reads is listed, stored or not.
+    assert_eq!(
+        list.body.as_array().unwrap().len(),
+        scannerpulse::settings::known().count()
+    );
+    assert!(row("oidc.issuer")["value"].is_null());
+    assert!(row("oidc.issuer")["updated_at"].is_null());
+    // A row left by an older version is listed, to be removed.
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('old.key', '1')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let list = send(
+        &app,
+        "GET",
+        "/api/admin/settings",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    let old = list
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == "old.key")
+        .unwrap();
+    assert_eq!(old["known"], false);
+    assert_eq!(old["value"], 1);
     // Removing it is refused: ingest cannot run without a zone.
     let removed = send(&app, "DELETE", "/api/admin/settings/time_zone", &h, None).await;
     assert_eq!(removed.status, 400);

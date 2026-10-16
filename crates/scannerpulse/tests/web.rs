@@ -83,6 +83,7 @@ async fn a_wrong_method_is_refused_in_json_with_the_methods_allowed(pool: PgPool
 async fn the_frontends_files_are_served_and_its_page_answers_its_own_paths(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), "<p>page</p>").unwrap();
+    std::fs::write(dir.path().join("admin.html"), "<p>admin</p>").unwrap();
     std::fs::create_dir(dir.path().join("assets")).unwrap();
     std::fs::write(dir.path().join("assets/app.js"), "let x = 1;").unwrap();
     let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
@@ -100,6 +101,21 @@ async fn the_frontends_files_are_served_and_its_page_answers_its_own_paths(pool:
         get(app.clone(), "/calls/123").await,
         (StatusCode::OK, "<p>page</p>".into())
     );
+    // A page by its name, as the embedded copy serves it.
+    assert_eq!(
+        get(app.clone(), "/admin").await,
+        (StatusCode::OK, "<p>admin</p>".into())
+    );
+    let response = app
+        .clone()
+        .oneshot(Request::get("/admin").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-cache");
     let (status, body) = get(app.clone(), "/api/nonexistent").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("\"error\":\"not found\""), "{body}");
@@ -107,9 +123,19 @@ async fn the_frontends_files_are_served_and_its_page_answers_its_own_paths(pool:
     let (status, body) = get(app.clone(), "/api/export/audio").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     assert!(body.contains("\"error\":\"method not allowed\""), "{body}");
-    // A path that climbs out of the folder never reads outside it.
-    let (_, body) = get(app, "/../../../../etc/passwd").await;
+    // A missing file is not the page, and a path that climbs out of the
+    // folder never reads outside it.
+    let (status, _) = get(app.clone(), "/assets/missing.js").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, body) = get(app.clone(), "/../../../../etc/passwd").await;
     assert!(!body.contains("root:"), "{body}");
+    let (status, _) = get(app.clone(), "/assets/../admin.html").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let response = app
+        .oneshot(Request::post("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[sqlx::test(migrations = "./migrations")]

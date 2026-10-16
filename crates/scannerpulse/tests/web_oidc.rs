@@ -203,7 +203,7 @@ async fn a_member_of_the_group_signs_in_and_gets_an_account(pool: PgPool) {
     );
     let back = sign_in(&app, &fake, "user-1", &["staff", GROUP]).await;
     assert_eq!(back.status, 303, "{:?}", back.body);
-    assert_eq!(back.headers["location"], "/");
+    assert_eq!(back.headers["location"], "/admin");
     let cookies: Vec<&str> = back
         .headers
         .get_all("set-cookie")
