@@ -571,6 +571,12 @@ test('printing keeps the calls only, names the PDF by the export name, and print
   await expect(chosen).toHaveCount(1);
   await expect(chosen.locator('.c-play button')).toBeHidden();
   expect(await chosen.locator('td.c-talkgroup').evaluate((td) => getComputedStyle(td).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  // Every heading is over its column: as many headings as cells in the chosen row, each at its cell's x.
+  const heads = page.locator('thead th:visible');
+  const cells = chosen.locator('td:visible');
+  const lefts = (list: Locator) => list.evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().left)));
+  await expect(heads).toHaveCount(await cells.count());
+  expect(await lefts(heads)).toEqual(await lefts(cells));
   await page.emulateMedia({ media: 'screen' });
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await expect(page).toHaveTitle(title);

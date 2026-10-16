@@ -64,7 +64,7 @@
             bind:indeterminate={() => state === 'some', () => {}} onchange={onchooseall} />
         </th>
       {/if}
-      <th scope="col"><span class="visually-hidden">Play</span></th>
+      <th scope="col" class="c-play"><span class="visually-hidden">Play</span></th>
       {#each shown as column (column.id)}
         <th scope="col" class={`c-${column.id}`} class:extra={isExtra(column.id)} class:text={column.id === 'text'}>{column.label}</th>
       {/each}
