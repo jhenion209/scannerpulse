@@ -58,6 +58,31 @@ pub struct Config {
     pub host: String,
     /// The OIDC client's secret; secrets never go in the database.
     pub oidc_secret: Option<String>,
+    /// The certificate and key `web` serves HTTPS with; without them it
+    /// serves plain HTTP, on a loopback address only.
+    pub tls: Option<Tls>,
+}
+
+/// A certificate and its private key, as PEM files.
+#[derive(Clone, Debug)]
+pub struct Tls {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
+/// ScannerPulse serves plain HTTP only on this machine's own loopback
+/// address, where a browser treats the page as secure and keeps the session's
+/// `Secure` cookie; on any other address it serves HTTPS.
+pub fn check_listen(listen: SocketAddr, tls: bool) -> Result<(), String> {
+    if tls || listen.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(format!(
+            "SCANNERPULSE_WEB_LISTEN is {listen}, an address other machines reach: \
+             ScannerPulse serves HTTPS there; set SCANNERPULSE_TLS_CERT and \
+             SCANNERPULSE_TLS_KEY (scannerpulse cert make writes a pair)"
+        ))
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -71,6 +96,7 @@ impl std::fmt::Debug for Config {
                 "oidc_secret",
                 &self.oidc_secret.as_ref().map(|_| "<hidden>"),
             )
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -99,12 +125,28 @@ impl Config {
         let oidc_secret = std::env::var("SCANNERPULSE_OIDC_CLIENT_SECRET")
             .ok()
             .filter(|secret| !secret.is_empty());
+        let path = |name| {
+            std::env::var_os(name)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        let tls = match (path("SCANNERPULSE_TLS_CERT"), path("SCANNERPULSE_TLS_KEY")) {
+            (Some(cert), Some(key)) => Some(Tls { cert, key }),
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "set both SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY, or neither".into(),
+                );
+            }
+        };
+        check_listen(listen, tls.is_some())?;
         Ok(Config {
             database,
             listen,
             static_dir,
             host,
             oidc_secret,
+            tls,
         })
     }
 }
@@ -319,23 +361,48 @@ pub async fn run(
     live::spawn(state.pool.clone(), state.live.clone());
     viewers::spawn(state.clone());
     let stop_live = state.shutdown.clone();
-    let listener = tokio::net::TcpListener::bind(config.listen)
+    let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
+    let Some(tls) = config.tls else {
+        let listener = tokio::net::TcpListener::bind(config.listen)
+            .await
+            .map_err(|error| format!("cannot listen on {}: {error}", config.listen))?;
+        crate::log::info(format!("web listening on {}", config.listen));
+        // Graceful shutdown waits for open connections, and a live page never
+        // ends by itself: it is told to close first.
+        return axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown.await;
+                stop_live.send_replace(true);
+            })
+            .await
+            .map_err(|error| error.to_string());
+    };
+    let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
         .await
-        .map_err(|error| format!("cannot listen on {}: {error}", config.listen))?;
-    crate::log::info(format!("web listening on {}", config.listen));
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    // Graceful shutdown waits for open connections, and a live page never
-    // ends by itself: it is told to close first.
-    .with_graceful_shutdown(async move {
+        .map_err(|error| {
+            format!(
+                "cannot read the certificate {} and its key {}: {error}",
+                tls.cert.display(),
+                tls.key.display()
+            )
+        })?;
+    let handle = axum_server::Handle::new();
+    let stopper = handle.clone();
+    tokio::spawn(async move {
         shutdown.await;
         stop_live.send_replace(true);
-    })
-    .await
-    .map_err(|error| error.to_string())
+        stopper.graceful_shutdown(Some(GRACE));
+    });
+    crate::log::info(format!("web listening on {} (HTTPS)", config.listen));
+    axum_server::bind_rustls(config.listen, rustls)
+        .handle(handle)
+        .serve(app)
+        .await
+        .map_err(|error| format!("cannot serve on {}: {error}", config.listen))
 }
+
+/// How long a stopping HTTPS server waits for open requests.
+const GRACE: Duration = Duration::from_secs(10);
 
 /// The process is up.
 async fn health() -> &'static str {

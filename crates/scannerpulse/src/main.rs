@@ -57,6 +57,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse jobs show|stop ID
        scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
        scannerpulse jobs asr-run --set NAME --server URL --model MODEL [--prompt-file FILE]
+       scannerpulse cert make --cert FILE --key FILE NAME...
        scannerpulse --version
        scannerpulse --help
 
@@ -69,7 +70,9 @@ ingest      watch the sources and file their calls into the archive, sharing
 lease       show which host holds the processing lease, and each host's
             heartbeat; exit 0 when the lease has a valid holder
 web         serve the web interface and its API (reads DATABASE_URL,
-            SCANNERPULSE_WEB_LISTEN, default 127.0.0.1:8080,
+            SCANNERPULSE_WEB_LISTEN, default 127.0.0.1:8080; HTTPS with
+            SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY, which any address
+            other machines reach needs;
             SCANNERPULSE_WEB_STATIC, the frontend's built files, and
             SCANNERPULSE_HOST, its name in the list of open pages, and
             SCANNERPULSE_OIDC_CLIENT_SECRET when admins sign in through an
@@ -134,7 +137,11 @@ jobs        the long jobs, which the host holding the lease runs one at a time:
             without --talkgroup the backlog of every talkgroup whose
             transcription is on; from DAY and through DAY (local days) when
             given; asks first unless --yes
-  asr-run   asr run as a job: the set's labeled calls, one a step";
+  asr-run   asr run as a job: the set's labeled calls, one a step
+cert        make: write a certificate for the host names and addresses NAME
+            (FILE, readable by all) and its private key (FILE, the owner's
+            alone), good for five years; browsers warn once, since no
+            authority signed it";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -161,6 +168,11 @@ enum Command {
     Viewers,
     Jobs(Jobs),
     Rescan,
+    CertMake {
+        cert: String,
+        key: String,
+        names: Vec<String>,
+    },
     Talkgroups,
     TalkgroupSwitch {
         talkgroup: String,
@@ -456,6 +468,13 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["viewers"] => Some(Command::Viewers),
         ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
         ["rescan"] => Some(Command::Rescan),
+        ["cert", "make", "--cert", cert, "--key", key, names @ ..] if !names.is_empty() => {
+            Some(Command::CertMake {
+                cert: cert.to_string(),
+                key: key.to_string(),
+                names: names.iter().map(|n| n.to_string()).collect(),
+            })
+        }
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
         ["talkgroup", "correct", talkgroup, rest @ ..] => {
@@ -630,6 +649,18 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Command::CertMake { cert, key, names }) => {
+            match scannerpulse::cert::make(&names, Path::new(&cert), Path::new(&key)) {
+                Ok(()) => {
+                    println!("wrote the certificate {cert} and its key {key}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("cert make: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some(Command::Rescan) => match connect().await {
             Ok(mut conn) => match ingest::request_rescan(&mut conn).await {
                 Ok(()) => {
@@ -1699,6 +1730,32 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 #[cfg(test)]
 mod tests {
     use super::{Admin, Asr, Command, Data, Favorites, Jobs, Settings, parse, talkgroup_list};
+
+    #[test]
+    fn cert_make_takes_its_two_files_and_one_name_or_more() {
+        assert_eq!(
+            parse(&[
+                "cert",
+                "make",
+                "--cert",
+                "c.pem",
+                "--key",
+                "k.pem",
+                "radio.example",
+                "192.0.2.10"
+            ]),
+            Some(Command::CertMake {
+                cert: "c.pem".into(),
+                key: "k.pem".into(),
+                names: vec!["radio.example".into(), "192.0.2.10".into()],
+            })
+        );
+        assert_eq!(
+            parse(&["cert", "make", "--cert", "c.pem", "--key", "k.pem"]),
+            None
+        );
+        assert_eq!(parse(&["cert", "make", "radio.example"]), None);
+    }
 
     #[test]
     fn db_update_runs_with_or_without_quiet() {

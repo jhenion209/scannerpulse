@@ -5,6 +5,7 @@ pub mod accuracy;
 pub mod archive;
 pub mod asr;
 pub mod backfill;
+pub mod cert;
 pub mod data;
 pub mod evaluation;
 pub mod favorites;

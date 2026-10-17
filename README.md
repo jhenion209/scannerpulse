@@ -68,7 +68,13 @@ listen.
   main page for any other path without an extension; the binary carries the
   page that `web/` builds, or one saying it was not built) and
   `SCANNERPULSE_HOST` (its name in the list of open pages; default: the
-  host's name) and `SCANNERPULSE_OIDC_CLIENT_SECRET`. It never writes to
+  host's name) and `SCANNERPULSE_OIDC_CLIENT_SECRET`. It serves HTTPS with
+  the certificate and key named by `SCANNERPULSE_TLS_CERT` and
+  `SCANNERPULSE_TLS_KEY` (PEM files; `scannerpulse cert make` writes a pair
+  for this machine's names and addresses). Without them it serves plain HTTP,
+  and only on a loopback address such as `127.0.0.1`, where a browser treats
+  the page as secure: an address other machines reach is refused without a
+  certificate, since the admin page's session needs HTTPS. It never writes to
   the archive and needs no lease, so several hosts can serve the same site
   behind a load balancer. Its routes:
   - `/api/calls`: the list and the archive search: filters (`talkgroups`,
