@@ -106,12 +106,7 @@ fn run(
     if output.status.success() {
         return Ok(());
     }
-    let said: Vec<String> = String::from_utf8_lossy(&output.stderr)
-        .lines()
-        .chain(String::from_utf8_lossy(&output.stdout).lines())
-        .map(str::to_string)
-        .collect();
-    let tail = said[said.len().saturating_sub(10)..].join("\n");
+    let tail = said(&output);
     Err(format!(
         "{program} ended with {}{}",
         output.status,
@@ -121,6 +116,17 @@ fn run(
             format!(":\n{tail}")
         }
     ))
+}
+
+/// The last 10 lines a program printed: its standard output, then its
+/// errors, so the reason a program gives last survives its progress lines.
+fn said(output: &std::process::Output) -> String {
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&output.stderr).lines())
+        .map(str::to_string)
+        .collect();
+    lines[lines.len().saturating_sub(10)..].join("\n")
 }
 
 fn write(path: &Path, contents: &str, mode: u32, owner: &str) -> Result<(), String> {
@@ -314,5 +320,25 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("the reason"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_steps_message_ends_with_its_error_output_after_a_chatty_one() {
+        let steps = vec![run(
+            "chatty",
+            "/bin/sh",
+            &[
+                "-c",
+                "for n in 1 2 3 4 5 6 7 8 9 10 11 12; do echo progress $n; done; echo the reason >&2; exit 1",
+            ],
+            None,
+            None,
+        )];
+        let error = apply(&steps, &context(), true).await.unwrap_err();
+        assert!(error.ends_with("the reason"), "{error}");
+        assert!(
+            error.contains("progress 12") && !error.contains("progress 3\n"),
+            "{error}"
+        );
     }
 }
