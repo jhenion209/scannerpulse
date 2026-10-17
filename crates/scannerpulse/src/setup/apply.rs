@@ -20,14 +20,13 @@ pub struct Context {
     pub cert: std::path::PathBuf,
 }
 
-/// Runs `steps`; `quiet` keeps a step's own output unless it fails.
+/// Runs `steps`, saying each; `quiet` keeps a step's own output (apt's, for
+/// one) unless it fails.
 pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(), String> {
     let total = steps.len();
     for (n, step) in steps.iter().enumerate() {
         let n = n + 1;
-        if !quiet {
-            println!("[{n}/{total}] {}", step.title);
-        }
+        println!("[{n}/{total}] {}", step.title);
         let fail = |why: String| {
             format!(
                 "setup stopped at step {n} of {total}, {}: {why}",
@@ -43,9 +42,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 unless,
             } => {
                 if unless.as_deref().is_some_and(Path::exists) {
-                    if !quiet {
-                        println!("      already done");
-                    }
+                    println!("      already done");
                     continue;
                 }
                 run(program, args, input.as_deref(), env, quiet).map_err(fail)?;

@@ -58,6 +58,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
        scannerpulse jobs asr-run --set NAME --server URL --model MODEL [--prompt-file FILE]
        scannerpulse cert make --cert FILE --key FILE NAME...
+       scannerpulse setup [--answers FILE] [--dry-run]
        scannerpulse --version
        scannerpulse --help
 
@@ -141,7 +142,13 @@ jobs        the long jobs, which the host holding the lease runs one at a time:
 cert        make: write a certificate for the host names and addresses NAME
             (FILE, readable by all) and its private key (FILE, the owner's
             alone), good for five years; browsers warn once, since no
-            authority signed it";
+            authority signed it
+setup       make this machine a ScannerPulse site, as root: asks Simple or
+            Advanced, then the folders, the time zone, the first admin and
+            transcription, shows what it will do, and does it after a yes
+            (PostgreSQL 17, the scannerpulse account, the settings file, the
+            certificate, the services); --answers FILE reads the answers
+            instead (NAME=value lines, mode 600), --dry-run changes nothing";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -172,6 +179,10 @@ enum Command {
         cert: String,
         key: String,
         names: Vec<String>,
+    },
+    Setup {
+        answers: Option<String>,
+        dry_run: bool,
     },
     Talkgroups,
     TalkgroupSwitch {
@@ -475,6 +486,7 @@ fn parse(args: &[&str]) -> Option<Command> {
                 names: names.iter().map(|n| n.to_string()).collect(),
             })
         }
+        ["setup", rest @ ..] => parse_setup(rest),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
         ["talkgroup", "correct", talkgroup, rest @ ..] => {
@@ -516,6 +528,24 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
         _ => None,
+    }
+}
+
+fn parse_setup(mut rest: &[&str]) -> Option<Command> {
+    let (mut answers, mut dry_run) = (None, false);
+    loop {
+        match rest {
+            [] => return Some(Command::Setup { answers, dry_run }),
+            ["--answers", file, more @ ..] if answers.is_none() => {
+                answers = Some(file.to_string());
+                rest = more;
+            }
+            ["--dry-run", more @ ..] if !dry_run => {
+                dry_run = true;
+                rest = more;
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -688,6 +718,15 @@ async fn run() -> ExitCode {
                 }
                 Err(error) => {
                     eprintln!("cert make: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Command::Setup { answers, dry_run }) => {
+            match scannerpulse::setup::run(answers.as_deref().map(Path::new), dry_run).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("setup: {error}");
                     ExitCode::FAILURE
                 }
             }
@@ -1761,6 +1800,27 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 #[cfg(test)]
 mod tests {
     use super::{Admin, Asr, Command, Data, Favorites, Jobs, Settings, parse, talkgroup_list};
+
+    #[test]
+    fn setup_takes_an_answers_file_and_a_dry_run_in_either_order() {
+        assert_eq!(
+            parse(&["setup"]),
+            Some(Command::Setup {
+                answers: None,
+                dry_run: false
+            })
+        );
+        assert_eq!(
+            parse(&["setup", "--dry-run", "--answers", "a.env"]),
+            Some(Command::Setup {
+                answers: Some("a.env".into()),
+                dry_run: true
+            })
+        );
+        assert_eq!(parse(&["setup", "--answers"]), None);
+        assert_eq!(parse(&["setup", "--dry-run", "--dry-run"]), None);
+        assert_eq!(parse(&["setup", "now"]), None);
+    }
 
     #[test]
     fn cert_make_takes_its_two_files_and_one_name_or_more() {
