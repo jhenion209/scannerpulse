@@ -27,6 +27,11 @@ else changes. The program is named by its full path after `sudo`, since
 some systems' sudo (Rocky Linux and AlmaLinux among them) leaves
 `/usr/local/bin` off its path.
 
+Fedora, Rocky Linux and AlmaLinux are untested outside a container. On a
+real machine SELinux, which they enforce, may keep PostgreSQL from archiving
+its WAL into the backups folder, and setup would then stop at "Take the
+first full backup".
+
 `scannerpulse setup` asks first for **Simple** or **Advanced** (Advanced
 arrives in a later version). Simple asks, explaining each first:
 
