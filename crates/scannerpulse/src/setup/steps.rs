@@ -14,6 +14,9 @@ pub const ACCOUNT: &str = "scannerpulse";
 /// The database, its owner role and its port.
 pub const DATABASE: &str = "scannerpulse";
 pub const PORT_PG: u16 = 5432;
+/// The web service's unit; setup writes it near the end, so it marks a
+/// machine set up.
+pub const WEB_UNIT: &str = "/etc/systemd/system/scannerpulse-web.service";
 
 /// The Simple questions' answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,11 +244,19 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
     let mut steps = Vec::new();
     match system.family {
         Family::Apt => {
-            steps.push(run("Read the package lists", "apt-get", &["update"]));
+            // A fresh machine's unattended upgrades may hold apt's lock a while.
+            let wait = "DPkg::Lock::Timeout=300";
+            steps.push(run(
+                "Read the package lists",
+                "apt-get",
+                &["-o", wait, "update"],
+            ));
             steps.push(run(
                 "Install the PostgreSQL project's repository tool",
                 "apt-get",
                 &[
+                    "-o",
+                    wait,
                     "install",
                     "-y",
                     "postgresql-common",
@@ -261,7 +272,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             steps.push(run(
                 "Install PostgreSQL 17 and pgBackRest",
                 "apt-get",
-                &["install", "-y", "postgresql-17", "pgbackrest"],
+                &["-o", wait, "install", "-y", "postgresql-17", "pgbackrest"],
             ));
         }
         Family::Dnf => {

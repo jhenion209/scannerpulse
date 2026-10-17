@@ -27,10 +27,11 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                     .into(),
             );
         }
-        if steps::env_path().exists() {
+        // A setup that stopped part way runs again; a finished one does not.
+        if Path::new(steps::WEB_UNIT).exists() {
             return Err(format!(
                 "this machine is set up already ({} exists); `scannerpulse uninstall` removes that setup first",
-                steps::env_path().display()
+                steps::WEB_UNIT
             ));
         }
         let me = std::env::current_exe().and_then(|p| p.canonicalize()).ok();

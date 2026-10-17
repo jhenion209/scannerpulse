@@ -60,7 +60,7 @@ else
 fi
 $as_root install -m 0755 "$tmp/$program" "$BIN_DIR/scannerpulse"
 echo "Installed $("$BIN_DIR/scannerpulse" --version) in $BIN_DIR/scannerpulse."
-if [ -e /etc/scannerpulse/scannerpulse.env ]; then
+if [ -e /etc/systemd/system/scannerpulse-web.service ]; then
     echo "This machine is set up already: restart its services to run this version:"
     echo "  sudo systemctl restart scannerpulse-web scannerpulse-ingest"
 else
