@@ -55,8 +55,9 @@ until you say so. It:
   warns once about the certificate, since no authority signed it;
 - sets up the backups in `<archive>/.scannerpulse-backups`: PostgreSQL sends
   its WAL to pgBackRest, and every night at 03:17 `scannerpulse backup` takes
-  a pgBackRest backup (full on Sundays, differential otherwise; two weeks of
-  point-in-time recovery) and a dump of the database (the newest 14 kept);
+  a pgBackRest backup (full on Sundays, differential otherwise; one to two
+  weeks of point-in-time recovery) and a dump of the database (the newest 14
+  kept);
 - starts the services `scannerpulse-web` and `scannerpulse-ingest` and the
   timer `scannerpulse-backup`, now and at boot.
 
