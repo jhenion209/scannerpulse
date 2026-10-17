@@ -59,6 +59,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse jobs asr-run --set NAME --server URL --model MODEL [--prompt-file FILE]
        scannerpulse cert make --cert FILE --key FILE NAME...
        scannerpulse setup [--answers FILE] [--dry-run]
+       scannerpulse backup
        scannerpulse --version
        scannerpulse --help
 
@@ -148,7 +149,10 @@ setup       make this machine a ScannerPulse site, as root: asks Simple or
             transcription, shows what it will do, and does it after a yes
             (PostgreSQL 17, the scannerpulse account, the settings file, the
             certificate, the services); --answers FILE reads the answers
-            instead (NAME=value lines, mode 600), --dry-run changes nothing";
+            instead (NAME=value lines, mode 600), --dry-run changes nothing
+backup      take the nightly backups, as root (the backup timer runs it):
+            pgBackRest (full on Sundays, differential otherwise) and a dump,
+            the newest 14 kept, into SCANNERPULSE_BACKUPS";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -184,6 +188,7 @@ enum Command {
         answers: Option<String>,
         dry_run: bool,
     },
+    Backup,
     Talkgroups,
     TalkgroupSwitch {
         talkgroup: String,
@@ -487,6 +492,7 @@ fn parse(args: &[&str]) -> Option<Command> {
             })
         }
         ["setup", rest @ ..] => parse_setup(rest),
+        ["backup"] => Some(Command::Backup),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
         ["talkgroup", "correct", talkgroup, rest @ ..] => {
@@ -727,6 +733,24 @@ async fn run() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("setup: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Command::Backup) => {
+            let (Ok(backups), Ok(url)) = (
+                std::env::var("SCANNERPULSE_BACKUPS"),
+                std::env::var("DATABASE_URL"),
+            ) else {
+                eprintln!(
+                    "backup: SCANNERPULSE_BACKUPS and DATABASE_URL must be set; setup writes both in the settings file"
+                );
+                return ExitCode::FAILURE;
+            };
+            match scannerpulse::backup::nightly(Path::new(&backups), &url) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("backup: {error}");
                     ExitCode::FAILURE
                 }
             }
@@ -1820,6 +1844,8 @@ mod tests {
         assert_eq!(parse(&["setup", "--answers"]), None);
         assert_eq!(parse(&["setup", "--dry-run", "--dry-run"]), None);
         assert_eq!(parse(&["setup", "now"]), None);
+        assert_eq!(parse(&["backup"]), Some(Command::Backup));
+        assert_eq!(parse(&["backup", "now"]), None);
     }
 
     #[test]

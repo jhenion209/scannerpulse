@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use super::system::{Family, System};
+use crate::backup::{PGBACKREST_CONF, STANZA};
 
 /// Where setup keeps this machine's files.
 pub const ETC: &str = "/etc/scannerpulse";
@@ -65,6 +66,9 @@ pub enum Action {
         recordings: PathBuf,
         archive: PathBuf,
     },
+    /// Adds the first admin, or gives it this password when a database kept
+    /// by `uninstall` has it already.
+    Admin { login: String, password: String },
     /// Waits until `web` answers on this machine.
     WaitForWeb { port: u16 },
 }
@@ -101,6 +105,61 @@ pub fn cert_path() -> PathBuf {
 pub fn key_path() -> PathBuf {
     Path::new(ETC).join("tls/key.pem")
 }
+/// The backups' folder inside the archive; the dot keeps it from ever
+/// reading as a date folder.
+pub fn backups_path(archive: &Path) -> PathBuf {
+    archive.join(".scannerpulse-backups")
+}
+
+/// pgBackRest's settings: its repository in the backups folder, two full
+/// backups kept (with the differentials and the WAL between them).
+pub fn pgbackrest_conf(archive: &Path, system: &System) -> String {
+    format!(
+        "# Written by `scannerpulse setup`.\n\
+         [global]\n\
+         repo1-path={repo}\n\
+         repo1-retention-full=2\n\
+         start-fast=y\n\
+         log-level-file=off\n\
+         \n\
+         [{STANZA}]\n\
+         pg1-path={data}\n\
+         pg1-port={PORT_PG}\n",
+        repo = backups_path(archive).join("pgbackrest").display(),
+        data = system.postgres_data(),
+    )
+}
+
+/// The nightly backup's service and timer, in that order.
+pub fn backup_units(binary: &Path, system: &System) -> (String, String) {
+    (
+        format!(
+            "# Written by `scannerpulse setup`.\n\
+             [Unit]\n\
+             Description=ScannerPulse nightly backups (pgBackRest and a dump)\n\
+             After={pg}.service\n\
+             \n\
+             [Service]\n\
+             Type=oneshot\n\
+             EnvironmentFile={env}\n\
+             ExecStart={binary} backup\n",
+            pg = system.postgres_service(),
+            env = env_path().display(),
+            binary = binary.display(),
+        ),
+        "# Written by `scannerpulse setup`.\n\
+         [Unit]\n\
+         Description=ScannerPulse nightly backups\n\
+         \n\
+         [Timer]\n\
+         OnCalendar=*-*-* 03:17:00\n\
+         Persistent=true\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n"
+            .to_string(),
+    )
+}
 
 /// The settings file's variables for these answers.
 pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
@@ -118,6 +177,10 @@ pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
         ),
         ("SCANNERPULSE_TLS_CERT", cert_path().display().to_string()),
         ("SCANNERPULSE_TLS_KEY", key_path().display().to_string()),
+        (
+            "SCANNERPULSE_BACKUPS",
+            backups_path(&answers.archive).display().to_string(),
+        ),
     ]
 }
 
@@ -404,13 +467,14 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             None,
         ));
     }
-    let twice = format!("{0}\n{0}\n", answers.password);
-    more.push(bin(
-        "Add the first admin account",
-        &["admin", "add", &answers.admin],
-        Some(twice),
-    ));
     steps.extend(more);
+    steps.push(Step {
+        title: "Add the first admin account".into(),
+        action: Action::Admin {
+            login: answers.admin.clone(),
+            password: answers.password.clone(),
+        },
+    });
     steps.push(Step {
         title: "Record the archive and the recordings folder".into(),
         action: Action::Folders {
@@ -418,6 +482,99 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             archive: answers.archive.clone(),
         },
     });
+    let backups = backups_path(&answers.archive);
+    steps.push(run(
+        "Make the folder of pgBackRest's backups",
+        "install",
+        &[
+            "-d",
+            "-m",
+            "0750",
+            "-o",
+            "postgres",
+            "-g",
+            "postgres",
+            &backups.join("pgbackrest").display().to_string(),
+        ],
+    ));
+    steps.push(run(
+        "Make the folder of the nightly dumps",
+        "install",
+        &[
+            "-d",
+            "-m",
+            "0700",
+            &backups.join("dump").display().to_string(),
+        ],
+    ));
+    steps.push(run(
+        "Make pgBackRest's settings folder",
+        "install",
+        &["-d", "-m", "0755", "/etc/pgbackrest"],
+    ));
+    steps.push(Step {
+        title: "Write pgBackRest's settings".into(),
+        action: Action::Write {
+            path: PathBuf::from(PGBACKREST_CONF),
+            contents: pgbackrest_conf(&answers.archive, system),
+            mode: 0o640,
+            owner: "root:postgres".into(),
+        },
+    });
+    let postgres = |title: &str, args: &[&str], input: Option<String>| Step {
+        title: title.to_string(),
+        action: Action::Run {
+            program: "runuser".into(),
+            args: ["-u", "postgres", "--"]
+                .iter()
+                .chain(args)
+                .map(|a| a.to_string())
+                .collect(),
+            input,
+            env: Vec::new(),
+            unless: None,
+        },
+    };
+    let config = format!("--config={PGBACKREST_CONF}");
+    let stanza = format!("--stanza={STANZA}");
+    steps.push(postgres(
+        "Send PostgreSQL's WAL to pgBackRest",
+        &["psql", "-q", "-v", "ON_ERROR_STOP=1"],
+        Some(format!(
+            "ALTER SYSTEM SET archive_mode = 'on';\n\
+             ALTER SYSTEM SET archive_command = 'pgbackrest {config} {stanza} archive-push %p';\n"
+        )),
+    ));
+    steps.push(run(
+        "Restart PostgreSQL 17, to start sending its WAL",
+        "systemctl",
+        &["restart", system.postgres_service()],
+    ));
+    steps.push(postgres(
+        "Make pgBackRest's place for this database",
+        &["pgbackrest", &config, &stanza, "stanza-create"],
+        None,
+    ));
+    steps.push(postgres(
+        "Take the first full backup",
+        &["pgbackrest", &config, &stanza, "backup", "--type=full"],
+        None,
+    ));
+    let (service, timer) = backup_units(binary, system);
+    for (name, contents) in [
+        ("scannerpulse-backup.service", service),
+        ("scannerpulse-backup.timer", timer),
+    ] {
+        steps.push(Step {
+            title: format!("Write {name}"),
+            action: Action::Write {
+                path: Path::new("/etc/systemd/system").join(name),
+                contents,
+                mode: 0o644,
+                owner: "root:root".into(),
+            },
+        });
+    }
     for command in ["web", "ingest"] {
         steps.push(Step {
             title: format!("Write the {command} service"),
@@ -439,7 +596,13 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
     steps.push(run(
         "Start ScannerPulse, now and at boot",
         "systemctl",
-        &["enable", "--now", "scannerpulse-web", "scannerpulse-ingest"],
+        &[
+            "enable",
+            "--now",
+            "scannerpulse-web",
+            "scannerpulse-ingest",
+            "scannerpulse-backup.timer",
+        ],
     ));
     steps.push(Step {
         title: "Wait for the web interface".into(),
@@ -450,7 +613,9 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Answers, Transcription, env_pairs, steps, unit};
+    use super::{
+        Action, Answers, Transcription, backup_units, env_pairs, pgbackrest_conf, steps, unit,
+    };
     use crate::setup::system::detect;
     use std::path::{Path, PathBuf};
 
@@ -547,13 +712,10 @@ mod tests {
             .iter()
             .find(|s| s.title == "Add the first admin account")
             .unwrap();
-        let Action::Run { input, .. } = &admin.action else {
+        let Action::Admin { password, .. } = &admin.action else {
             panic!()
         };
-        assert_eq!(
-            input.as_deref(),
-            Some("a long pass phrase\na long pass phrase\n")
-        );
+        assert_eq!(password, "a long pass phrase");
         let pgpass = all
             .iter()
             .find(|s| s.title == "Write the database's password file")
@@ -607,5 +769,58 @@ mod tests {
         assert!(
             ingest.contains("TimeoutStopSec=150\n") && !ingest.contains("CAP_NET_BIND_SERVICE")
         );
+    }
+
+    #[test]
+    fn the_backups_go_inside_the_archive_and_postgresql_sends_its_wal_to_pgbackrest() {
+        let pairs = env_pairs(&answers());
+        assert!(pairs.contains(&(
+            "SCANNERPULSE_BACKUPS",
+            "/srv/archive/.scannerpulse-backups".to_string()
+        )));
+        let debian = detect(DEBIAN, "aarch64").unwrap();
+        let conf = pgbackrest_conf(Path::new("/srv/archive"), &debian);
+        assert!(conf.contains("repo1-path=/srv/archive/.scannerpulse-backups/pgbackrest\n"));
+        assert!(conf.contains("[scannerpulse]\npg1-path=/var/lib/postgresql/17/main\n"));
+        let rocky = detect(ROCKY, "x86_64").unwrap();
+        assert!(
+            pgbackrest_conf(Path::new("/srv/archive"), &rocky)
+                .contains("pg1-path=/var/lib/pgsql/17/data\n")
+        );
+        let (service, timer) = backup_units(Path::new("/usr/local/bin/scannerpulse"), &rocky);
+        assert!(service.contains("ExecStart=/usr/local/bin/scannerpulse backup\n"));
+        assert!(
+            !service.contains("User="),
+            "the backup runs as root, for pgBackRest's runuser"
+        );
+        assert!(timer.contains("OnCalendar=*-*-* 03:17:00\nPersistent=true\n"));
+        let all = steps(
+            &answers(),
+            &debian,
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+        let wal = at("Send PostgreSQL's WAL to pgBackRest");
+        let Action::Run {
+            input: Some(sql), ..
+        } = &all[wal].action
+        else {
+            panic!()
+        };
+        assert!(sql.contains(
+            "archive_command = 'pgbackrest --config=/etc/pgbackrest/scannerpulse.conf --stanza=scannerpulse archive-push %p'"
+        ));
+        assert!(wal < at("Restart PostgreSQL 17, to start sending its WAL"));
+        assert!(
+            at("Restart PostgreSQL 17, to start sending its WAL")
+                < at("Make pgBackRest's place for this database")
+        );
+        assert!(at("Make pgBackRest's place for this database") < at("Take the first full backup"));
+        let Action::Run { args, .. } = &all[at("Start ScannerPulse, now and at boot")].action
+        else {
+            panic!()
+        };
+        assert!(args.contains(&"scannerpulse-backup.timer".to_string()));
     }
 }

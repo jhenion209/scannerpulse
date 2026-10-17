@@ -61,6 +61,12 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
             } => {
                 folders(context, recordings, archive).await.map_err(fail)?;
             }
+            Action::Admin { login, password } => {
+                let mut conn = connect(context).await.map_err(fail)?;
+                first_admin(&mut conn, login, password)
+                    .await
+                    .map_err(fail)?;
+            }
             Action::WaitForWeb { port } => {
                 wait_for_web(&context.cert, *port).await.map_err(fail)?
             }
@@ -138,19 +144,40 @@ fn write(path: &Path, contents: &str, mode: u32, owner: &str) -> Result<(), Stri
     )
 }
 
-async fn folders(context: &Context, recordings: &Path, archive: &Path) -> Result<(), String> {
+async fn connect(context: &Context) -> Result<sqlx::PgConnection, String> {
     use sqlx::Connection;
     let options = context
         .database_url
         .parse::<sqlx::postgres::PgConnectOptions>()
         .map_err(|error| error.to_string())?
         .password(&context.db_password);
-    let mut conn = sqlx::PgConnection::connect_with(&options)
+    sqlx::PgConnection::connect_with(&options)
         .await
-        .map_err(|error| format!("cannot reach the new database: {error}"))?;
+        .map_err(|error| format!("cannot reach the new database: {error}"))
+}
+
+async fn folders(context: &Context, recordings: &Path, archive: &Path) -> Result<(), String> {
+    let mut conn = connect(context).await?;
     super::folders::record(&mut conn, recordings, archive)
         .await
         .map_err(|error| format!("cannot record the folders: {error}"))
+}
+
+/// Adds the admin `login`, or gives it `password` if it exists already.
+pub async fn first_admin(
+    conn: &mut sqlx::PgConnection,
+    login: &str,
+    password: &str,
+) -> Result<(), String> {
+    use crate::accounts;
+    let found = accounts::by_login(&mut *conn, login)
+        .await
+        .map_err(|error| error.to_string())?;
+    match found {
+        None => accounts::add(conn, login, password).await.map(drop),
+        Some(_) => accounts::set_password(conn, login, password).await,
+    }
+    .map_err(|error| format!("the admin {login}: {error}"))
 }
 
 /// Waits until `web` answers `/health` over HTTPS with the certificate setup made.

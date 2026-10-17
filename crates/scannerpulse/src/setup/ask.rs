@@ -122,22 +122,33 @@ fn say(text: &str) {
     println!();
 }
 
+/// A validator from a check that gives the reason it refuses.
+fn valid(
+    check: impl Fn(&str) -> Result<(), String> + Clone + 'static,
+) -> impl Fn(&str) -> Result<Validation, inquire::CustomUserError> + Clone + 'static {
+    move |input: &str| {
+        Ok(match check(input.trim()) {
+            Ok(()) => Validation::Valid,
+            Err(why) => Validation::Invalid(why.into()),
+        })
+    }
+}
+
 fn folder(
     question: &str,
+    previous: Option<&Path>,
     other: Option<&folders::Folder>,
 ) -> Result<folders::Folder, inquire::InquireError> {
     let other = other.cloned();
-    let answer = Text::new(question)
-        .with_validator(move |input: &str| {
-            Ok(match folders::check(Path::new(input.trim())) {
-                Err(why) => Validation::Invalid(why.into()),
-                Ok(found) => match other.as_ref().map(|o| folders::apart(o, &found)) {
-                    Some(Err(why)) => Validation::Invalid(why.into()),
-                    _ => Validation::Valid,
-                },
-            })
-        })
-        .prompt()?;
+    let previous = previous.map(|p| p.display().to_string());
+    let mut text = Text::new(question).with_validator(valid(move |input| {
+        let found = folders::check(Path::new(input))?;
+        other.as_ref().map_or(Ok(()), |o| folders::apart(o, &found))
+    }));
+    if let Some(previous) = &previous {
+        text = text.with_default(previous);
+    }
+    let answer = text.prompt()?;
     let found = folders::check(Path::new(answer.trim()))
         .map_err(|why| inquire::InquireError::Custom(why.into()))?;
     println!(
@@ -152,34 +163,69 @@ fn folder(
     Ok(found)
 }
 
-/// Asks the Simple questions; None when the person leaves.
-pub fn interactive(defaults: &Defaults) -> Result<Option<Answers>, String> {
-    let left = |error: inquire::InquireError| match error {
-        inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
-            None
-        }
-        other => Some(other.to_string()),
-    };
-    let result = (|| -> Result<Answers, inquire::InquireError> {
+/// The program `ss` shows listening on `port`, from its `users:(("nginx",...` part.
+pub fn program_in(ss: &str) -> Option<String> {
+    let (_, rest) = ss.split_once("((\"")?;
+    Some(rest.split('"').next()?.to_string())
+}
+
+/// What listens on `port`, as far as `ss` can tell.
+pub fn holder(port: u16) -> String {
+    std::process::Command::new("ss")
+        .args(["-H", "-ltnp", &format!("sport = :{port}")])
+        .output()
+        .ok()
+        .and_then(|out| program_in(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_else(|| "another program".into())
+}
+
+/// Asks the Simple questions, each answer of `previous` offered again;
+/// None when the person leaves.
+pub fn interactive(
+    defaults: &Defaults,
+    previous: Option<&Answers>,
+) -> Result<Option<Answers>, String> {
+    let result = (|| -> Result<Option<Answers>, inquire::InquireError> {
+        let port = match previous {
+            Some(answers) => answers.port,
+            None if defaults.port != 443 => {
+                let take = Confirm::new(&format!(
+                    "Port 443 is in use by {}. Serve ScannerPulse on port {} instead?",
+                    holder(443),
+                    defaults.port
+                ))
+                .with_default(true)
+                .with_help_message("No leaves setup, so you can free port 443 and run it again.")
+                .prompt()?;
+                if !take {
+                    return Ok(None);
+                }
+                defaults.port
+            }
+            None => defaults.port,
+        };
         say(
             "1 of 5. The recordings folder: where SDRTrunk saves its recordings. ScannerPulse reads each new file there and then moves it into the archive, so this folder stays small. It can be a folder on this machine or a network share SDRTrunk writes to; the folder must exist already.",
         );
-        let recordings = folder("Recordings folder:", None)?;
+        let recordings = folder(
+            "Recordings folder:",
+            previous.map(|a| a.recordings.as_path()),
+            None,
+        )?;
         say(
             "2 of 5. The archive: where every call is kept for good, filed as <archive>/YYYY-MM-DD/<talkgroup>/<file>.mp3. Nothing here is removed automatically, and the database's backups are kept in it too, in .scannerpulse-backups. A busy county system adds about half a gigabyte a day. Give it a disk of its own if you can; it may not be inside the recordings folder, nor the recordings folder inside it.",
         );
-        let archive = folder("Archive folder:", Some(&recordings))?;
+        let archive = folder(
+            "Archive folder:",
+            previous.map(|a| a.archive.as_path()),
+            Some(&recordings),
+        )?;
         say(
             "3 of 5. The site's time zone: the times on the pages are shown in it, and SDRTrunk's file names are read in it.",
         );
         let time_zone = Text::new("Time zone:")
-            .with_default(&defaults.time_zone)
-            .with_validator(|z: &str| {
-                Ok(match check_zone(z.trim()) {
-                    Ok(()) => Validation::Valid,
-                    Err(why) => Validation::Invalid(why.into()),
-                })
-            })
+            .with_default(previous.map_or(&defaults.time_zone, |a| &a.time_zone))
+            .with_validator(valid(check_zone))
             .prompt()?
             .trim()
             .to_string();
@@ -187,84 +233,105 @@ pub fn interactive(defaults: &Defaults) -> Result<Option<Answers>, String> {
             "4 of 5. The first admin account signs in to the admin page. Its password has at least 12 characters; it is asked twice and never shown.",
         );
         let admin = Text::new("Admin name:")
-            .with_default("admin")
-            .with_validator(|n: &str| {
-                Ok(match crate::accounts::check_login(n.trim()) {
-                    Ok(()) => Validation::Valid,
-                    Err(why) => Validation::Invalid(why.to_string().into()),
-                })
-            })
+            .with_default(previous.map_or("admin", |a| &a.admin))
+            .with_validator(valid(|n| {
+                crate::accounts::check_login(n).map_err(|e| e.to_string())
+            }))
             .prompt()?
             .trim()
             .to_string();
-        let password = Password::new("Password:")
-            .with_display_mode(PasswordDisplayMode::Masked)
-            .with_custom_confirmation_message("The password again:")
-            .with_validator(|p: &str| {
-                Ok(match crate::accounts::check_password(p) {
-                    Ok(()) => Validation::Valid,
-                    Err(why) => Validation::Invalid(why.to_string().into()),
+        let keep = match previous {
+            Some(_) => Confirm::new("Keep the password you typed?")
+                .with_default(true)
+                .prompt()?,
+            None => false,
+        };
+        let password = match previous {
+            Some(answers) if keep => answers.password.clone(),
+            _ => Password::new("Password:")
+                .with_display_mode(PasswordDisplayMode::Masked)
+                .with_custom_confirmation_message("The password again:")
+                .with_validator(move |p: &str| {
+                    Ok(match crate::accounts::check_password(p) {
+                        Ok(()) => Validation::Valid,
+                        Err(why) => Validation::Invalid(why.to_string().into()),
+                    })
                 })
-            })
-            .prompt()?;
+                .prompt()?,
+        };
         say(
             "5 of 5. Transcription: ScannerPulse can turn calls into text with a speech-to-text server that speaks the OpenAI audio API, such as speaches. Give its full address and model now, or later in the admin page (Settings).",
         );
-        let now = Select::new("Transcription:", vec!["Later", "Now"]).prompt()? == "Now";
-        let transcription = if now {
-            let url = Text::new("Server's address:")
-                .with_validator(|u: &str| {
-                    Ok(match check_server(u.trim()) {
-                        Ok(()) => Validation::Valid,
-                        Err(why) => Validation::Invalid(why.into()),
-                    })
-                })
-                .prompt()?
-                .trim()
-                .to_string();
-            let model = Text::new("Model:")
-                .with_validator(|m: &str| {
-                    Ok(if m.trim().is_empty() {
-                        Validation::Invalid("a model is needed".into())
-                    } else {
-                        Validation::Valid
-                    })
-                })
-                .prompt()?
-                .trim()
-                .to_string();
+        let had = previous.and_then(|a| a.transcription.as_ref());
+        let choices = if had.is_some() {
+            vec!["Now", "Later"]
+        } else {
+            vec!["Later", "Now"]
+        };
+        let transcription = if Select::new("Transcription:", choices).prompt()? == "Now" {
+            let mut url = Text::new("Server's address:").with_validator(valid(check_server));
+            if let Some(t) = had {
+                url = url.with_default(&t.url);
+            }
+            let url = url.prompt()?.trim().to_string();
+            let mut model = Text::new("Model:").with_validator(valid(|m| {
+                if m.is_empty() {
+                    Err("a model is needed".into())
+                } else {
+                    Ok(())
+                }
+            }));
+            if let Some(t) = had {
+                model = model.with_default(&t.model);
+            }
+            let model = model.prompt()?.trim().to_string();
             Some(Transcription { url, model })
         } else {
             None
         };
-        Ok(Answers {
+        Ok(Some(Answers {
             recordings: recordings.path,
             archive: archive.path,
             time_zone,
             admin,
             password,
             transcription,
-            port: defaults.port,
+            port,
             host: defaults.host.clone(),
             names: defaults.names.clone(),
-        })
+        }))
     })();
     match result {
-        Ok(answers) => Ok(Some(answers)),
-        Err(error) => match left(error) {
-            None => Ok(None),
-            Some(why) => Err(why),
-        },
+        Ok(answers) => Ok(answers),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => Ok(None),
+        Err(other) => Err(other.to_string()),
     }
 }
 
-/// Asks to go ahead after the summary.
-pub fn confirm() -> Result<bool, String> {
-    Confirm::new("Set up this machine now?")
-        .with_default(false)
-        .with_help_message("Nothing has been written yet. No leaves setup with nothing changed.")
+/// What the person does after the summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    Go,
+    Change,
+    Quit,
+}
+
+/// Asks to go ahead, change an answer, or quit, after the summary.
+pub fn next() -> Result<Next, String> {
+    const GO: &str = "Set up this machine now";
+    const CHANGE: &str = "Change an answer";
+    const QUIT: &str = "Quit; nothing is written";
+    let choice = Select::new("Nothing has been written yet.", vec![GO, CHANGE, QUIT])
         .prompt()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    Ok(match choice {
+        Ok(GO) => Next::Go,
+        Ok(CHANGE) => Next::Change,
+        Ok(_) => Next::Quit,
+        Err(_) => Next::Quit,
+    })
 }
 
 /// What this machine suggests: its name, its outward address, its clock's
@@ -320,7 +387,7 @@ fn free_port(from: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Defaults, free_port, from_file, zone_from_link};
+    use super::{Defaults, free_port, from_file, program_in, zone_from_link};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -385,6 +452,13 @@ mod tests {
             Some("Etc/UTC")
         );
         assert_eq!(zone_from_link(Path::new("/etc/nowhere")), None);
+    }
+
+    #[test]
+    fn what_holds_a_port_is_read_from_ss() {
+        let line = "LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:((\"nginx\",pid=812,fd=6),(\"nginx\",pid=811,fd=6))";
+        assert_eq!(program_in(line).as_deref(), Some("nginx"));
+        assert_eq!(program_in(""), None);
     }
 
     #[test]

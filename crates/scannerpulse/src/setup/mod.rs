@@ -43,14 +43,14 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = system::detect(&os_release, std::env::consts::ARCH)?;
     let defaults = ask::defaults();
-    let answers = match answers_file {
+    let mut answers = match answers_file {
         Some(path) => ask::from_file(path, &defaults)?,
         None => {
             if screen::choose()?.is_none() {
                 println!("Setup left; nothing was changed.");
                 return Ok(());
             }
-            match ask::interactive(&defaults)? {
+            match ask::interactive(&defaults, None)? {
                 Some(answers) => answers,
                 None => {
                     println!("Setup left; nothing was changed.");
@@ -60,19 +60,41 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         }
     };
     let db_password = crate::sessions::random_hex(24);
-    let steps = steps::steps(&answers, &system, Path::new(BINARY), &db_password);
-    print!("{}", summary(&answers, &system, &steps));
-    if dry_run {
-        println!("\nThe steps' commands (a dry run: nothing was changed):");
-        for (n, step) in steps.iter().enumerate() {
-            println!("  {:>2}. {}", n + 1, detail(step));
+    let steps = loop {
+        let steps = steps::steps(&answers, &system, Path::new(BINARY), &db_password);
+        print!("{}", summary(&answers, &system, &steps));
+        if defaults.port != 443 && answers.port == defaults.port {
+            println!(
+                "Port 443 is in use by {}, so the site is served on port {}.",
+                ask::holder(443),
+                answers.port
+            );
         }
-        return Ok(());
-    }
-    if answers_file.is_none() && !ask::confirm()? {
-        println!("Nothing was changed.");
-        return Ok(());
-    }
+        if dry_run {
+            println!("\nThe steps' commands (a dry run: nothing was changed):");
+            for (n, step) in steps.iter().enumerate() {
+                println!("  {:>2}. {}", n + 1, detail(step));
+            }
+            return Ok(());
+        }
+        if answers_file.is_some() {
+            break steps;
+        }
+        match ask::next()? {
+            ask::Next::Go => break steps,
+            ask::Next::Quit => {
+                println!("Nothing was changed.");
+                return Ok(());
+            }
+            ask::Next::Change => match ask::interactive(&defaults, Some(&answers))? {
+                Some(changed) => answers = changed,
+                None => {
+                    println!("Setup left; nothing was changed.");
+                    return Ok(());
+                }
+            },
+        }
+    };
     let context = apply::Context {
         database_url: steps::env_pairs(&answers)
             .into_iter()
@@ -98,6 +120,9 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
          \n  First admin       {}\
          \n  Transcription     {}\
          \n  Address           {}\
+         \n  Database          PostgreSQL 17 on this machine, its data in {}\
+         \n  Backups           {} (every night at 03:17: pgBackRest, full on Sundays;\
+         \n                    and a dump, the newest {} kept)\
          \n  Settings file     {}\
          \n\nThe steps:\n",
         system.id,
@@ -112,6 +137,9 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
             None => "later, in the admin page".into(),
         },
         addresses(answers).join(", "),
+        system.postgres_data(),
+        steps::backups_path(&answers.archive).display(),
+        crate::backup::KEEP_DUMPS,
         steps::env_path().display(),
     );
     for (n, step) in steps.iter().enumerate() {
@@ -161,6 +189,9 @@ fn detail(step: &Step) -> String {
             archive.display(),
             recordings.display()
         ),
+        Action::Admin { login, .. } => {
+            format!("add the admin {login} in the database, or give it the new password")
+        }
         Action::WaitForWeb { port } => format!("wait for https://127.0.0.1:{port}/health"),
     }
 }
@@ -208,6 +239,8 @@ mod tests {
             "chief",
             "https://radio-a/, https://192.0.2.10/",
             "later, in the admin page",
+            "/var/lib/postgresql/17/main",
+            "/srv/archive/.scannerpulse-backups",
         ] {
             assert!(text.contains(want), "{want} missing from:\n{text}");
         }
