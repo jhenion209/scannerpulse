@@ -65,5 +65,5 @@ if [ -e /etc/systemd/system/scannerpulse-web.service ] &&
     echo "This machine is set up already: restart its services to run this version:"
     echo "  sudo systemctl restart scannerpulse-web scannerpulse-ingest"
 else
-    echo "Next: sudo scannerpulse setup"
+    echo "Next: sudo /usr/local/bin/scannerpulse setup"
 fi

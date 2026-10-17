@@ -17,13 +17,15 @@ included):
 
 ```
 curl -fsSL https://github.com/jhenion209/scannerpulse/releases/latest/download/install.sh | sh
-sudo scannerpulse setup
+sudo /usr/local/bin/scannerpulse setup
 ```
 
 The script checks the system and the processor, downloads the program and
 its checksums from the latest release, checks the checksums' signature and
 the program's checksum, and installs `/usr/local/bin/scannerpulse`. Nothing
-else changes.
+else changes. The program is named by its full path after `sudo`, since
+some systems' sudo (Rocky Linux and AlmaLinux among them) leaves
+`/usr/local/bin` off its path.
 
 `scannerpulse setup` asks first for **Simple** or **Advanced** (Advanced
 arrives in a later version). Simple asks, explaining each first:
@@ -81,8 +83,8 @@ a `PORT` given must be free.
 `setup --dry-run` shows the summary and each step's command and changes
 nothing.
 
-`sudo scannerpulse uninstall` removes the services, their units, the
-settings, the account and the program. It keeps the archive, the database
+`sudo /usr/local/bin/scannerpulse uninstall` removes the services, their
+units, the settings, the account and the program. It keeps the archive, the database
 and the backups unless `--remove-archive`, `--remove-database` or
 `--remove-backups` names them, and each named one goes only after you type
 its name. Backups kept inside the archive stay too, even with

@@ -23,7 +23,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     if !dry_run {
         if !rustix::process::geteuid().is_root() {
             return Err(
-                "setup installs packages and services: run it as root (sudo scannerpulse setup)"
+                "setup installs packages and services: run it as root (sudo /usr/local/bin/scannerpulse setup)"
                     .into(),
             );
         }
@@ -38,7 +38,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         };
         if Path::new(steps::WEB_UNIT).exists() && running() {
             return Err(format!(
-                "this machine is set up already ({} exists); `scannerpulse uninstall` removes that setup first",
+                "this machine is set up already ({} exists); `sudo /usr/local/bin/scannerpulse uninstall` removes that setup first",
                 steps::WEB_UNIT
             ));
         }

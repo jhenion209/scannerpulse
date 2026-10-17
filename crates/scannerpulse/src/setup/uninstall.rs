@@ -284,7 +284,7 @@ fn typed(what: &str, name: &str) -> Result<bool, String> {
 /// Undoes setup on this machine, as root.
 pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
-        return Err("uninstall removes services and an account: run it as root (sudo scannerpulse uninstall)".into());
+        return Err("uninstall removes services and an account: run it as root (sudo /usr/local/bin/scannerpulse uninstall)".into());
     }
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
