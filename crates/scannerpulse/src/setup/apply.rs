@@ -120,7 +120,7 @@ fn run(
 
 /// The last 10 lines a program printed: its standard output, then its
 /// errors, so the reason a program gives last survives its progress lines.
-fn said(output: &std::process::Output) -> String {
+pub fn said(output: &std::process::Output) -> String {
     let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .chain(String::from_utf8_lossy(&output.stderr).lines())

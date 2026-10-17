@@ -41,10 +41,11 @@ fn run(program: &str, args: &[&str]) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
+    // Both outputs: pgBackRest writes its errors on its standard output.
     Err(format!(
         "{program} ended with {}: {}",
         output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
+        crate::setup::apply::said(&output)
     ))
 }
 
@@ -125,7 +126,7 @@ fn dump(folder: &Path, database_url: &str, stamp: &str) -> Result<String, String
 
 #[cfg(test)]
 mod tests {
-    use super::{kind, old_dumps};
+    use super::{kind, old_dumps, run};
     use chrono::Weekday;
 
     #[test]
@@ -149,5 +150,22 @@ mod tests {
         .to_vec();
         assert_eq!(old_dumps(&names, 2), ["scannerpulse-20261001-031700.dump"]);
         assert!(old_dumps(&names, 14).is_empty());
+    }
+
+    #[test]
+    fn a_failed_parts_error_keeps_what_it_wrote_on_its_standard_output() {
+        // pgBackRest writes its errors there.
+        let error = run(
+            "/bin/sh",
+            &[
+                "-c",
+                "echo ERROR: [055]: the reason; echo warning >&2; exit 55",
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("ERROR: [055]: the reason") && error.ends_with("warning"),
+            "{error}"
+        );
     }
 }
