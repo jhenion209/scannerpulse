@@ -71,10 +71,12 @@ ADMIN="admin"
 ADMIN_PASSWORD="a long password"
 # Optional:
 TIME_ZONE="America/Chicago"
-PORT="443"
 TRANSCRIPTION_URL="http://192.0.2.20:8000/v1/audio/transcriptions"
 TRANSCRIPTION_MODEL="Systran/faster-whisper-medium.en"
 ```
+
+`PORT` is optional too: without it setup takes 443, or the next free port;
+a `PORT` given must be free.
 
 `setup --dry-run` shows the summary and each step's command and changes
 nothing.

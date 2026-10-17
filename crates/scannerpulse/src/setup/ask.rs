@@ -93,6 +93,28 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
             ));
         }
     };
+    let port = match get("PORT") {
+        Some(port) => {
+            let port: u16 = port
+                .parse()
+                .map_err(|_| format!("PORT is {port:?}: a number"))?;
+            if !free(port) {
+                return Err(format!(
+                    "PORT {port} is in use by {}: free it, or leave PORT out and setup takes the next free port",
+                    holder(port)
+                ));
+            }
+            port
+        }
+        None => defaults.port,
+    };
+    let mut names: Vec<String> = get("NAMES")
+        .map(|n| n.split_whitespace().map(String::from).collect())
+        .unwrap_or_else(|| defaults.names.clone());
+    // Setup's own check at the end reaches the site at this address.
+    if !names.iter().any(|n| n == "127.0.0.1") {
+        names.push("127.0.0.1".into());
+    }
     let answers = Answers {
         recordings: PathBuf::from(need("RECORDINGS")?),
         archive: PathBuf::from(need("ARCHIVE")?),
@@ -100,16 +122,9 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
         admin: need("ADMIN")?,
         password: need("ADMIN_PASSWORD")?,
         transcription,
-        port: match get("PORT") {
-            Some(port) => port
-                .parse()
-                .map_err(|_| format!("PORT is {port:?}: a number"))?,
-            None => defaults.port,
-        },
+        port,
         host: get("HOST").unwrap_or_else(|| defaults.host.clone()),
-        names: get("NAMES")
-            .map(|n| n.split_whitespace().map(String::from).collect())
-            .unwrap_or_else(|| defaults.names.clone()),
+        names,
     };
     checked(answers)
 }
@@ -372,17 +387,18 @@ fn zone_from_link(link: &Path) -> Option<String> {
     check_zone(zone).ok().map(|()| zone.to_string())
 }
 
-/// `from` or the next port nothing listens on. Without root a low port
-/// cannot be tried (a dry run), so it counts as free.
+/// `from` or the next port nothing listens on.
 fn free_port(from: u16) -> u16 {
-    (from..=u16::MAX)
-        .find(
-            |port| match std::net::TcpListener::bind(("0.0.0.0", *port)) {
-                Ok(_) => true,
-                Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
-            },
-        )
-        .unwrap_or(from)
+    (from..=u16::MAX).find(|port| free(*port)).unwrap_or(from)
+}
+
+/// Nothing listens on `port`. Without root a low port cannot be tried (a
+/// dry run), so it counts as free.
+fn free(port: u16) -> bool {
+    match std::net::TcpListener::bind(("0.0.0.0", port)) {
+        Ok(_) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+    }
 }
 
 #[cfg(test)]
@@ -413,17 +429,18 @@ mod tests {
         let (rec, arc) = (dir.path().join("rec"), dir.path().join("arc"));
         std::fs::create_dir(&rec).unwrap();
         std::fs::create_dir(&arc).unwrap();
+        // Nothing listens on port 1, and the other tests' ports are far above it.
         let text = format!(
-            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"long enough secret\"\nPORT=8443\n",
+            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"long enough secret\"\nPORT=1\n",
             rec.display(),
             arc.display()
         );
         let answers = from_file(&answers_file(dir.path(), &text, 0o600), &defaults()).unwrap();
         assert_eq!(answers.admin, "chief");
         assert_eq!(answers.password, "long enough secret");
-        assert_eq!(answers.port, 8443);
+        assert_eq!(answers.port, 1);
         assert_eq!(answers.time_zone, "America/Chicago");
-        assert_eq!(answers.names, ["radio-a", "192.0.2.10"]);
+        assert_eq!(answers.names, ["radio-a", "192.0.2.10", "127.0.0.1"]);
         assert_eq!(answers.transcription, None);
         assert_eq!(answers.recordings, rec.canonicalize().unwrap());
     }
@@ -439,6 +456,35 @@ mod tests {
             format!("{text}TRANSCRIPTION_URL=http://192.0.2.20:8000/v1/audio/transcriptions\n");
         let error = from_file(&answers_file(dir.path(), &half, 0o600), &defaults()).unwrap_err();
         assert!(error.contains("or neither"), "{error}");
+    }
+
+    #[test]
+    fn an_answers_files_port_must_be_free_and_its_names_always_include_127_0_0_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rec, arc) = (dir.path().join("rec"), dir.path().join("arc"));
+        std::fs::create_dir(&rec).unwrap();
+        std::fs::create_dir(&arc).unwrap();
+        let base = format!(
+            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"long enough secret\"\n",
+            rec.display(),
+            arc.display()
+        );
+        let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let text = format!("{base}PORT={port}\n");
+        let error = from_file(&answers_file(dir.path(), &text, 0o600), &defaults()).unwrap_err();
+        assert!(
+            error.starts_with(&format!("PORT {port} is in use by "))
+                && error
+                    .ends_with(": free it, or leave PORT out and setup takes the next free port"),
+            "{error}"
+        );
+        let text = format!("{base}NAMES=\"radio.example 192.0.2.10\"\n");
+        let answers = from_file(&answers_file(dir.path(), &text, 0o600), &defaults()).unwrap();
+        assert_eq!(answers.names, ["radio.example", "192.0.2.10", "127.0.0.1"]);
+        let text = format!("{base}NAMES=\"127.0.0.1 radio.example\"\n");
+        let answers = from_file(&answers_file(dir.path(), &text, 0o600), &defaults()).unwrap();
+        assert_eq!(answers.names, ["127.0.0.1", "radio.example"]);
     }
 
     #[test]

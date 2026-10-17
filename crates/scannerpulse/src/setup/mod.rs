@@ -27,8 +27,16 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                     .into(),
             );
         }
-        // A setup that stopped part way runs again; a finished one does not.
-        if Path::new(steps::WEB_UNIT).exists() {
+        // A setup that stopped part way, even at its last steps (the web
+        // unit written, the web not running), runs again; a finished one
+        // does not.
+        let running = || {
+            std::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", "scannerpulse-web.service"])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if Path::new(steps::WEB_UNIT).exists() && running() {
             return Err(format!(
                 "this machine is set up already ({} exists); `scannerpulse uninstall` removes that setup first",
                 steps::WEB_UNIT
