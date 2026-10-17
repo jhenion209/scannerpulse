@@ -265,9 +265,13 @@ pub fn unit(command: &str, binary: &Path, system: &System, folders: &[&Path]) ->
     )
 }
 
-/// Run as the service account with a folder as `$1`: fails, saying why
-/// and what to do, unless the account can enter the folder and write in it.
-const REACH: &str = "cd -- \"$1\" 2>/dev/null && test -w . || { echo \"the scannerpulse account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is. Open each such folder to the account (setfacl -m u:scannerpulse:x FOLDER) or choose another folder, then run setup again.\"; exit 1; }";
+/// Run as `account` with a folder as `$1`: fails, saying why and what to
+/// do, unless the account can enter the folder and write in it.
+fn reach(account: &str) -> String {
+    format!(
+        "cd -- \"$1\" 2>/dev/null && test -w . || {{ echo \"the {account} account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is. Open each such folder to the account (setfacl -m u:{account}:x FOLDER) or choose another folder, then run setup again.\"; exit 1; }}"
+    )
+}
 
 /// The SQL that makes the role and the database, run by the `postgres`
 /// account; it does nothing that is already done.
@@ -422,7 +426,16 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         steps.push(run(
             &format!("Check that the scannerpulse account reaches the {role} folder"),
             "runuser",
-            &["-u", ACCOUNT, "--", "sh", "-c", REACH, "reach", &path],
+            &[
+                "-u",
+                ACCOUNT,
+                "--",
+                "sh",
+                "-c",
+                &reach(ACCOUNT),
+                "reach",
+                &path,
+            ],
         ));
     }
     steps.push(run(
@@ -585,6 +598,21 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         "Keep the backups to PostgreSQL and root",
         "setfacl",
         &["-R", "-b", &backups.display().to_string()],
+    ));
+    // PostgreSQL archives its WAL there: every folder above must let it in.
+    steps.push(run(
+        "Check that the postgres account reaches the backups folder",
+        "runuser",
+        &[
+            "-u",
+            "postgres",
+            "--",
+            "sh",
+            "-c",
+            &reach("postgres"),
+            "reach",
+            &backups.join("pgbackrest").display().to_string(),
+        ],
     ));
     steps.push(run(
         "Make pgBackRest's settings folder",
@@ -953,8 +981,40 @@ mod tests {
         assert_eq!(program, "runuser");
         assert_eq!(&args[..4], ["-u", "scannerpulse", "--", "sh"]);
         assert_eq!(args.last().unwrap(), "/srv/recordings");
-        assert!(args[5].contains("setfacl -m u:scannerpulse:x FOLDER"));
+        assert_eq!(
+            args[5],
+            "cd -- \"$1\" 2>/dev/null && test -w . || { echo \"the scannerpulse account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is. Open each such folder to the account (setfacl -m u:scannerpulse:x FOLDER) or choose another folder, then run setup again.\"; exit 1; }"
+        );
         assert!(at("Check that the scannerpulse account reaches the archive folder") > check);
+    }
+
+    #[test]
+    fn postgresql_must_reach_the_backups_folder_before_it_archives_into_it() {
+        let all = steps(
+            &answers(),
+            &detect(ROCKY, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+        let check = at("Check that the postgres account reaches the backups folder");
+        assert_eq!(check, at("Keep the backups to PostgreSQL and root") + 1);
+        assert!(check < at("Send PostgreSQL's WAL to pgBackRest"));
+        let Action::Run { program, args, .. } = &all[check].action else {
+            panic!()
+        };
+        assert_eq!(program, "runuser");
+        assert_eq!(&args[..4], ["-u", "postgres", "--", "sh"]);
+        assert_eq!(
+            args.last().unwrap(),
+            "/srv/archive/.scannerpulse-backups/pgbackrest"
+        );
+        assert!(
+            args[5].contains("echo \"the postgres account cannot reach or write $1:")
+                && args[5].contains("(setfacl -m u:postgres:x FOLDER)"),
+            "{}",
+            args[5]
+        );
     }
 
     #[test]
