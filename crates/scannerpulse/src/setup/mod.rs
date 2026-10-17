@@ -44,6 +44,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = system::detect(&os_release, std::env::consts::ARCH)?;
+    system::other_postgres(&system.seen())?;
     let defaults = ask::defaults();
     let mut answers = match answers_file {
         Some(path) => ask::from_file(path, &defaults)?,

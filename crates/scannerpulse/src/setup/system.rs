@@ -96,11 +96,84 @@ impl System {
             Family::Dnf => "/var/lib/pgsql/17/data",
         }
     }
+
+    /// What this machine has of PostgreSQL before setup changes anything.
+    pub fn seen(&self) -> Seen {
+        use std::net::{SocketAddr, TcpStream};
+        use std::path::Path;
+        use std::time::Duration;
+        let folders = |dir: &str| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect();
+            names.sort();
+            names
+        };
+        let version = |path: &str| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|v| v.trim().to_string())
+        };
+        Seen {
+            etc_versions: folders("/etc/postgresql"),
+            system_data: version("/var/lib/pgsql/data/PG_VERSION"),
+            pgsql_versions: folders("/var/lib/pgsql")
+                .into_iter()
+                .filter(|v| Path::new(&format!("/var/lib/pgsql/{v}/data/PG_VERSION")).exists())
+                .collect(),
+            port_taken: ["127.0.0.1:5432", "[::1]:5432"].iter().any(|a| {
+                a.parse::<SocketAddr>().is_ok_and(|addr| {
+                    TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+                })
+            }),
+            ours: Path::new(self.postgres_data()).join("PG_VERSION").exists(),
+        }
+    }
+}
+
+/// What a machine has of PostgreSQL, seen before setup starts.
+#[derive(Debug, Default)]
+pub struct Seen {
+    /// The version folders in `/etc/postgresql` (Debian and Ubuntu).
+    pub etc_versions: Vec<String>,
+    /// The version in `/var/lib/pgsql/data/PG_VERSION`: the system's own
+    /// PostgreSQL, on the Red Hat family and Fedora.
+    pub system_data: Option<String>,
+    /// Each version `v` with `/var/lib/pgsql/<v>/data/PG_VERSION`.
+    pub pgsql_versions: Vec<String>,
+    /// Something listens on port 5432 of this machine.
+    pub port_taken: bool,
+    /// PostgreSQL 17's data directory has its PG_VERSION: an earlier setup's.
+    pub ours: bool,
+}
+
+/// Refuses a machine that already runs a PostgreSQL other than the 17 setup
+/// installs: setup would turn on archiving in it and restart it.
+pub fn other_postgres(seen: &Seen) -> Result<(), String> {
+    let other = |v: &&String| *v != "17";
+    let found = if let Some(v) = seen.etc_versions.iter().find(other) {
+        format!("PostgreSQL {v} (/etc/postgresql/{v})")
+    } else if let Some(v) = &seen.system_data {
+        format!("PostgreSQL {v} (/var/lib/pgsql/data)")
+    } else if let Some(v) = seen.pgsql_versions.iter().find(other) {
+        format!("PostgreSQL {v} (/var/lib/pgsql/{v}/data)")
+    } else if seen.port_taken && !seen.ours {
+        "a program on port 5432".into()
+    } else {
+        return Ok(());
+    };
+    Err(format!(
+        "this machine already has {found}. Simple setup installs its own PostgreSQL 17 on port 5432 and sets it up for ScannerPulse, which would change the one you have. Remove it first; Advanced setup, in a later version, will use an existing PostgreSQL."
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Family, detect};
+    use super::{Family, Seen, detect, other_postgres};
 
     const DEBIAN: &str = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"13\"\nID=debian\n";
     const ROCKY: &str = "NAME=\"Rocky Linux\"\nVERSION=\"9.6 (Blue Onyx)\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.6\"\n";
@@ -144,5 +217,64 @@ mod tests {
         );
         assert!(detect("ID=alpine\nVERSION_ID=3.20\n", "x86_64").is_err());
         assert!(detect(DEBIAN, "armv7l").unwrap_err().contains("armv7l"));
+    }
+
+    #[test]
+    fn another_postgresql_on_the_machine_is_refused_by_what_was_seen() {
+        let refused = |seen: Seen| other_postgres(&seen).unwrap_err();
+        let debian = refused(Seen {
+            etc_versions: vec!["15".into()],
+            port_taken: true,
+            ..Seen::default()
+        });
+        assert_eq!(
+            debian,
+            "this machine already has PostgreSQL 15 (/etc/postgresql/15). Simple setup installs its own PostgreSQL 17 on port 5432 and sets it up for ScannerPulse, which would change the one you have. Remove it first; Advanced setup, in a later version, will use an existing PostgreSQL."
+        );
+        assert!(
+            refused(Seen {
+                etc_versions: vec!["17".into(), "16".into()],
+                ours: true,
+                ..Seen::default()
+            })
+            .contains("has PostgreSQL 16 (/etc/postgresql/16).")
+        );
+        assert!(
+            refused(Seen {
+                system_data: Some("13".into()),
+                ..Seen::default()
+            })
+            .contains("has PostgreSQL 13 (/var/lib/pgsql/data).")
+        );
+        assert!(
+            refused(Seen {
+                pgsql_versions: vec!["16".into()],
+                ..Seen::default()
+            })
+            .contains("has PostgreSQL 16 (/var/lib/pgsql/16/data).")
+        );
+        assert!(
+            refused(Seen {
+                port_taken: true,
+                ..Seen::default()
+            })
+            .starts_with("this machine already has a program on port 5432. Simple setup")
+        );
+        // Nothing there; only 17; a second run, with 17's data and port.
+        assert_eq!(other_postgres(&Seen::default()), Ok(()));
+        let only_17 = Seen {
+            etc_versions: vec!["17".into()],
+            ours: true,
+            port_taken: true,
+            ..Seen::default()
+        };
+        assert_eq!(other_postgres(&only_17), Ok(()));
+        let rerun = Seen {
+            pgsql_versions: vec!["17".into()],
+            ours: true,
+            port_taken: true,
+            ..Seen::default()
+        };
+        assert_eq!(other_postgres(&rerun), Ok(()));
     }
 }
