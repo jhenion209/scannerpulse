@@ -1,0 +1,68 @@
+name: release
+# A tag vX.Y.Z builds one static binary per processor, signs their
+# checksums, and publishes them with the install script as a release.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: web
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - run: cargo build --release --locked -p scannerpulse --target ${{ matrix.arch }}-unknown-linux-musl
+      # A static binary runs on every supported system; refuse anything else.
+      - run: |
+          bin=target/${{ matrix.arch }}-unknown-linux-musl/release/scannerpulse
+          file "$bin" | grep -q 'statically linked'
+          # The tag names the version the binary says it is.
+          test "$("$bin" --version)" = "scannerpulse ${GITHUB_REF_NAME#v}"
+          cp "$bin" scannerpulse-${{ matrix.arch }}-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scannerpulse-${{ matrix.arch }}-linux
+          path: scannerpulse-${{ matrix.arch }}-linux
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Sign the checksums
+        env:
+          RELEASE_GPG_KEY: ${{ secrets.RELEASE_GPG_KEY }}
+        run: |
+          test -n "$RELEASE_GPG_KEY" || { echo "the RELEASE_GPG_KEY secret is missing"; exit 1; }
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s\n' "$RELEASE_GPG_KEY" | gpg --batch --import
+          sha256sum scannerpulse-x86_64-linux scannerpulse-aarch64-linux > SHA256SUMS
+          gpg --batch --yes --detach-sign --output SHA256SUMS.sig SHA256SUMS
+      # The install script, as a person runs it, against these very files:
+      # its key must check the signature before anything is published.
+      - run: SCANNERPULSE_RELEASE_URL="file://$PWD" SCANNERPULSE_BIN_DIR="$RUNNER_TEMP" sh install.sh
+      - run: >-
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          scannerpulse-x86_64-linux scannerpulse-aarch64-linux SHA256SUMS SHA256SUMS.sig install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

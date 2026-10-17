@@ -5,7 +5,91 @@ files a recorder such as SDRTrunk writes, files them in a permanent archive,
 indexes them in PostgreSQL, and serves a web interface to browse, search and
 listen.
 
-**Status: early development. There is nothing to install yet.**
+**Status: early development.** A release installs one machine with its
+database (Simple setup); high availability, a database elsewhere and the
+other advanced choices come in later versions.
+
+## Install
+
+On Debian 12 or 13, Ubuntu 22.04 or 24.04, Fedora, or Rocky Linux or
+AlmaLinux 8 to 10, on a 64-bit PC or 64-bit ARM (a Raspberry Pi 4 or 5
+included):
+
+```
+curl -fsSL https://github.com/jhenion209/scannerpulse/releases/latest/download/install.sh | sh
+sudo scannerpulse setup
+```
+
+The script checks the system and the processor, downloads the program and
+its checksums from the latest release, checks the checksums' signature and
+the program's checksum, and installs `/usr/local/bin/scannerpulse`. Nothing
+else changes.
+
+`scannerpulse setup` asks first for **Simple** or **Advanced** (Advanced
+arrives in a later version). Simple asks, explaining each first:
+
+1. the recordings folder, where SDRTrunk (or another recorder) saves its
+   files; ScannerPulse reads each new file and moves it into the archive;
+2. the archive, where every call is kept as
+   `<archive>/YYYY-MM-DD/<talkgroup>/<file>.mp3` (a busy county system adds
+   about half a gigabyte a day; a disk of its own is best);
+3. the site's time zone;
+4. the first admin account (a password of 12 characters or more);
+5. a transcription server and model, or "later" (the admin page sets it).
+
+Both folders must exist, be writable and have free space, and neither may be
+inside the other. Setup then shows everything it will do, and writes nothing
+until you say so. It:
+
+- installs PostgreSQL 17 from the PostgreSQL project's own repository, with
+  the database and its role (the password is random, in
+  `/etc/scannerpulse/pgpass`);
+- makes a `scannerpulse` system account, which the services run as, and
+  gives it read and write access to both folders;
+- writes the settings file `/etc/scannerpulse/scannerpulse.env`;
+- makes a certificate for the machine's name and address and serves HTTPS on
+  port 443 (or the next free port, saying what holds 443). Nothing listens on
+  port 80. The browser warns once about the certificate, since no authority
+  signed it;
+- sets up the backups in `<archive>/.scannerpulse-backups`: PostgreSQL sends
+  its WAL to pgBackRest, and every night at 03:17 `scannerpulse backup` takes
+  a pgBackRest backup (full on Sundays, differential otherwise; two weeks of
+  point-in-time recovery) and a dump of the database (the newest 14 kept);
+- starts the services `scannerpulse-web` and `scannerpulse-ingest` and the
+  timer `scannerpulse-backup`, now and at boot.
+
+The site is then at `https://<this machine>/`, and the admin page at
+`/admin.html`.
+
+For an unattended install, `setup --answers FILE` reads the answers from a
+file of `NAME="value"` lines, readable by its owner only:
+
+```
+RECORDINGS="/srv/recordings"
+ARCHIVE="/srv/archive"
+ADMIN="admin"
+ADMIN_PASSWORD="a long password"
+# Optional:
+TIME_ZONE="America/Chicago"
+PORT="443"
+TRANSCRIPTION_URL="http://192.0.2.20:8000/v1/audio/transcriptions"
+TRANSCRIPTION_MODEL="Systran/faster-whisper-medium.en"
+```
+
+`setup --dry-run` shows the summary and each step's command and changes
+nothing.
+
+`sudo scannerpulse uninstall` removes the services, their units, the
+settings, the account and the program. It keeps the archive, the database
+and the backups unless `--remove-archive`, `--remove-database` or
+`--remove-backups` names them, and each named one goes only after you type
+its name. Backups kept inside the archive stay too, even with
+`--remove-archive`, unless `--remove-backups` is named as well.
+
+**Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
+`https://<this machine>/healthz` expecting 200 (the web interface answers
+and so does the database), with certificate errors ignored while the site
+uses setup's own certificate. `/health` says only that the process is up.
 
 ## Commands
 
@@ -15,6 +99,7 @@ settings file, `/etc/scannerpulse/scannerpulse.env` (or the file named by
 which the services also read as their systemd `EnvironmentFile`. A variable
 already set in the environment wins. So far:
 
+- `setup`, `uninstall` and `backup` are described under Install.
 - `db-update` creates or updates the database schema.
 - `ingest` watches the source folders and files each new call into the
   archive. Two hosts can run it side by side: a lease in the database lets one
