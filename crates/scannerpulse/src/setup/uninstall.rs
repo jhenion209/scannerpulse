@@ -272,6 +272,10 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
         return Err("uninstall removes services and an account: run it as root (sudo scannerpulse uninstall)".into());
     }
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err("uninstall asks before it removes anything: run it in a terminal (ssh -t for a remote machine)".into());
+    }
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;

@@ -31,7 +31,7 @@ jobs:
       # A static binary runs on every supported system; refuse anything else.
       - run: |
           bin=target/${{ matrix.arch }}-unknown-linux-musl/release/scannerpulse
-          file "$bin" | grep -q 'statically linked'
+          file "$bin" | grep -Eq 'static(-pie|ally) linked'
           # The tag names the version the binary says it is.
           test "$("$bin" --version)" = "scannerpulse ${GITHUB_REF_NAME#v}"
           cp "$bin" scannerpulse-${{ matrix.arch }}-linux

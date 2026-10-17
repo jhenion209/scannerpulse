@@ -529,6 +529,13 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             &backups.join("dump").display().to_string(),
         ],
     ));
+    // The archive's default ACL would give the service account its way into
+    // the backups; they are PostgreSQL's and root's alone.
+    steps.push(run(
+        "Keep the backups to PostgreSQL and root",
+        "setfacl",
+        &["-R", "-b", &backups.display().to_string()],
+    ));
     steps.push(run(
         "Make pgBackRest's settings folder",
         "install",
@@ -860,6 +867,15 @@ mod tests {
             "archive_command = 'pgbackrest --config=/etc/pgbackrest/scannerpulse.conf --stanza=scannerpulse archive-push %p'"
         ));
         assert!(wal < at("Restart PostgreSQL 17, to start sending its WAL"));
+        let Action::Run { args, .. } = &all[at("Keep the backups to PostgreSQL and root")].action
+        else {
+            panic!()
+        };
+        assert_eq!(args, &["-R", "-b", "/srv/archive/.scannerpulse-backups"]);
+        assert!(
+            at("Make the folder of the nightly dumps")
+                < at("Keep the backups to PostgreSQL and root")
+        );
         assert!(
             at("Restart PostgreSQL 17, to start sending its WAL")
                 < at("Make pgBackRest's place for this database")
