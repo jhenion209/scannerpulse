@@ -55,7 +55,8 @@
 <style>
   .bar {
     grid-area: bar; display: flex; flex-wrap: wrap; gap: 0.75rem; row-gap: 0.4rem; align-items: center;
-    padding: 0.5rem 1rem; background: var(--bar); color: var(--bar-text);
+    padding: max(0.5rem, var(--safe-top)) max(1rem, var(--safe-right)) 0.5rem max(1rem, var(--safe-left));
+    background: var(--bar); color: var(--bar-text);
   }
   .menu {
     background: none; color: var(--bar-text); border: 1px solid currentColor; border-radius: 4px;

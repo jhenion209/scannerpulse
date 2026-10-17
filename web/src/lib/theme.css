@@ -1,6 +1,12 @@
 /* The Signal palette: deep blue and cyan, in light and dark. Dark follows
    the device unless the listener picks one (data-theme on <html>). */
 :root {
+  /* A phone's notch, Dynamic Island and home bar: the pages draw under them
+     (viewport-fit=cover) and keep their text and controls clear. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
   color-scheme: light;
   --bg: #ffffff;
   --surface: #f2f6f9;

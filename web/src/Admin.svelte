@@ -109,7 +109,7 @@
 <p class="notice" role="status">{notice.text ?? ''}</p>
 
 <style>
-  .signin { max-width: 24rem; margin: 3rem auto; padding: 0 1rem; }
+  .signin { max-width: 24rem; margin: 3rem auto; padding: 0 max(1rem, var(--safe-right)) 0 max(1rem, var(--safe-left)); }
   .signin h1 { font-size: 1.35rem; display: flex; align-items: center; gap: 0.4rem; }
   .shell {
     display: grid; min-height: 100vh; min-height: 100dvh;
@@ -117,7 +117,8 @@
   }
   .bar {
     grid-area: bar; display: flex; flex-wrap: wrap; gap: 0.75rem; row-gap: 0.4rem; align-items: center;
-    padding: 0.5rem 1rem; background: var(--bar); color: var(--bar-text);
+    padding: max(0.5rem, var(--safe-top)) max(1rem, var(--safe-right)) 0.5rem max(1rem, var(--safe-left));
+    background: var(--bar); color: var(--bar-text);
   }
   .bar button {
     background: none; color: var(--bar-text); border: 1px solid currentColor; border-radius: 4px;
@@ -129,7 +130,8 @@
   .who { overflow-wrap: anywhere; }
   .calls { color: var(--bar-text); }
   .side {
-    grid-area: side; display: flex; flex-direction: column; gap: 0.15rem; padding: 0.75rem 0.5rem;
+    grid-area: side; display: flex; flex-direction: column; gap: 0.15rem;
+    padding: 0.75rem 0.5rem 0.75rem max(0.5rem, var(--safe-left));
     background: var(--surface); border-right: 1px solid var(--line);
   }
   .side a { padding: 0.45rem 0.7rem; border-radius: 4px; color: var(--text); text-decoration: none; }
@@ -139,9 +141,9 @@
     margin-left: 0.4rem; padding: 0 0.45rem; border-radius: 999px; background: var(--accent); color: var(--bg);
     font-weight: 700;
   }
-  .main { grid-area: main; min-width: 0; }
+  .main { grid-area: main; min-width: 0; padding-right: var(--safe-right); padding-bottom: var(--safe-bottom); }
   .notice {
-    position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 30; margin: 0;
+    position: fixed; bottom: calc(1rem + var(--safe-bottom)); left: 50%; transform: translateX(-50%); z-index: 30; margin: 0;
     max-width: calc(100% - 2rem); overflow-wrap: anywhere; pointer-events: none;
   }
   .notice:not(:empty) {
@@ -150,6 +152,8 @@
   }
   @media (max-width: 760px) {
     .shell { grid-template: 'bar' auto 'main' 1fr / 1fr; }
+    .main { padding-left: var(--safe-left); }
+    .side { padding-right: max(0.5rem, var(--safe-right)); }
     .shell.menu-open { grid-template: 'bar' auto 'side' auto 'main' 1fr / 1fr; }
     .menu { display: inline-block; }
     .side { display: none; }

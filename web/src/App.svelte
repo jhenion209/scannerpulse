@@ -362,9 +362,11 @@
   }
   .shell.rail-closed { grid-template-columns: 0 1fr; }
   .shell.rail-closed .rail { display: none; }
-  .rail { grid-area: rail; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; }
+  .rail { grid-area: rail; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; padding-left: var(--safe-left); }
   .error { margin: 0.9rem 0.9rem 0; background: var(--warn-bg); color: var(--warn-text); padding: 0.4rem 0.6rem; border-radius: 4px; }
-  .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; }
+  .list { grid-area: list; min-width: 0; overflow: auto; overflow-anchor: none; margin-right: var(--safe-right); }
+  /* A margin, not a padding: a scrolled row must not pass under the island. */
+  .shell.rail-closed .list { margin-left: var(--safe-left); }
   .empty { margin: 1rem; color: var(--muted); }
   .error .link { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
   /* A line over the top of the list's cell, in front of the search panel. It
@@ -392,8 +394,10 @@
   @media (max-width: 760px) {
     .shell, .shell.rail-closed { grid-template: 'bar' auto 'list' 1fr 'player' auto / 1fr; }
     .rail, .shell.rail-closed .rail { display: none; }
+    .list { margin-left: var(--safe-left); }
     .shell.menu-open .rail {
       display: block; position: fixed; inset: 3.25rem 0 0 0; z-index: 10; border-right: 0;
+      padding-right: var(--safe-right); padding-bottom: var(--safe-bottom);
     }
   }
 </style>

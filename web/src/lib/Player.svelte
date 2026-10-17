@@ -95,7 +95,10 @@
 </div>
 
 <style>
-  .player { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; padding: 0.5rem 1rem; }
+  .player {
+    display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center;
+    padding: 0.5rem max(1rem, var(--safe-right)) max(0.5rem, var(--safe-bottom)) max(1rem, var(--safe-left));
+  }
   .nav { display: flex; gap: 0.25rem; }
   .nav button {
     width: 2.5rem; height: 2.25rem; border: 1px solid currentColor; border-radius: 4px;

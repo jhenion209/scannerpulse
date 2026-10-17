@@ -218,7 +218,8 @@
 
 <style>
   .panel {
-    position: fixed; inset: 4rem 1rem 5.5rem auto; margin: 0; z-index: 20; width: min(56rem, calc(100vw - 2rem));
+    position: fixed; inset: 4rem max(1rem, var(--safe-right)) 5.5rem auto; margin: 0; z-index: 20;
+    width: min(56rem, calc(100vw - 2rem - var(--safe-left) - var(--safe-right)));
     /* The browser's own dialog style sizes it to its content: the insets decide here. */
     height: auto; max-height: none; display: none; flex-direction: column; gap: 0.5rem; padding: 0.9rem;
     border: 1px solid var(--field-border); border-radius: 8px; background: var(--bg); color: var(--text);
@@ -251,6 +252,9 @@
   audio { height: 2.25rem; flex: 1 1 14rem; }
   .now { margin: 0; }
   @media (max-width: 760px) {
-    .panel { inset: 0; width: auto; border-radius: 0; }
+    .panel {
+      inset: 0; width: auto; border-radius: 0;
+      padding: max(0.9rem, var(--safe-top)) max(0.9rem, var(--safe-right)) max(0.9rem, var(--safe-bottom)) max(0.9rem, var(--safe-left));
+    }
   }
 </style>
