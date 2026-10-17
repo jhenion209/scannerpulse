@@ -139,7 +139,6 @@ impl Config {
                 );
             }
         };
-        check_listen(listen, tls.is_some())?;
         Ok(Config {
             database,
             listen,
@@ -350,6 +349,7 @@ pub async fn run(
     config: Config,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
+    check_listen(config.listen, config.tls.is_some())?;
     let pool = PgPoolOptions::new()
         .max_connections(20)
         .acquire_timeout(Duration::from_secs(5))

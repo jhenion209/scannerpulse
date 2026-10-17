@@ -93,3 +93,17 @@ fn an_address_off_this_machine_needs_a_certificate() {
     assert!(web::check_listen("192.0.2.10:443".parse().unwrap(), false).is_err());
     assert!(web::check_listen("0.0.0.0:443".parse().unwrap(), true).is_ok());
 }
+
+#[tokio::test]
+async fn run_refuses_plain_http_off_loopback_for_any_caller() {
+    let config = Config {
+        database: "postgres://nobody@127.0.0.1:1/none".parse().unwrap(),
+        listen: "192.0.2.10:443".parse().unwrap(),
+        static_dir: None,
+        host: "tls-test".into(),
+        oidc_secret: None,
+        tls: None,
+    };
+    let error = web::run(config, std::future::pending()).await.unwrap_err();
+    assert!(error.contains("SCANNERPULSE_TLS_CERT"), "{error}");
+}
