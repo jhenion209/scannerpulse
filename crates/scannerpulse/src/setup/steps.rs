@@ -224,6 +224,10 @@ pub fn unit(command: &str, binary: &Path, system: &System) -> String {
     )
 }
 
+/// Run as the service account with a folder as `$1`: fails, saying why
+/// and what to do, unless the account can enter the folder and write in it.
+const REACH: &str = "cd -- \"$1\" 2>/dev/null && test -w . || { echo \"the scannerpulse account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is. Open each such folder to the account (setfacl -m u:scannerpulse:x FOLDER) or choose another folder, then run setup again.\"; exit 1; }";
+
 /// The SQL that makes the role and the database, run by the `postgres`
 /// account; it does nothing that is already done.
 fn database_sql(password: &str) -> String {
@@ -362,6 +366,13 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 "d:u:scannerpulse:rwX",
                 &path,
             ],
+        ));
+        // The folder's own access is not enough: every folder above it must
+        // let the account through, and a home folder often does not.
+        steps.push(run(
+            &format!("Check that the scannerpulse account reaches the {role} folder"),
+            "runuser",
+            &["-u", ACCOUNT, "--", "sh", "-c", REACH, "reach", &path],
         ));
     }
     steps.push(run(
@@ -780,6 +791,32 @@ mod tests {
         assert!(
             ingest.contains("TimeoutStopSec=150\n") && !ingest.contains("CAP_NET_BIND_SERVICE")
         );
+    }
+
+    #[test]
+    fn the_account_must_reach_each_folder_through_the_folders_above_it() {
+        let system = detect(DEBIAN, "x86_64").unwrap();
+        let all = steps(
+            &answers(),
+            &system,
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+        let check = at("Check that the scannerpulse account reaches the recordings folder");
+        assert!(at("Make the scannerpulse account") < check);
+        assert_eq!(
+            check,
+            at("Let the scannerpulse account read and write the recordings folder") + 1
+        );
+        let Action::Run { program, args, .. } = &all[check].action else {
+            panic!()
+        };
+        assert_eq!(program, "runuser");
+        assert_eq!(&args[..4], ["-u", "scannerpulse", "--", "sh"]);
+        assert_eq!(args.last().unwrap(), "/srv/recordings");
+        assert!(args[5].contains("setfacl -m u:scannerpulse:x FOLDER"));
+        assert!(at("Check that the scannerpulse account reaches the archive folder") > check);
     }
 
     #[test]
