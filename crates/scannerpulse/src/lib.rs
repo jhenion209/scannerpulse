@@ -27,6 +27,7 @@ pub mod search;
 pub mod servers;
 pub mod sessions;
 pub mod settings;
+pub mod setup;
 pub mod smartsort;
 pub mod status;
 pub mod store;
