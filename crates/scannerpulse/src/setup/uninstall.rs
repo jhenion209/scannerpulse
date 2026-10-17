@@ -156,9 +156,8 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             .filter(|f| !found.gone.iter().any(|g| g == f))
         {
             let path = folder.display().to_string();
-            steps.push(run(
+            steps.push(super::steps::setfacl(
                 &format!("Take the scannerpulse account's access off {path}"),
-                "setfacl",
                 &[
                     "-R",
                     "-x",
@@ -223,9 +222,8 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             )
         });
         if found.account {
-            steps.push(run(
+            steps.push(super::steps::setfacl(
                 "Take the scannerpulse account's access off the archive's folder",
-                "setfacl",
                 &[
                     "-x",
                     &format!("u:{ACCOUNT}"),
@@ -525,6 +523,13 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("setfacl -R -x u:scannerpulse -x d:u:scannerpulse /srv/archive"));
+        // A share without POSIX ACLs must not stop the uninstall.
+        let access: Vec<&String> = all
+            .iter()
+            .filter(|l| l.contains("-x u:scannerpulse"))
+            .collect();
+        assert_eq!(access.len(), 2, "{text}");
+        assert!(access.iter().all(|l| l.starts_with("sh -c ")), "{text}");
         assert!(
             !text.contains("DROP DATABASE")
                 && !text.contains("rm -rf /srv")

@@ -47,7 +47,9 @@ until you say so. It:
   the database and its role (the password is random, in
   `/etc/scannerpulse/pgpass`);
 - makes a `scannerpulse` system account, which the services run as, and
-  gives it read and write access to both folders;
+  gives it read and write access to both folders (on a share without POSIX
+  ACLs, as NFSv4 or CIFS, the share's own permissions must let it write;
+  setup checks that they do);
 - writes the settings file `/etc/scannerpulse/scannerpulse.env`;
 - makes a certificate for the machine's name and address and serves HTTPS on
   port 443 (or the next free port, saying what holds 443), which it opens in

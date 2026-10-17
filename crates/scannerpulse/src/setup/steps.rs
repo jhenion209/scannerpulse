@@ -266,10 +266,23 @@ pub fn unit(command: &str, binary: &Path, system: &System, folders: &[&Path]) ->
 }
 
 /// Run as `account` with a folder as `$1`: fails, saying why and what to
-/// do, unless the account can enter the folder and write in it.
+/// do, unless the account can enter the folder and write a file in it (a
+/// share that squashes the account can say it may write, then refuse).
 fn reach(account: &str) -> String {
     format!(
-        "cd -- \"$1\" 2>/dev/null && test -w . || {{ echo \"the {account} account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is. Open each such folder to the account (setfacl -m u:{account}:x FOLDER) or choose another folder, then run setup again.\"; exit 1; }}"
+        "cd -- \"$1\" 2>/dev/null && touch .scannerpulse-reach 2>/dev/null && rm -f .scannerpulse-reach || {{ echo \"the {account} account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is, or a network share may not let the account write. Open each such folder to the account (setfacl -m u:{account}:x FOLDER), let the account write on the share, or choose another folder, then run setup again.\"; exit 1; }}"
+    )
+}
+
+/// `setfacl` with `args`, except that a filesystem without POSIX ACLs, as
+/// an NFSv4 or CIFS share, is let through: its own permissions decide, and
+/// setup's reach check proves them. Any other error still stops.
+pub(super) fn setfacl(title: &str, args: &[&str]) -> Step {
+    const LET_THROUGH: &str = "said=$(LC_ALL=C setfacl \"$@\" 2>&1) && exit 0; printf '%s\\n' \"$said\" | grep -qv 'Operation not supported' || exit 0; printf '%s\\n' \"$said\" >&2; exit 1";
+    run(
+        title,
+        "sh",
+        &[&["-c", LET_THROUGH, "setfacl"], args].concat(),
     )
 }
 
@@ -409,9 +422,8 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         (&answers.archive, "archive"),
     ] {
         let path = folder.display().to_string();
-        steps.push(run(
+        steps.push(setfacl(
             &format!("Let the scannerpulse account read and write the {role} folder"),
-            "setfacl",
             &[
                 "-R",
                 "-m",
@@ -594,9 +606,8 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
     ));
     // The archive's default ACL would give the service account its way into
     // the backups; they are PostgreSQL's and root's alone.
-    steps.push(run(
+    steps.push(setfacl(
         "Keep the backups to PostgreSQL and root",
-        "setfacl",
         &["-R", "-b", &backups.display().to_string()],
     ));
     // PostgreSQL archives its WAL there: every folder above must let it in.
@@ -734,7 +745,8 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Answers, Transcription, backup_units, env_pairs, pgbackrest_conf, steps, unit,
+        Action, Answers, Transcription, backup_units, env_pairs, pgbackrest_conf, reach, steps,
+        unit,
     };
     use crate::setup::system::detect;
     use std::path::{Path, PathBuf};
@@ -990,9 +1002,100 @@ mod tests {
         assert_eq!(args.last().unwrap(), "/srv/recordings");
         assert_eq!(
             args[5],
-            "cd -- \"$1\" 2>/dev/null && test -w . || { echo \"the scannerpulse account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is. Open each such folder to the account (setfacl -m u:scannerpulse:x FOLDER) or choose another folder, then run setup again.\"; exit 1; }"
+            "cd -- \"$1\" 2>/dev/null && touch .scannerpulse-reach 2>/dev/null && rm -f .scannerpulse-reach || { echo \"the scannerpulse account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is, or a network share may not let the account write. Open each such folder to the account (setfacl -m u:scannerpulse:x FOLDER), let the account write on the share, or choose another folder, then run setup again.\"; exit 1; }"
         );
         assert!(at("Check that the scannerpulse account reaches the archive folder") > check);
+    }
+
+    /// A folder holding a stand-in for `name` that ends with `code`, after
+    /// printing `$SAID` to its errors.
+    fn stand_in(name: &str, code: i32) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"$SAID\" >&2\nexit {code}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    fn path_with(dir: &Path) -> String {
+        format!("{}:{}", dir.display(), std::env::var("PATH").unwrap())
+    }
+
+    #[test]
+    fn a_filesystem_without_posix_acls_is_left_to_the_reach_check() {
+        let all = steps(
+            &answers(),
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let step = all
+            .iter()
+            .find(|s| {
+                s.title == "Let the scannerpulse account read and write the recordings folder"
+            })
+            .unwrap();
+        let Action::Run { program, args, .. } = &step.action else {
+            panic!()
+        };
+        assert_eq!(
+            &args[2..],
+            [
+                "setfacl",
+                "-R",
+                "-m",
+                "u:scannerpulse:rwX",
+                "-m",
+                "d:u:scannerpulse:rwX",
+                "/srv/recordings"
+            ]
+        );
+        let unsupported = "setfacl: /srv/recordings: Operation not supported";
+        let denied = "setfacl: /srv/recordings/a: Permission denied";
+        for (code, said, passes) in [
+            (0, "", true),
+            (1, unsupported, true),
+            (1, denied, false),
+            (1, &format!("{unsupported}\n{denied}"), false),
+        ] {
+            let fake = stand_in("setfacl", code);
+            let output = std::process::Command::new(program)
+                .args(args)
+                .env("PATH", path_with(fake.path()))
+                .env("SAID", said)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), passes, "{said}");
+            if !passes {
+                assert!(String::from_utf8_lossy(&output.stderr).contains(denied));
+            }
+        }
+    }
+
+    #[test]
+    fn the_reach_check_writes_a_file_and_leaves_none() {
+        let folder = tempfile::tempdir().unwrap();
+        let check = |path: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", &reach("scannerpulse"), "reach"])
+                .arg(folder.path())
+                .env("PATH", path)
+                .output()
+                .unwrap()
+        };
+        let path = std::env::var("PATH").unwrap();
+        assert!(check(&path).status.success());
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+        // A share that squashes the account says it may write, then refuses.
+        let refused = stand_in("touch", 1);
+        let output = check(&path_with(refused.path()));
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("cannot reach or write"));
     }
 
     #[test]
@@ -1074,7 +1177,10 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(args, &["-R", "-b", "/srv/archive/.scannerpulse-backups"]);
+        assert_eq!(
+            &args[2..],
+            ["setfacl", "-R", "-b", "/srv/archive/.scannerpulse-backups"]
+        );
         assert!(
             at("Make the folder of the nightly dumps")
                 < at("Keep the backups to PostgreSQL and root")
