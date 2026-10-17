@@ -295,6 +295,12 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                     "dnf",
                     &["-qy", "module", "disable", "postgresql"],
                 ));
+                // pgBackRest needs libssh2, which only EPEL carries here.
+                steps.push(run(
+                    "Add EPEL, for pgBackRest's libssh2",
+                    "dnf",
+                    &["install", "-y", "epel-release"],
+                ));
             }
             steps.push(run(
                 "Install PostgreSQL 17 and pgBackRest",
@@ -683,10 +689,19 @@ mod tests {
         let rocky = titles(ROCKY);
         assert!(rocky.contains(&"Turn off the system's own PostgreSQL module".to_string()));
         assert!(rocky.contains(&"Make PostgreSQL 17's data directory".to_string()));
+        let epel = rocky
+            .iter()
+            .position(|t| t == "Add EPEL, for pgBackRest's libssh2")
+            .unwrap();
         assert!(
-            !titles("ID=fedora\nVERSION_ID=42\n")
-                .contains(&"Turn off the system's own PostgreSQL module".to_string())
+            epel < rocky
+                .iter()
+                .position(|t| t == "Install PostgreSQL 17 and pgBackRest")
+                .unwrap()
         );
+        let fedora = titles("ID=fedora\nVERSION_ID=42\n");
+        assert!(!fedora.contains(&"Turn off the system's own PostgreSQL module".to_string()));
+        assert!(!fedora.contains(&"Add EPEL, for pgBackRest's libssh2".to_string()));
         for list in [&debian, &rocky] {
             let tail: Vec<&str> = list
                 .iter()
