@@ -44,6 +44,9 @@ pub struct Found {
     pub backups: Option<PathBuf>,
     /// The site's port, from SCANNERPULSE_WEB_LISTEN in the settings file.
     pub port: Option<u16>,
+    /// The folders above that are not there (an unmounted share, a deleted
+    /// folder): their access entries cannot be taken off.
+    pub gone: Vec<PathBuf>,
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -73,6 +76,14 @@ fn postgres(title: &str, sql: &str) -> Step {
 pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>, String> {
     if remove.archive && found.archive.is_none() {
         return Err("the archive's folder is recorded in the database, which does not answer: it cannot be removed this way".into());
+    }
+    if let (true, Some(archive)) = (remove.archive, &found.archive) {
+        if found.gone.contains(archive) {
+            return Err(format!(
+                "the archive {} is not there (not mounted?): mount it, or leave out --remove-archive",
+                archive.display()
+            ));
+        }
     }
     if remove.backups && found.backups.is_none() {
         return Err("the settings file does not say where the backups are".into());
@@ -140,7 +151,10 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         if !remove.archive {
             folders.extend(found.archive.as_deref());
         }
-        for folder in folders {
+        for folder in folders
+            .into_iter()
+            .filter(|f| !found.gone.iter().any(|g| g == f))
+        {
             let path = folder.display().to_string();
             steps.push(run(
                 &format!("Take the scannerpulse account's access off {path}"),
@@ -299,6 +313,12 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
     let (recordings, archive, calls) = folders().await.unwrap_or_default();
+    let gone: Vec<PathBuf> = recordings
+        .iter()
+        .chain(&archive)
+        .filter(|folder| !folder.exists())
+        .cloned()
+        .collect();
     let found = Found {
         units: UNITS
             .iter()
@@ -317,11 +337,20 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             .ok()
             .and_then(|listen| listen.parse::<std::net::SocketAddr>().ok())
             .map(|listen| listen.port()),
+        gone,
     };
     let steps = steps(&found, remove, &system)?;
     println!("\nUninstall will:");
     for (n, step) in steps.iter().enumerate() {
         println!("  {:>2}. {}", n + 1, step.title);
+    }
+    if found.account {
+        for folder in &found.gone {
+            println!(
+                "{} is not there, so its access entries stay.",
+                folder.display()
+            );
+        }
     }
     let kept: Vec<String> = [
         (!remove.archive).then(|| {
@@ -398,7 +427,43 @@ mod tests {
             archive: Some(PathBuf::from("/srv/archive")),
             backups: Some(PathBuf::from("/srv/archive/.scannerpulse-backups")),
             port: Some(443),
+            gone: vec![],
         }
+    }
+
+    #[test]
+    fn a_folder_that_is_not_there_keeps_its_entries_and_cannot_be_removed() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let unmounted = Found {
+            gone: vec![
+                PathBuf::from("/srv/recordings"),
+                PathBuf::from("/srv/archive"),
+            ],
+            ..found()
+        };
+        let text = lines(&steps(&unmounted, Remove::default(), &system).unwrap()).join("\n");
+        assert!(!text.contains("setfacl"), "{text}");
+        assert!(text.contains("userdel --remove scannerpulse"), "{text}");
+        let half = Found {
+            gone: vec![PathBuf::from("/srv/recordings")],
+            ..found()
+        };
+        let text = lines(&steps(&half, Remove::default(), &system).unwrap()).join("\n");
+        assert!(!text.contains("/srv/recordings"), "{text}");
+        assert!(text.contains("setfacl -R -x u:scannerpulse -x d:u:scannerpulse /srv/archive"));
+        let error = steps(
+            &unmounted,
+            Remove {
+                archive: true,
+                ..Remove::default()
+            },
+            &system,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "the archive /srv/archive is not there (not mounted?): mount it, or leave out --remove-archive"
+        );
     }
 
     #[test]
