@@ -90,17 +90,10 @@ pub async fn record(
     .bind(archive.display().to_string())
     .execute(&mut *conn)
     .await?;
-    let found: Option<i32> = sqlx::query_scalar("SELECT id FROM sources WHERE name = 'recordings'")
-        .fetch_optional(&mut *conn)
-        .await?;
-    match found {
-        Some(id) => {
-            sqlx::query("UPDATE sources SET path = $2, enabled = true WHERE id = $1").bind(id)
-        }
-        None => sqlx::query(
-            "INSERT INTO sources (name, kind, path) VALUES ('recordings', 'sdrtrunk', $1)",
-        ),
-    }
+    sqlx::query(
+        "INSERT INTO sources (name, kind, path) VALUES ('recordings', 'sdrtrunk', $1) \
+         ON CONFLICT (name) DO UPDATE SET path = EXCLUDED.path, enabled = true",
+    )
     .bind(recordings.display().to_string())
     .execute(&mut *conn)
     .await?;
