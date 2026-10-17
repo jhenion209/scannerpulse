@@ -159,11 +159,63 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         ));
     }
     if let (true, Some(archive)) = (remove.archive, &found.archive) {
-        steps.push(run(
-            "Remove everything in the archive",
-            "find",
-            &[&archive.display().to_string(), "-mindepth", "1", "-delete"],
-        ));
+        let a = archive.display().to_string();
+        let kept = ".scannerpulse-backups";
+        let keep_backups = !remove.backups
+            && found
+                .backups
+                .as_ref()
+                .is_some_and(|b| b.starts_with(archive));
+        if keep_backups && found.backups.as_deref() != Some(&archive.join(kept)) {
+            return Err(format!(
+                "the backups {} are inside the archive: name --remove-backups as well, or move them first",
+                found
+                    .backups
+                    .as_ref()
+                    .map_or(String::new(), |b| b.display().to_string())
+            ));
+        }
+        steps.push(if keep_backups {
+            run(
+                "Remove everything in the archive except the backups",
+                "find",
+                &[
+                    &a,
+                    "-mindepth",
+                    "1",
+                    "-maxdepth",
+                    "1",
+                    "!",
+                    "-name",
+                    kept,
+                    "-exec",
+                    "rm",
+                    "-rf",
+                    "--",
+                    "{}",
+                    "+",
+                ],
+            )
+        } else {
+            run(
+                "Remove everything in the archive",
+                "find",
+                &[&a, "-mindepth", "1", "-delete"],
+            )
+        });
+        if found.account {
+            steps.push(run(
+                "Take the scannerpulse account's access off the archive's folder",
+                "setfacl",
+                &[
+                    "-x",
+                    &format!("u:{ACCOUNT}"),
+                    "-x",
+                    &format!("d:u:{ACCOUNT}"),
+                    &a,
+                ],
+            ));
+        }
     }
     steps.push(run(
         "Remove the settings, the password file and the certificate",
@@ -365,6 +417,40 @@ mod tests {
         assert!(text.contains("rm -rf /srv/archive/.scannerpulse-backups"));
         assert!(text.contains("find /srv/archive -mindepth 1 -delete"));
         assert!(!text.contains("setfacl -R -x u:scannerpulse -x d:u:scannerpulse /srv/archive"));
+    }
+
+    #[test]
+    fn removing_the_archive_alone_keeps_the_backups_inside_it() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let only = Remove {
+            archive: true,
+            ..Remove::default()
+        };
+        let text = lines(&steps(&found(), only, &system).unwrap()).join("\n");
+        assert!(
+            text.contains(
+                "find /srv/archive -mindepth 1 -maxdepth 1 ! -name .scannerpulse-backups -exec rm -rf -- {} +"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("rm -rf /srv/archive/.scannerpulse-backups"));
+        assert!(!text.contains("-mindepth 1 -delete"), "{text}");
+        assert!(text.contains("setfacl -x u:scannerpulse -x d:u:scannerpulse /srv/archive"));
+    }
+
+    #[test]
+    fn backups_elsewhere_inside_the_archive_must_be_named_too() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let moved = Found {
+            backups: Some(PathBuf::from("/srv/archive/keep/b")),
+            ..found()
+        };
+        let only = Remove {
+            archive: true,
+            ..Remove::default()
+        };
+        let error = steps(&moved, only, &system).unwrap_err();
+        assert!(error.contains("--remove-backups"), "{error}");
     }
 
     #[test]
