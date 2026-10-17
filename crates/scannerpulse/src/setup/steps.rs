@@ -152,20 +152,40 @@ pub fn pgbackrest_conf(archive: &Path, system: &System) -> String {
     )
 }
 
-/// The nightly backup's service and timer, in that order.
-pub fn backup_units(binary: &Path, system: &System) -> (String, String) {
+/// A unit's line that makes it wait for the mounts `folders` are on (a
+/// share mounted late at boot), each path quoted as systemd reads it.
+fn requires_mounts(folders: &[&Path]) -> String {
+    let quoted: Vec<String> = folders
+        .iter()
+        .map(|folder| {
+            let path = folder.display().to_string();
+            let escaped = path
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('%', "%%");
+            format!("\"{escaped}\"")
+        })
+        .collect();
+    format!("RequiresMountsFor={}\n", quoted.join(" "))
+}
+
+/// The nightly backup's service and timer, in that order; the backups are
+/// in `archive`.
+pub fn backup_units(binary: &Path, system: &System, archive: &Path) -> (String, String) {
     (
         format!(
             "# Written by `scannerpulse setup`.\n\
              [Unit]\n\
              Description=ScannerPulse nightly backups (pgBackRest and a dump)\n\
              After={pg}.service\n\
+             {mounts}\
              \n\
              [Service]\n\
              Type=oneshot\n\
              EnvironmentFile={env}\n\
              ExecStart={binary} backup\n",
             pg = system.postgres_service(),
+            mounts = requires_mounts(&[archive]),
             env = env_path().display(),
             binary = binary.display(),
         ),
@@ -206,8 +226,8 @@ pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The systemd unit of `command` (`web` or `ingest`).
-pub fn unit(command: &str, binary: &Path, system: &System) -> String {
+/// The systemd unit of `command` (`web` or `ingest`), which uses `folders`.
+pub fn unit(command: &str, binary: &Path, system: &System, folders: &[&Path]) -> String {
     let (what, extra) = match command {
         "web" => (
             "the web interface",
@@ -224,6 +244,7 @@ pub fn unit(command: &str, binary: &Path, system: &System) -> String {
          Description=ScannerPulse {what}\n\
          Wants=network-online.target\n\
          After=network-online.target {pg}.service\n\
+         {mounts}\
          \n\
          [Service]\n\
          User={ACCOUNT}\n\
@@ -238,6 +259,7 @@ pub fn unit(command: &str, binary: &Path, system: &System) -> String {
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
+        mounts = requires_mounts(folders),
         env = env_path().display(),
         binary = binary.display(),
     )
@@ -617,7 +639,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         &["pgbackrest", &config, &stanza, "backup", "--type=full"],
         None,
     ));
-    let (service, timer) = backup_units(binary, system);
+    let (service, timer) = backup_units(binary, system, &answers.archive);
     for (name, contents) in [
         ("scannerpulse-backup.service", service),
         ("scannerpulse-backup.timer", timer),
@@ -639,7 +661,12 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 path: PathBuf::from(format!(
                     "/etc/systemd/system/scannerpulse-{command}.service"
                 )),
-                contents: unit(command, binary, system),
+                contents: unit(
+                    command,
+                    binary,
+                    system,
+                    &[&answers.recordings, &answers.archive],
+                ),
                 mode: 0o644,
                 owner: "root:root".into(),
             },
@@ -864,15 +891,43 @@ mod tests {
             Some("postgres://scannerpulse@localhost:5432/scannerpulse")
         );
         let system = detect(ROCKY, "x86_64").unwrap();
-        let web = unit("web", Path::new("/usr/local/bin/scannerpulse"), &system);
+        let folders = [Path::new("/srv/recordings"), Path::new("/srv/archive")];
+        let web = unit(
+            "web",
+            Path::new("/usr/local/bin/scannerpulse"),
+            &system,
+            &folders,
+        );
         assert!(web.contains("User=scannerpulse\n"));
         assert!(web.contains("ExecStart=/usr/local/bin/scannerpulse web\n"));
         assert!(web.contains("AmbientCapabilities=CAP_NET_BIND_SERVICE\n"));
         assert!(web.contains("After=network-online.target postgresql-17.service\n"));
         assert!(web.contains("EnvironmentFile=/etc/scannerpulse/scannerpulse.env\n"));
-        let ingest = unit("ingest", Path::new("/usr/local/bin/scannerpulse"), &system);
+        let ingest = unit(
+            "ingest",
+            Path::new("/usr/local/bin/scannerpulse"),
+            &system,
+            &folders,
+        );
         assert!(
             ingest.contains("TimeoutStopSec=150\n") && !ingest.contains("CAP_NET_BIND_SERVICE")
+        );
+        // Both wait for the folders' mounts (a share mounted late at boot).
+        for text in [&web, &ingest] {
+            assert!(
+                text.contains("RequiresMountsFor=\"/srv/recordings\" \"/srv/archive\"\n"),
+                "{text}"
+            );
+        }
+        let odd = unit(
+            "ingest",
+            Path::new("/usr/local/bin/scannerpulse"),
+            &system,
+            &[Path::new("/srv/my calls"), Path::new("/srv/100%/a\"b\\c")],
+        );
+        assert!(
+            odd.contains("RequiresMountsFor=\"/srv/my calls\" \"/srv/100%%/a\\\"b\\\\c\"\n"),
+            "{odd}"
         );
     }
 
@@ -918,8 +973,13 @@ mod tests {
             pgbackrest_conf(Path::new("/srv/archive"), &rocky)
                 .contains("pg1-path=/var/lib/pgsql/17/data\n")
         );
-        let (service, timer) = backup_units(Path::new("/usr/local/bin/scannerpulse"), &rocky);
+        let (service, timer) = backup_units(
+            Path::new("/usr/local/bin/scannerpulse"),
+            &rocky,
+            Path::new("/srv/archive"),
+        );
         assert!(service.contains("ExecStart=/usr/local/bin/scannerpulse backup\n"));
+        assert!(service.contains("RequiresMountsFor=\"/srv/archive\"\n"));
         assert!(
             !service.contains("User="),
             "the backup runs as root, for pgBackRest's runuser"
