@@ -95,6 +95,25 @@ pub fn run(title: &str, program: &str, args: &[&str]) -> Step {
     }
 }
 
+/// Opens (or, not `open`, closes) `port` in firewalld, when it runs.
+pub fn firewall(open: bool, port: u16) -> Step {
+    let (title, verb) = if open {
+        ("Open", "add")
+    } else {
+        ("Close", "remove")
+    };
+    run(
+        &format!("{title} port {port} in the firewall, if firewalld runs"),
+        "/bin/sh",
+        &[
+            "-c",
+            &format!(
+                "if systemctl is-active --quiet firewalld; then firewall-cmd --quiet --permanent --{verb}-port={port}/tcp && firewall-cmd --quiet --reload; fi"
+            ),
+        ],
+    )
+}
+
 /// The paths setup writes, under `ETC`.
 pub fn env_path() -> PathBuf {
     Path::new(ETC).join("scannerpulse.env")
@@ -642,6 +661,8 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             "scannerpulse-backup.timer",
         ],
     ));
+    // Rocky, Alma and Fedora run firewalld, which would shut the site out.
+    steps.push(firewall(true, answers.port));
     steps.push(Step {
         title: "Wait for the web interface".into(),
         action: Action::WaitForWeb { port: answers.port },
@@ -722,7 +743,7 @@ mod tests {
             let tail: Vec<&str> = list
                 .iter()
                 .rev()
-                .take(3)
+                .take(4)
                 .rev()
                 .map(String::as_str)
                 .collect();
@@ -731,6 +752,7 @@ mod tests {
                 [
                     "Read the new services",
                     "Start ScannerPulse, now and at boot",
+                    "Open port 443 in the firewall, if firewalld runs",
                     "Wait for the web interface"
                 ]
             );
@@ -748,6 +770,29 @@ mod tests {
                 .unwrap();
             assert!(db < tables && tables < admin);
         }
+    }
+
+    #[test]
+    fn firewalld_when_it_runs_opens_the_sites_port_before_the_last_check() {
+        let mut a = answers();
+        a.port = 8443;
+        let all = steps(&a, &detect(ROCKY, "x86_64").unwrap(), Path::new("/b"), "pw");
+        let at = all
+            .iter()
+            .position(|s| s.title == "Open port 8443 in the firewall, if firewalld runs")
+            .unwrap();
+        assert_eq!(all[at + 1].title, "Wait for the web interface");
+        let Action::Run { program, args, .. } = &all[at].action else {
+            panic!()
+        };
+        assert_eq!(program, "/bin/sh");
+        assert_eq!(
+            args,
+            &[
+                "-c",
+                "if systemctl is-active --quiet firewalld; then firewall-cmd --quiet --permanent --add-port=8443/tcp && firewall-cmd --quiet --reload; fi"
+            ]
+        );
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub struct Found {
     pub archive: Option<PathBuf>,
     /// SCANNERPULSE_BACKUPS from the settings file.
     pub backups: Option<PathBuf>,
+    /// The site's port, from SCANNERPULSE_WEB_LISTEN in the settings file.
+    pub port: Option<u16>,
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -100,6 +102,9 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         .collect();
     let mut args = vec!["-f"];
     args.extend(files.iter().map(String::as_str));
+    if let Some(port) = found.port {
+        steps.push(super::steps::firewall(false, port));
+    }
     steps.push(run("Remove the services' units", "rm", &args));
     steps.push(run(
         "Read the services again",
@@ -308,6 +313,10 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         backups: std::env::var("SCANNERPULSE_BACKUPS")
             .ok()
             .map(PathBuf::from),
+        port: std::env::var("SCANNERPULSE_WEB_LISTEN")
+            .ok()
+            .and_then(|listen| listen.parse::<std::net::SocketAddr>().ok())
+            .map(|listen| listen.port()),
     };
     let steps = steps(&found, remove, &system)?;
     println!("\nUninstall will:");
@@ -388,7 +397,35 @@ mod tests {
             recordings: vec![PathBuf::from("/srv/recordings")],
             archive: Some(PathBuf::from("/srv/archive")),
             backups: Some(PathBuf::from("/srv/archive/.scannerpulse-backups")),
+            port: Some(443),
         }
+    }
+
+    #[test]
+    fn the_sites_port_is_closed_in_firewalld_when_it_is_known() {
+        let system = detect("ID=\"rocky\"\nVERSION_ID=\"9.6\"\n", "x86_64").unwrap();
+        let all = steps(&found(), Remove::default(), &system).unwrap();
+        let close = all
+            .iter()
+            .find(|s| s.title == "Close port 443 in the firewall, if firewalld runs")
+            .unwrap();
+        let Action::Run { program, args, .. } = &close.action else {
+            panic!()
+        };
+        assert_eq!(program, "/bin/sh");
+        assert_eq!(
+            args,
+            &[
+                "-c",
+                "if systemctl is-active --quiet firewalld; then firewall-cmd --quiet --permanent --remove-port=443/tcp && firewall-cmd --quiet --reload; fi"
+            ]
+        );
+        let unknown = Found {
+            port: None,
+            ..found()
+        };
+        let text = lines(&steps(&unknown, Remove::default(), &system).unwrap()).join("\n");
+        assert!(!text.contains("firewall"), "{text}");
     }
 
     fn lines(steps: &[Step]) -> Vec<String> {

@@ -50,9 +50,9 @@ until you say so. It:
   gives it read and write access to both folders;
 - writes the settings file `/etc/scannerpulse/scannerpulse.env`;
 - makes a certificate for the machine's name and address and serves HTTPS on
-  port 443 (or the next free port, saying what holds 443). Nothing listens on
-  port 80. The browser warns once about the certificate, since no authority
-  signed it;
+  port 443 (or the next free port, saying what holds 443), which it opens in
+  firewalld when firewalld runs. Nothing listens on port 80. The browser
+  warns once about the certificate, since no authority signed it;
 - sets up the backups in `<archive>/.scannerpulse-backups`: PostgreSQL sends
   its WAL to pgBackRest, and every night at 03:17 `scannerpulse backup` takes
   a pgBackRest backup (full on Sundays, differential otherwise; two weeks of
