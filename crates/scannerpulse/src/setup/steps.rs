@@ -79,7 +79,7 @@ pub struct Step {
     pub action: Action,
 }
 
-fn run(title: &str, program: &str, args: &[&str]) -> Step {
+pub fn run(title: &str, program: &str, args: &[&str]) -> Step {
     Step {
         title: title.to_string(),
         action: Action::Run {

@@ -7,6 +7,7 @@ pub mod folders;
 pub mod screen;
 pub mod steps;
 pub mod system;
+pub mod uninstall;
 
 use std::path::Path;
 

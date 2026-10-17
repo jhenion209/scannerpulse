@@ -60,6 +60,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse cert make --cert FILE --key FILE NAME...
        scannerpulse setup [--answers FILE] [--dry-run]
        scannerpulse backup
+       scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse --version
        scannerpulse --help
 
@@ -152,7 +153,11 @@ setup       make this machine a ScannerPulse site, as root: asks Simple or
             instead (NAME=value lines, mode 600), --dry-run changes nothing
 backup      take the nightly backups, as root (the backup timer runs it):
             pgBackRest (full on Sundays, differential otherwise) and a dump,
-            the newest 14 kept, into SCANNERPULSE_BACKUPS";
+            the newest 14 kept, into SCANNERPULSE_BACKUPS
+uninstall   undo setup, as root: the services, their units, the settings,
+            the account and the program go; the archive, the database and
+            the backups stay unless each is named, and each named one is
+            deleted only after its name is typed";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -189,6 +194,7 @@ enum Command {
         dry_run: bool,
     },
     Backup,
+    Uninstall(scannerpulse::setup::uninstall::Remove),
     Talkgroups,
     TalkgroupSwitch {
         talkgroup: String,
@@ -493,6 +499,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         }
         ["setup", rest @ ..] => parse_setup(rest),
         ["backup"] => Some(Command::Backup),
+        ["uninstall", rest @ ..] => parse_uninstall(rest),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
         ["talkgroup", "correct", talkgroup, rest @ ..] => {
@@ -535,6 +542,23 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["--help"] => Some(Command::Help),
         _ => None,
     }
+}
+
+fn parse_uninstall(rest: &[&str]) -> Option<Command> {
+    let mut remove = scannerpulse::setup::uninstall::Remove::default();
+    for flag in rest {
+        let part = match *flag {
+            "--remove-database" => &mut remove.database,
+            "--remove-backups" => &mut remove.backups,
+            "--remove-archive" => &mut remove.archive,
+            _ => return None,
+        };
+        if *part {
+            return None;
+        }
+        *part = true;
+    }
+    Some(Command::Uninstall(remove))
 }
 
 fn parse_setup(mut rest: &[&str]) -> Option<Command> {
@@ -751,6 +775,15 @@ async fn run() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("backup: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Command::Uninstall(remove)) => {
+            match scannerpulse::setup::uninstall::run_uninstall(remove).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("uninstall: {error}");
                     ExitCode::FAILURE
                 }
             }
@@ -1846,6 +1879,28 @@ mod tests {
         assert_eq!(parse(&["setup", "now"]), None);
         assert_eq!(parse(&["backup"]), Some(Command::Backup));
         assert_eq!(parse(&["backup", "now"]), None);
+    }
+
+    #[test]
+    fn uninstall_names_each_part_to_remove_once() {
+        use scannerpulse::setup::uninstall::Remove;
+        assert_eq!(
+            parse(&["uninstall"]),
+            Some(Command::Uninstall(Remove::default()))
+        );
+        assert_eq!(
+            parse(&["uninstall", "--remove-archive", "--remove-database"]),
+            Some(Command::Uninstall(Remove {
+                database: true,
+                backups: false,
+                archive: true
+            }))
+        );
+        assert_eq!(
+            parse(&["uninstall", "--remove-backups", "--remove-backups"]),
+            None
+        );
+        assert_eq!(parse(&["uninstall", "--everything"]), None);
     }
 
     #[test]
