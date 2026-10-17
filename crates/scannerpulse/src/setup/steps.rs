@@ -705,16 +705,22 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         "systemctl",
         &["daemon-reload"],
     ));
+    let units = [
+        "scannerpulse-web",
+        "scannerpulse-ingest",
+        "scannerpulse-backup.timer",
+    ];
     steps.push(run(
-        "Start ScannerPulse, now and at boot",
+        "Start ScannerPulse at boot",
         "systemctl",
-        &[
-            "enable",
-            "--now",
-            "scannerpulse-web",
-            "scannerpulse-ingest",
-            "scannerpulse-backup.timer",
-        ],
+        &[&["enable"], &units[..]].concat(),
+    ));
+    // A rerun gives the database role a new password: a service still
+    // running from before would keep the old one and fail.
+    steps.push(run(
+        "Start or restart ScannerPulse, to read the new settings",
+        "systemctl",
+        &[&["restart"], &units[..]].concat(),
     ));
     // Rocky, Alma and Fedora run firewalld, which would shut the site out.
     steps.push(firewall(true, answers.port));
@@ -798,7 +804,7 @@ mod tests {
             let tail: Vec<&str> = list
                 .iter()
                 .rev()
-                .take(4)
+                .take(5)
                 .rev()
                 .map(String::as_str)
                 .collect();
@@ -806,7 +812,8 @@ mod tests {
                 tail,
                 [
                     "Read the new services",
-                    "Start ScannerPulse, now and at boot",
+                    "Start ScannerPulse at boot",
+                    "Start or restart ScannerPulse, to read the new settings",
                     "Open port 443 in the firewall, if firewalld runs",
                     "Wait for the web interface"
                 ]
@@ -1077,10 +1084,43 @@ mod tests {
                 < at("Make pgBackRest's place for this database")
         );
         assert!(at("Make pgBackRest's place for this database") < at("Take the first full backup"));
-        let Action::Run { args, .. } = &all[at("Start ScannerPulse, now and at boot")].action
-        else {
+        let Action::Run { args, .. } = &all[at("Start ScannerPulse at boot")].action else {
             panic!()
         };
         assert!(args.contains(&"scannerpulse-backup.timer".to_string()));
+    }
+
+    #[test]
+    fn a_rerun_restarts_the_services_so_they_read_the_new_database_password() {
+        let all = steps(
+            &answers(),
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+        let units = [
+            "scannerpulse-web",
+            "scannerpulse-ingest",
+            "scannerpulse-backup.timer",
+        ];
+        for (title, verb) in [
+            ("Start ScannerPulse at boot", "enable"),
+            (
+                "Start or restart ScannerPulse, to read the new settings",
+                "restart",
+            ),
+        ] {
+            let Action::Run { program, args, .. } = &all[at(title)].action else {
+                panic!()
+            };
+            assert_eq!(program, "systemctl");
+            assert_eq!(args[0], verb);
+            assert_eq!(&args[1..], units);
+        }
+        assert_eq!(
+            at("Start or restart ScannerPulse, to read the new settings"),
+            at("Start ScannerPulse at boot") + 1
+        );
     }
 }

@@ -59,7 +59,8 @@ until you say so. It:
   weeks of point-in-time recovery) and a dump of the database (the newest 14
   kept);
 - starts the services `scannerpulse-web` and `scannerpulse-ingest` and the
-  timer `scannerpulse-backup`, now and at boot.
+  timer `scannerpulse-backup`, now and at boot (a rerun restarts them, so
+  they read its new settings).
 
 The site is then at `https://<this machine>/`, and the admin page at
 `/admin.html`.
