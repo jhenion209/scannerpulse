@@ -48,6 +48,10 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     let mut answers = match answers_file {
         Some(path) => ask::from_file(path, &defaults)?,
         None => {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                return Err("setup asks its questions on a terminal: run it in one (ssh -t for a remote machine), or give the answers with --answers FILE".into());
+            }
             if screen::choose()?.is_none() {
                 println!("Setup left; nothing was changed.");
                 return Ok(());
