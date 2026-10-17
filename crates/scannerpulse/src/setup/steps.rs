@@ -289,12 +289,15 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 &["install", "-y", &rpm],
             ));
             if system.id != "fedora" {
-                // The system's own PostgreSQL module would shadow version 17.
-                steps.push(run(
-                    "Turn off the system's own PostgreSQL module",
-                    "dnf",
-                    &["-qy", "module", "disable", "postgresql"],
-                ));
+                // The system's own PostgreSQL module would shadow version 17;
+                // version 10 has no modules.
+                if matches!(system.version.split('.').next(), Some("8" | "9")) {
+                    steps.push(run(
+                        "Turn off the system's own PostgreSQL module",
+                        "dnf",
+                        &["-qy", "module", "disable", "postgresql"],
+                    ));
+                }
                 // pgBackRest needs libssh2, which only EPEL carries here.
                 steps.push(run(
                     "Add EPEL, for pgBackRest's libssh2",
@@ -702,6 +705,19 @@ mod tests {
         let fedora = titles("ID=fedora\nVERSION_ID=42\n");
         assert!(!fedora.contains(&"Turn off the system's own PostgreSQL module".to_string()));
         assert!(!fedora.contains(&"Add EPEL, for pgBackRest's libssh2".to_string()));
+        // Version 10 of the Red Hat family has no modules to turn off.
+        for ten in [
+            "ID=\"rocky\"\nVERSION_ID=\"10.0\"\n",
+            "ID=\"almalinux\"\nVERSION_ID=\"10.0\"\n",
+        ] {
+            let list = titles(ten);
+            assert!(!list.contains(&"Turn off the system's own PostgreSQL module".to_string()));
+            assert!(list.contains(&"Add EPEL, for pgBackRest's libssh2".to_string()));
+        }
+        assert!(
+            titles("ID=\"almalinux\"\nVERSION_ID=\"8.10\"\n")
+                .contains(&"Turn off the system's own PostgreSQL module".to_string())
+        );
         for list in [&debian, &rocky] {
             let tail: Vec<&str> = list
                 .iter()
