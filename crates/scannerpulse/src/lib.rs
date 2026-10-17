@@ -11,6 +11,7 @@ pub mod evaluation;
 pub mod favorites;
 pub mod filer;
 pub mod health;
+pub mod hostfile;
 pub mod ingest;
 pub mod jobs;
 pub mod lease;

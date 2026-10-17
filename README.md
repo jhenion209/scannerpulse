@@ -9,7 +9,11 @@ listen.
 
 ## Commands
 
-`scannerpulse --help` lists them. So far:
+`scannerpulse --help` lists them. Every command first reads the machine's
+settings file, `/etc/scannerpulse/scannerpulse.env` (or the file named by
+`SCANNERPULSE_SETTINGS_FILE`): `NAME="value"` lines, the variables below,
+which the services also read as their systemd `EnvironmentFile`. A variable
+already set in the environment wins. So far:
 
 - `db-update` creates or updates the database schema.
 - `ingest` watches the source folders and files each new call into the

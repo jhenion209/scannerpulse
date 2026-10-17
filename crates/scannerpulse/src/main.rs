@@ -519,8 +519,39 @@ fn parse(args: &[&str]) -> Option<Command> {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // The machine's settings file, before any thread exists: a variable
+    // already in the environment wins.
+    let path = std::env::var_os("SCANNERPULSE_SETTINGS_FILE")
+        .unwrap_or_else(|| scannerpulse::hostfile::DEFAULT_PATH.into());
+    match scannerpulse::hostfile::to_apply(Path::new(&path), |name| {
+        std::env::var_os(name).is_some()
+    }) {
+        Ok(pairs) => {
+            for (name, value) in pairs {
+                // SAFETY: no other thread exists yet, so none reads the
+                // environment while it changes.
+                unsafe { std::env::set_var(name, value) };
+            }
+        }
+        Err(error) => {
+            eprintln!("scannerpulse: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(run()),
+        Err(error) => {
+            eprintln!("scannerpulse: cannot start: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> ExitCode {
     // Lossy, so an argument that is not valid UTF-8 gets the usage text, not a panic.
     let args: Vec<String> = std::env::args_os()
         .skip(1)
