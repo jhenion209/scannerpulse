@@ -85,6 +85,8 @@ and the backups unless `--remove-archive`, `--remove-database` or
 `--remove-backups` names them, and each named one goes only after you type
 its name. Backups kept inside the archive stay too, even with
 `--remove-archive`, unless `--remove-backups` is named as well.
+`--remove-archive` first asks a Yes/No question (default No) naming the
+archive and how many calls it holds, and only a Yes leads to typing its name.
 
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
 `https://<this machine>/healthz` expecting 200 (the web interface answers

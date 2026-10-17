@@ -234,8 +234,8 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
 }
 
 /// What the database says the folders are: the sources, and the primary
-/// location.
-async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>)> {
+/// location; and how many calls it holds.
+async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
     use sqlx::Connection;
     let url = std::env::var("DATABASE_URL").ok()?;
     let connect = sqlx::PgConnection::connect(&url);
@@ -251,10 +251,24 @@ async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>)> {
         .fetch_optional(&mut conn)
         .await
         .ok()?;
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
+        .fetch_one(&mut conn)
+        .await
+        .ok()?;
     Some((
         sources.into_iter().map(PathBuf::from).collect(),
         archive.map(PathBuf::from),
+        calls,
     ))
+}
+
+/// The question `--remove-archive` asks before its path is typed.
+fn archive_question(archive: &Path, calls: i64) -> String {
+    let noun = if calls == 1 { "call" } else { "calls" };
+    format!(
+        "The archive {} holds {calls} {noun}. --remove-archive deletes them all, with their recordings, and they cannot be got back. Delete them?",
+        archive.display()
+    )
 }
 
 /// Asks the person to type `name` before `what` goes.
@@ -279,7 +293,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
-    let (recordings, archive) = folders().await.unwrap_or_default();
+    let (recordings, archive, calls) = folders().await.unwrap_or_default();
     let found = Found {
         units: UNITS
             .iter()
@@ -330,7 +344,11 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         go = typed("The backups", &backups.display().to_string())?;
     }
     if let (true, true, Some(archive)) = (go, remove.archive, &found.archive) {
-        go = typed("Every call in the archive", &archive.display().to_string())?;
+        go = Confirm::new(&archive_question(archive, calls))
+            .with_default(false)
+            .prompt()
+            .map_err(|error| error.to_string())?
+            && typed("Every call in the archive", &archive.display().to_string())?;
     }
     if !go {
         println!("Nothing was changed.");
@@ -348,10 +366,19 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Found, Remove, UNITS, steps};
+    use super::{Found, Remove, UNITS, archive_question, steps};
     use crate::setup::steps::{Action, Step};
     use crate::setup::system::detect;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn removing_the_archive_asks_first_naming_its_folder_and_its_calls() {
+        let question = archive_question(Path::new("/srv/archive"), 1200);
+        assert!(question.starts_with("The archive /srv/archive holds 1200 calls."));
+        assert!(question.contains("--remove-archive deletes them all"));
+        assert!(question.ends_with("Delete them?"));
+        assert!(archive_question(Path::new("/srv/archive"), 1).contains("holds 1 call."));
+    }
 
     fn found() -> Found {
         Found {
