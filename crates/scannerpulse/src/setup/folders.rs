@@ -76,6 +76,37 @@ pub fn apart(recordings: &Folder, archive: &Folder) -> Result<(), String> {
     }
 }
 
+/// Records the archive as the primary location and the recordings folder as
+/// the source, or points the existing ones at these folders.
+pub async fn record(
+    conn: &mut sqlx::PgConnection,
+    recordings: &Path,
+    archive: &Path,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO locations (name, root, mode, is_primary) VALUES ('archive', $1, 'managed', true) \
+         ON CONFLICT (name) DO UPDATE SET root = EXCLUDED.root",
+    )
+    .bind(archive.display().to_string())
+    .execute(&mut *conn)
+    .await?;
+    let found: Option<i32> = sqlx::query_scalar("SELECT id FROM sources WHERE name = 'recordings'")
+        .fetch_optional(&mut *conn)
+        .await?;
+    match found {
+        Some(id) => {
+            sqlx::query("UPDATE sources SET path = $2, enabled = true WHERE id = $1").bind(id)
+        }
+        None => sqlx::query(
+            "INSERT INTO sources (name, kind, path) VALUES ('recordings', 'sdrtrunk', $1)",
+        ),
+    }
+    .bind(recordings.display().to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// A size as people read it: `12.3 GB`.
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
