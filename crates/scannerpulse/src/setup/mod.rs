@@ -248,10 +248,16 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
 
 /// The addresses a browser opens the site at.
 fn addresses(answers: &Answers) -> Vec<String> {
-    answers
-        .names
+    // A browser warns at a name the certificate does not cover.
+    let names = match &answers.certificate {
+        steps::Certificate::Installed { cert, .. } => crate::cert::read(cert)
+            .map(|found| found.names)
+            .unwrap_or_else(|_| answers.names.clone()),
+        steps::Certificate::Own => answers.names.clone(),
+    };
+    names
         .iter()
-        .filter(|name| *name != "127.0.0.1")
+        .filter(|name| *name != "127.0.0.1" && !name.starts_with("*."))
         .map(|name| format!("https://{name}:{}/", answers.port).replace(":443/", "/"))
         .collect()
 }
@@ -312,8 +318,31 @@ fn finished(answers: &Answers) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{detail, steps, summary, system};
+    use super::{detail, finished, steps, summary, system};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn with_your_certificate_the_site_is_opened_by_the_names_it_covers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = (dir.path().join("site.pem"), dir.path().join("site.key"));
+        crate::cert::make(
+            &["radio.example.org".into(), "*.example.org".into()],
+            &cert,
+            &key,
+        )
+        .unwrap();
+        let said = finished(&steps::Answers {
+            certificate: steps::Certificate::Installed { cert, key },
+            ..answers()
+        });
+        assert!(said.contains("Open https://radio.example.org/\n"), "{said}");
+        assert!(!said.contains("radio-a"), "{said}");
+        let own = finished(&answers());
+        assert!(
+            own.contains("Open https://radio-a/ or https://192.0.2.10/\n"),
+            "{own}"
+        );
+    }
 
     fn answers() -> steps::Answers {
         steps::Answers {
