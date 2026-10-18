@@ -353,9 +353,16 @@ impl Renewal {
 }
 
 /// Serves the certificate kept in `dir` when this authority gave it for
-/// these names, and renews in the background: at once when the one served
-/// is not that kept one, then whenever a third of its life is left.
-pub fn start(settings: Settings, dir: PathBuf, certs: Arc<Certs>, renewal: Arc<Mutex<Renewal>>) {
+/// these names, and renews in the background once `ready` (the site
+/// listens): at once when the one served is not that kept one, then
+/// whenever a third of its life is left.
+pub fn start(
+    settings: Settings,
+    dir: PathBuf,
+    certs: Arc<Certs>,
+    renewal: Arc<Mutex<Renewal>>,
+    ready: impl std::future::Future<Output = ()> + Send + 'static,
+) {
     let mut ours = match stored(&dir, &settings) {
         Some(kept) => {
             certs.serve(Arc::new(kept));
@@ -364,6 +371,9 @@ pub fn start(settings: Settings, dir: PathBuf, certs: Arc<Certs>, renewal: Arc<M
         None => false,
     };
     tokio::spawn(async move {
+        // A site that cannot listen (its port taken, say) would ask on
+        // every restart, and answer no proof over the web.
+        ready.await;
         let names = settings.names.join(", ");
         loop {
             let due = !ours

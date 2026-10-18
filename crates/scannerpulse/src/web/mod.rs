@@ -409,6 +409,7 @@ pub async fn run(
     state.static_dir = config.static_dir;
     state.host = config.host;
     state.oidc_secret = config.oidc_secret;
+    let handle = axum_server::Handle::new();
     // The certificate setup made or the one installed; Let's Encrypt's,
     // when kept, from the start, and renewed in the background.
     if let Some(tls) = &config.tls {
@@ -416,7 +417,16 @@ pub async fn run(
             .map_err(|error| format!("cannot serve HTTPS: {error}"))?;
         let certs = Arc::new(crate::acme::Certs::new(Arc::new(own)));
         if let Some(acme) = config.machine.acme.clone() {
-            crate::acme::start(acme, config.acme_dir, certs.clone(), state.renewal.clone());
+            let listening = handle.clone();
+            crate::acme::start(
+                acme,
+                config.acme_dir,
+                certs.clone(),
+                state.renewal.clone(),
+                async move {
+                    listening.listening().await;
+                },
+            );
         }
         state.certs = Some(certs);
     }
@@ -444,7 +454,6 @@ pub async fn run(
     let rustls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
         crate::acme::server_config(certs),
     ));
-    let handle = axum_server::Handle::new();
     let stopper = handle.clone();
     tokio::spawn(async move {
         shutdown.await;

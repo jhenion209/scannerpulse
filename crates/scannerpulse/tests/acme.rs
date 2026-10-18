@@ -389,8 +389,33 @@ async fn a_certificate_the_site_did_not_get_from_the_authority_is_replaced_at_on
         dir.path().to_path_buf(),
         certs,
         renewal.clone(),
+        std::future::ready(()),
     );
     assert!(tried(&renewal).await, "asked at once");
+}
+
+#[tokio::test]
+async fn nothing_is_asked_before_the_site_listens() {
+    let installed = tempfile::tempdir().unwrap();
+    let (chain, key) = issued(&["radio.example.org"]);
+    let (c, k) = (
+        installed.path().join("cert.pem"),
+        installed.path().join("key.pem"),
+    );
+    std::fs::write(&c, chain).unwrap();
+    std::fs::write(&k, key).unwrap();
+    let certs = Arc::new(Certs::new(Arc::new(cert::certified(&c, &k).unwrap())));
+    let renewal = Arc::new(Mutex::new(acme::Renewal::default()));
+    let dir = tempfile::tempdir().unwrap();
+    // A site that never comes up (its port is taken) asks nothing.
+    acme::start(
+        web(&["radio.example.org"], "https://127.0.0.1:1/directory"),
+        dir.path().to_path_buf(),
+        certs,
+        renewal.clone(),
+        std::future::pending(),
+    );
+    assert!(!tried(&renewal).await);
 }
 
 #[tokio::test]
@@ -407,6 +432,7 @@ async fn the_kept_certificate_is_served_and_nothing_asked_while_it_is_young() {
         dir.path().to_path_buf(),
         certs.clone(),
         renewal.clone(),
+        std::future::ready(()),
     );
     assert_eq!(
         cert::found(&certs.current()).unwrap().names,
