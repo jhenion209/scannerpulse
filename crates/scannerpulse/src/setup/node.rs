@@ -286,7 +286,25 @@ pub fn steps(
             owner: "postgres:postgres".into(),
         },
     });
+    // The copy's values: it copies the other machine.
+    let other = &plan.nodes[1 - index];
+    let copy_vars = [
+        ("DATA", data),
+        ("BIN", system.postgres_bin()),
+        ("SERVICE", system.postgres_cluster()),
+        ("PRIMARY", other.as_str()),
+        ("NODE", NODE),
+        ("DATABASE", super::steps::DATABASE),
+    ];
     if index == 0 {
+        // A standby since a change of roles whose copy was cut short has no
+        // cluster: it copies the other machine, the primary, again.
+        steps.push(script(
+            "Copy the other machine's data, if this machine has none",
+            &format!("[ -f \"$DATA/PG_VERSION\" ] && exit 0\n{COPY}"),
+            &copy_vars,
+            None,
+        ));
         // A standby since a change of roles has them from the primary.
         steps.push(script(
             "Make the database, its role, and the copying role",
@@ -301,14 +319,7 @@ pub fn steps(
         steps.push(script(
             "Copy the primary's data, and follow it",
             COPY,
-            &[
-                ("DATA", data),
-                ("BIN", system.postgres_bin()),
-                ("SERVICE", system.postgres_cluster()),
-                ("PRIMARY", &plan.nodes[0]),
-                ("NODE", NODE),
-                ("DATABASE", super::steps::DATABASE),
-            ],
+            &copy_vars,
             None,
         ));
     }
@@ -1181,6 +1192,19 @@ mod tests {
         }
         let (_, _, env, _) = ran(&second, "Restart PostgreSQL 17");
         assert!(env.contains(&("SERVICE".into(), "postgresql@17-main".into())));
+        // Machine 1, a standby since a change of roles whose copy was cut
+        // short, copies the other machine before anything asks its cluster.
+        let one = titles(&first);
+        let copy = "Copy the other machine's data, if this machine has none";
+        let at = |title: &str| one.iter().position(|t| *t == title).unwrap();
+        assert!(at(copy) < at("Make the database, its role, and the copying role"));
+        let (_, args, env, _) = ran(&first, copy);
+        assert!(
+            args[1].starts_with("[ -f \"$DATA/PG_VERSION\" ] && exit 0"),
+            "{}",
+            args[1]
+        );
+        assert!(env.contains(&("PRIMARY".into(), "db2.example.org".into())));
     }
 
     #[test]
