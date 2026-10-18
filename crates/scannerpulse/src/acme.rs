@@ -69,6 +69,8 @@ pub struct Settings {
     /// The authority's directory: Let's Encrypt's unless the settings file
     /// names another (its staging one, or a private authority).
     pub directory: String,
+    /// Another address for Cloudflare's API (a stand-in, for a trial).
+    pub cloudflare_api: Option<String>,
 }
 
 impl Settings {
@@ -104,6 +106,7 @@ impl Settings {
             proof,
             names,
             directory: get("SCANNERPULSE_ACME_DIRECTORY").unwrap_or_else(|| LETS_ENCRYPT.into()),
+            cloudflare_api: get("SCANNERPULSE_CLOUDFLARE_API"),
         }))
     }
 
@@ -310,7 +313,10 @@ pub async fn obtain(settings: &Settings, dir: &Path, certs: &Certs) -> Result<()
         .map_err(|error| format!("the authority refused the order: {error}"))?;
     let cloudflare = match &settings.proof {
         Proof::Web => None,
-        Proof::Cloudflare { token } => Some(Cloudflare::new(token)),
+        Proof::Cloudflare { token } => Some(match &settings.cloudflare_api {
+            Some(api) => Cloudflare::with_api(api, token),
+            None => Cloudflare::new(token),
+        }),
     };
     let mut records = Vec::new();
     let polls = RetryPolicy::new()

@@ -34,6 +34,7 @@ fn the_settings_name_the_proof_the_names_and_the_authority() {
     assert_eq!(web.proof, Proof::Web);
     assert_eq!(web.names, ["radio.example.org", "www.radio.example.org"]);
     assert_eq!(web.directory, acme::LETS_ENCRYPT);
+    assert_eq!(web.cloudflare_api, None);
     let dns = settings(&[
         ("SCANNERPULSE_ACME", "dns-cloudflare"),
         ("SCANNERPULSE_ACME_NAMES", "radio.example.org"),
@@ -41,6 +42,10 @@ fn the_settings_name_the_proof_the_names_and_the_authority() {
         (
             "SCANNERPULSE_ACME_DIRECTORY",
             "https://acme.example.org/dir",
+        ),
+        (
+            "SCANNERPULSE_CLOUDFLARE_API",
+            "http://127.0.0.1:8099/client/v4",
         ),
     ])
     .unwrap()
@@ -52,6 +57,10 @@ fn the_settings_name_the_proof_the_names_and_the_authority() {
         }
     );
     assert_eq!(dns.directory, "https://acme.example.org/dir");
+    assert_eq!(
+        dns.cloudflare_api.as_deref(),
+        Some("http://127.0.0.1:8099/client/v4")
+    );
     assert!(
         !format!("{dns:?}").contains("cf-token-1"),
         "the token is never shown"

@@ -17,6 +17,15 @@ impl Cloudflare {
         Cloudflare::with_api(API, token)
     }
 
+    /// At the address SCANNERPULSE_CLOUDFLARE_API names (a stand-in, for a
+    /// trial), else Cloudflare's own.
+    pub fn from_env(token: &str) -> Cloudflare {
+        match std::env::var("SCANNERPULSE_CLOUDFLARE_API") {
+            Ok(api) if !api.is_empty() => Cloudflare::with_api(&api, token),
+            _ => Cloudflare::new(token),
+        }
+    }
+
     /// Another address for the API (a stand-in, in the tests).
     pub fn with_api(api: &str, token: &str) -> Cloudflare {
         Cloudflare {

@@ -335,6 +335,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
             },
             names: vec!["radio.example.org".into()],
             directory: scannerpulse::acme::LETS_ENCRYPT.into(),
+            cloudflare_api: None,
         }),
         ..Default::default()
     };

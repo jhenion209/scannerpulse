@@ -217,7 +217,7 @@ pub async fn check_database(options: sqlx::postgres::PgConnectOptions) -> Result
 /// `check_database` for a database the person names.
 /// The Cloudflare token reaches the zone of each name.
 pub async fn check_cloudflare(token: &str, names: &[String]) -> Result<(), String> {
-    let cloudflare = crate::cloudflare::Cloudflare::new(token);
+    let cloudflare = crate::cloudflare::Cloudflare::from_env(token);
     for name in names {
         cloudflare.zone(name).await?;
     }

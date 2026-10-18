@@ -140,6 +140,7 @@ async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
                 // Nothing answers there: the renewal fails, and the kept
                 // certificate stays.
                 directory: "https://127.0.0.1:1/directory".into(),
+                cloudflare_api: None,
             }),
             ..Default::default()
         },
