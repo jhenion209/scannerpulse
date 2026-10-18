@@ -40,10 +40,11 @@ pub fn make(names: &[String], cert: &Path, key: &Path) -> Result<(), String> {
 }
 
 /// What a certificate says of itself: the names and addresses it covers,
-/// and when it ends.
+/// and when it starts and ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub names: Vec<String>,
+    pub not_before: chrono::DateTime<chrono::Utc>,
     pub not_after: chrono::DateTime<chrono::Utc>,
     /// It signed itself, as the certificate setup makes does.
     pub self_signed: bool,
@@ -61,11 +62,19 @@ pub fn read(cert: &Path) -> Result<Found, String> {
     describe(&first).map_err(|why| format!("{}: {why}", cert.display()))
 }
 
+/// What the certificate `key` serves says of itself.
+pub fn found(key: &rustls::sign::CertifiedKey) -> Result<Found, String> {
+    let first = key.cert.first().ok_or("no certificate")?;
+    describe(first)
+}
+
 fn describe(der: &[u8]) -> Result<Found, String> {
     let (_, parsed) = x509_parser::parse_x509_certificate(der)
         .map_err(|_| "its certificate cannot be read".to_string())?;
-    let not_after = chrono::DateTime::from_timestamp(parsed.validity().not_after.timestamp(), 0)
-        .unwrap_or_default();
+    let time = |t: x509_parser::time::ASN1Time| {
+        chrono::DateTime::from_timestamp(t.timestamp(), 0).unwrap_or_default()
+    };
+    let not_after = time(parsed.validity().not_after);
     let mut names = Vec::new();
     if let Ok(Some(alt)) = parsed.subject_alternative_name() {
         for name in &alt.value.general_names {
@@ -95,6 +104,7 @@ fn describe(der: &[u8]) -> Result<Found, String> {
     }
     Ok(Found {
         names,
+        not_before: time(parsed.validity().not_before),
         not_after,
         self_signed: parsed.issuer() == parsed.subject(),
     })
@@ -104,34 +114,43 @@ fn describe(der: &[u8]) -> Result<Found, String> {
 /// certificate first, then any chain) and its private key (`key`, PEM): both
 /// read, the key the certificate's, and the certificate within its dates.
 pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
-    use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .and_then(|found| found.collect())
-        .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?;
-    let Some(first) = certs.first() else {
-        return Err(format!("{} holds no certificate", cert.display()));
-    };
-    let private = PrivateKeyDer::from_pem_file(key)
-        .map_err(|error| format!("{}: not a PEM private key ({error})", key.display()))?;
-    let signing = rustls::crypto::ring::sign::any_supported_type(&private)
-        .map_err(|_| format!("{}: a kind of key this program cannot use", key.display()))?;
-    rustls::sign::CertifiedKey::new(certs.clone(), signing)
-        .keys_match()
-        .map_err(|_| format!("{} is not the key of {}", key.display(), cert.display()))?;
-    let (_, parsed) = x509_parser::parse_x509_certificate(first)
-        .map_err(|_| format!("{}: its certificate cannot be read", cert.display()))?;
-    let from = chrono::DateTime::from_timestamp(parsed.validity().not_before.timestamp(), 0)
-        .unwrap_or_default();
-    let found = describe(first).map_err(|why| format!("{}: {why}", cert.display()))?;
+    let certified = certified(cert, key)?;
+    let found = self::found(&certified).map_err(|why| format!("{}: {why}", cert.display()))?;
     let now = chrono::Utc::now();
-    if now < from {
-        return Err(format!("{} is good only from {from}", cert.display()));
+    if now < found.not_before {
+        return Err(format!(
+            "{} is good only from {}",
+            cert.display(),
+            found.not_before
+        ));
     }
     if now > found.not_after {
         return Err(format!("{} ended on {}", cert.display(), found.not_after));
     }
     Ok(found)
+}
+
+/// The certificate chain in `cert` (PEM: the site's own first) and its
+/// private key in `key` (PEM), ready to serve: both read, and the key the
+/// certificate's.
+pub fn certified(cert: &Path, key: &Path) -> Result<rustls::sign::CertifiedKey, String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .and_then(|found| found.collect())
+        .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?;
+    if certs.is_empty() {
+        return Err(format!("{} holds no certificate", cert.display()));
+    }
+    let private = PrivateKeyDer::from_pem_file(key)
+        .map_err(|error| format!("{}: not a PEM private key ({error})", key.display()))?;
+    let signing = rustls::crypto::ring::sign::any_supported_type(&private)
+        .map_err(|_| format!("{}: a kind of key this program cannot use", key.display()))?;
+    let certified = rustls::sign::CertifiedKey::new(certs, signing);
+    certified
+        .keys_match()
+        .map_err(|_| format!("{} is not the key of {}", key.display(), cert.display()))?;
+    Ok(certified)
 }
 
 /// Writes `bytes` to `path`, created with `mode` (an existing file keeps its

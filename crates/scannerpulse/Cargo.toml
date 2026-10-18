@@ -21,6 +21,7 @@ getrandom = "0.4"
 id3 = "1"
 include_dir = "0.7"
 inquire = "0.9"
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 notify = "8"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }

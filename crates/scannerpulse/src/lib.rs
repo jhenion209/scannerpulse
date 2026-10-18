@@ -2,11 +2,13 @@
 
 pub mod accounts;
 pub mod accuracy;
+pub mod acme;
 pub mod archive;
 pub mod asr;
 pub mod backfill;
 pub mod backup;
 pub mod cert;
+pub mod cloudflare;
 pub mod data;
 pub mod evaluation;
 pub mod favorites;
