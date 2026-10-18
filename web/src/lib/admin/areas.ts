@@ -3,6 +3,7 @@
 
 export const AREAS = [
   { id: 'status', label: 'Status' },
+  { id: 'machine', label: 'This machine' },
   { id: 'maintenance', label: 'Maintenance' },
   { id: 'transcription', label: 'Transcription' },
   { id: 'reports', label: 'Reports' },

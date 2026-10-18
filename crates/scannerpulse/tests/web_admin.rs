@@ -260,6 +260,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
         cert: Some(cert),
         backups: Some("/srv/backups".into()),
         pushes: vec!["dump"],
+        local_db: true,
     };
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
@@ -283,6 +284,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     assert_eq!(got.status, 200, "{:?}", got.body);
     let body = got.body;
     assert_eq!(body["host"], "radio-a");
+    assert_eq!(body["database"], "here");
     assert_eq!(body["certificate"]["names"], json!(["radio-a.example.org"]));
     assert_eq!(body["certificate"]["self_signed"], true);
     assert_eq!(body["backups"]["folder"], "/srv/backups");
