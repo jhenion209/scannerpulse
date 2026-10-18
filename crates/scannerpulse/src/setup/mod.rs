@@ -3,6 +3,7 @@
 
 pub mod apply;
 pub mod ask;
+pub mod change;
 pub mod folders;
 pub mod screen;
 pub mod steps;

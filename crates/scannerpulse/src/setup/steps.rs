@@ -814,7 +814,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
 /// The backups' steps, into `backups`: its folders kept to PostgreSQL and
 /// root, pgBackRest's settings, the WAL sent to it, the first full backup,
 /// and the nightly timer.
-fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path, system: &System) {
+pub(super) fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path, system: &System) {
     steps.push(run(
         "Make the folder of pgBackRest's backups",
         "install",

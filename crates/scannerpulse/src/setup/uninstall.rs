@@ -269,7 +269,7 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
 
 /// What the database says the folders are: the sources, and the primary
 /// location; and how many calls it holds.
-async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
+pub(super) async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
     use sqlx::Connection;
     let url = std::env::var("DATABASE_URL").ok()?;
     let connect = sqlx::PgConnection::connect(&url);

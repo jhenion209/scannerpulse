@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use scannerpulse::setup::change::Change;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -60,6 +62,9 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse cert make --cert FILE --key FILE NAME...
        scannerpulse setup [--answers FILE] [--dry-run]
        scannerpulse backup
+       scannerpulse tls install CERT KEY | tls self
+       scannerpulse backups push pgbackrest|dump URL|off
+       scannerpulse backups location FOLDER
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse --version
        scannerpulse --help
@@ -153,7 +158,13 @@ setup       make this machine a ScannerPulse site, as root: asks Simple or
             instead (NAME=value lines, mode 600), --dry-run changes nothing
 backup      take the nightly backups, as root (the backup timer runs it):
             pgBackRest (full on Sundays, differential otherwise) and a dump,
-            the newest 14 kept, into SCANNERPULSE_BACKUPS
+            the newest 14 kept, into SCANNERPULSE_BACKUPS; then each kind's
+            time for the admin page, and its push address if one is set
+tls         as root: install serves CERT and KEY (PEM, checked first) from
+            now on; self goes back to a certificate this machine makes
+backups     as root: push calls URL after each backup of that kind that
+            succeeds (off: none); location keeps the backups in FOLDER from
+            now on, starting with a full backup there (the old ones stay)
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
             the backups stay unless each is named, and each named one is
@@ -194,6 +205,7 @@ enum Command {
         dry_run: bool,
     },
     Backup,
+    Change(scannerpulse::setup::change::Change),
     Uninstall(scannerpulse::setup::uninstall::Remove),
     Talkgroups,
     TalkgroupSwitch {
@@ -499,6 +511,18 @@ fn parse(args: &[&str]) -> Option<Command> {
         }
         ["setup", rest @ ..] => parse_setup(rest),
         ["backup"] => Some(Command::Backup),
+        ["tls", "install", cert, key] => Some(Command::Change(Change::TlsInstall {
+            cert: PathBuf::from(cert),
+            key: PathBuf::from(key),
+        })),
+        ["tls", "self"] => Some(Command::Change(Change::TlsSelf)),
+        ["backups", "push", kind, url] => Some(Command::Change(Change::Push {
+            kind: kind.to_string(),
+            url: (*url != "off").then(|| url.to_string()),
+        })),
+        ["backups", "location", folder] => {
+            Some(Command::Change(Change::Location(PathBuf::from(folder))))
+        }
         ["uninstall", rest @ ..] => parse_uninstall(rest),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
@@ -786,6 +810,15 @@ async fn run() -> ExitCode {
             } else {
                 eprintln!("backup: {}", failed.join("; "));
                 ExitCode::FAILURE
+            }
+        }
+        Some(Command::Change(change)) => {
+            match scannerpulse::setup::change::run_change(change).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
             }
         }
         Some(Command::Uninstall(remove)) => {
@@ -1888,7 +1921,9 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Admin, Asr, Command, Data, Favorites, Jobs, Settings, parse, talkgroup_list};
+    use super::{
+        Admin, Asr, Change, Command, Data, Favorites, Jobs, Settings, parse, talkgroup_list,
+    };
 
     #[test]
     fn setup_takes_an_answers_file_and_a_dry_run_in_either_order() {
@@ -1911,6 +1946,45 @@ mod tests {
         assert_eq!(parse(&["setup", "now"]), None);
         assert_eq!(parse(&["backup"]), Some(Command::Backup));
         assert_eq!(parse(&["backup", "now"]), None);
+    }
+
+    #[test]
+    fn the_tls_and_backups_commands_name_their_change() {
+        assert_eq!(
+            parse(&["tls", "install", "/root/site.pem", "/root/site.key"]),
+            Some(Command::Change(Change::TlsInstall {
+                cert: "/root/site.pem".into(),
+                key: "/root/site.key".into(),
+            }))
+        );
+        assert_eq!(
+            parse(&["tls", "self"]),
+            Some(Command::Change(Change::TlsSelf))
+        );
+        assert_eq!(
+            parse(&["backups", "push", "dump", "off"]),
+            Some(Command::Change(Change::Push {
+                kind: "dump".into(),
+                url: None
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "backups",
+                "push",
+                "pgbackrest",
+                "https://kuma.example.org/api/push/x"
+            ]),
+            Some(Command::Change(Change::Push {
+                kind: "pgbackrest".into(),
+                url: Some("https://kuma.example.org/api/push/x".into())
+            }))
+        );
+        assert_eq!(
+            parse(&["backups", "location", "/srv/backups"]),
+            Some(Command::Change(Change::Location("/srv/backups".into())))
+        );
+        assert_eq!(parse(&["tls", "install", "/root/site.pem"]), None);
     }
 
     #[test]

@@ -84,6 +84,25 @@ pub fn render(pairs: &[(&str, &str)]) -> Result<String, String> {
     Ok(text)
 }
 
+/// The file's `text` with `name` set to `value`, or removed when `value` is
+/// `None`; the other lines keep their order.
+pub fn changed(text: &str, name: &str, value: Option<&str>) -> Result<String, String> {
+    let mut pairs = parse(text)?;
+    match (pairs.iter().position(|(n, _)| n == name), value) {
+        (Some(at), Some(value)) => pairs[at].1 = value.to_string(),
+        (Some(at), None) => {
+            pairs.remove(at);
+        }
+        (None, Some(value)) => pairs.push((name.to_string(), value.to_string())),
+        (None, None) => {}
+    }
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_str()))
+        .collect();
+    render(&pairs)
+}
+
 /// The file's pairs whose names `is_set` does not already claim: the ones a
 /// process should take. A missing file gives none.
 pub fn to_apply(
@@ -109,7 +128,7 @@ pub fn to_apply(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, render, to_apply};
+    use super::{changed, parse, render, to_apply};
 
     #[test]
     fn a_written_file_reads_back_the_same() {
@@ -142,6 +161,26 @@ mod tests {
         assert!(parse("not a pair").unwrap_err().starts_with("line 1"));
         assert!(parse("lower=1").is_err());
         assert!(parse("A=\"open").is_err());
+    }
+
+    #[test]
+    fn a_variable_is_set_replaced_or_removed_and_the_rest_kept() {
+        let text = render(&[("A", "1"), ("B", "2")]).unwrap();
+        let read = |t: &str| parse(t).unwrap();
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            read(&changed(&text, "B", Some("3")).unwrap()),
+            [s("A", "1"), s("B", "3")]
+        );
+        assert_eq!(
+            read(&changed(&text, "C", Some("4")).unwrap()),
+            [s("A", "1"), s("B", "2"), s("C", "4")]
+        );
+        assert_eq!(read(&changed(&text, "A", None).unwrap()), [s("B", "2")]);
+        assert_eq!(
+            read(&changed(&text, "C", None).unwrap()),
+            [s("A", "1"), s("B", "2")]
+        );
     }
 
     #[test]

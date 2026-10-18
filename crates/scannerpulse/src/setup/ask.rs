@@ -103,7 +103,7 @@ fn check_syslog(server: &str) -> Result<(), String> {
 /// A separate backup folder: a folder as the others are checked, inside
 /// neither the recordings folder nor the archive (whose own backup folder is
 /// the default), nor holding them.
-fn check_backups(
+pub(super) fn check_backups(
     path: &Path,
     recordings: &Path,
     archive: &Path,
@@ -126,7 +126,7 @@ fn check_backups(
 
 /// A push (heartbeat) address: http or https, such as an Uptime Kuma push
 /// monitor's, whose token may be in its path or its query.
-fn check_push(url: &str) -> Result<(), String> {
+pub(super) fn check_push(url: &str) -> Result<(), String> {
     let ok = reqwest::Url::parse(url).is_ok_and(|u| {
         matches!(u.scheme(), "http" | "https")
             && u.host_str().is_some()
