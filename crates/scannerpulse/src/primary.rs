@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgListener, PgNotification, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 
 pub const HOSTS: &str = "SCANNERPULSE_DATABASE_HOSTS";
@@ -180,6 +180,35 @@ pub fn pool(options: &PgConnectOptions, nodes: &[Node], settings: PgPoolOptions)
         }
     });
     pool
+}
+
+/// How long a listening connection may be quiet before it is asked to
+/// answer.
+pub const QUIET: Duration = Duration::from_secs(30);
+
+/// The next notification on `listener`; `None` when the connection was lost
+/// (sqlx has opened it again). A connection quiet for `quiet` must answer a
+/// query within as long: a primary whose machine vanished (its power, its
+/// network) never closes its connections, and a listener would otherwise
+/// wait on it for ever.
+pub async fn listened(
+    listener: &mut PgListener,
+    quiet: Duration,
+) -> sqlx::Result<Option<PgNotification>> {
+    loop {
+        if let Ok(heard) = tokio::time::timeout(quiet, listener.try_recv()).await {
+            return heard;
+        }
+        match tokio::time::timeout(quiet, sqlx::query("SELECT 1").execute(&mut *listener)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(sqlx::Error::Protocol(
+                    "the listening connection stopped answering".into(),
+                ));
+            }
+        }
+    }
 }
 
 /// DATABASE_URL's options, on the node that is the primary when the

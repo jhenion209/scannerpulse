@@ -77,3 +77,61 @@ async fn a_pool_moves_to_the_primary(pool: PgPool) {
     assert!(answered, "the pool reached the node that answers");
     assert_eq!(on.connect_options().get_port(), options.get_port());
 }
+
+/// A relay to the database that can go silent: it then passes nothing
+/// either way but keeps both connections open, as a machine that lost its
+/// power does.
+async fn relay(host: String, port: u16) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap().port();
+    let silent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let quiet = silent.clone();
+    tokio::spawn(async move {
+        while let Ok((inbound, _)) = listener.accept().await {
+            let Ok(outbound) = tokio::net::TcpStream::connect((host.as_str(), port)).await else {
+                continue;
+            };
+            let (ri, wi) = inbound.into_split();
+            let (ro, wo) = outbound.into_split();
+            for (mut from, mut to) in [(ri, wo), (ro, wi)].map(|(r, w)| (r, w)) {
+                let quiet = quiet.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    while let Ok(n @ 1..) = from.read(&mut buf).await {
+                        if quiet.load(Ordering::SeqCst) {
+                            std::future::pending::<()>().await;
+                        }
+                        if to.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+    });
+    (local, silent)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_listener_notices_a_database_that_went_silent(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    let options = (*pool.connect_options()).clone();
+    let (port, silent) = relay(options.get_host().to_string(), options.get_port()).await;
+    let through = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_lazy_with(options.clone().host("127.0.0.1").port(port));
+    let mut listener = sqlx::postgres::PgListener::connect_with(&through)
+        .await
+        .unwrap();
+    listener.listen("scannerpulse_test").await.unwrap();
+    silent.store(true, Ordering::SeqCst);
+    // Without a bound, it would wait on the silent connection for ever.
+    let heard = tokio::time::timeout(
+        Duration::from_secs(10),
+        primary::listened(&mut listener, Duration::from_millis(500)),
+    )
+    .await;
+    assert!(matches!(heard, Ok(Err(_))), "{heard:?}");
+}

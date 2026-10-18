@@ -855,8 +855,14 @@ async fn rescan_loop(
             let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
             listener.listen(RESCAN_CHANNEL).await?;
             loop {
-                listener.recv().await?;
-                let _ = rescans.send(());
+                // A connection lost is opened again (`None`); one gone quiet
+                // with its machine is an error, and the loop starts over.
+                if crate::primary::listened(&mut listener, crate::primary::QUIET)
+                    .await?
+                    .is_some()
+                {
+                    let _ = rescans.send(());
+                }
             }
             #[allow(unreachable_code)]
             Ok::<(), sqlx::Error>(())

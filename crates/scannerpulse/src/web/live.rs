@@ -90,9 +90,11 @@ async fn listen(pool: &PgPool, feed: &Feed, lost: bool) -> sqlx::Result<()> {
         let _ = feed.send(Arc::new(Event::Resync));
     }
     loop {
-        // `try_recv` gives `None` when the connection was lost: notifications
-        // sent meanwhile are gone, so the pages must read again.
-        let Some(note) = listener.try_recv().await? else {
+        // `None` when the connection was lost, or a vanished primary's went
+        // quiet: notifications sent meanwhile are gone, so the pages must
+        // read again.
+        let Some(note) = crate::primary::listened(&mut listener, crate::primary::QUIET).await?
+        else {
             return Err(sqlx::Error::Protocol(
                 "the listening connection was lost".into(),
             ));
