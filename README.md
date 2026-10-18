@@ -200,21 +200,23 @@ for the first). The joining machine reads its place over SSH, installs
 PostgreSQL 17, lets in only this machine and the other database machine
 (TLS and a password), and the second copies the first and follows it. Each
 lets this machine's key run only `scannerpulse node serve` (status, stop,
-promote, follow). Then this machine makes the tables and starts. Its
+start, promote, follow). Then this machine makes the tables and starts. Its
 services are given both machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on
 the one that is the primary, moving to the other within seconds after a
-change of roles. The primary keeps a nightly dump in
+change of roles; a former primary that comes back still a primary is
+ignored, as the promoted machine is on a newer timeline. The primary keeps a nightly dump in
 `/var/backups/scannerpulse` (the newest 14).
 
 - If the primary dies, run `sudo scannerpulse db promote` on the standby. It
   is refused while the other machine still answers as the primary, so two
   primaries never write at once.
 - When the old primary is back, `sudo scannerpulse db rejoin` there makes it
-  the new primary's standby: rewound to where their histories split, or,
+  the new primary's standby (so does a standby that has stopped receiving): rewound to where their histories split, or,
   if that fails and you agree, copied whole.
 - `sudo scannerpulse db switchover` on this machine swaps the roles while
   both are healthy and the standby is caught up: writes pause for seconds,
-  and nothing is lost.
+  and nothing is lost. The standby is promoted only once it has everything
+  the stopped primary wrote; otherwise the primary starts again unchanged.
 
 An unattended join reads `JOIN` (the first machine's address) and, unless
 the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers
