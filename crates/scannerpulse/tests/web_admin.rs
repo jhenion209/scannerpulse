@@ -247,3 +247,49 @@ async fn a_new_system_order_shows_in_the_filter_choices_at_once(pool: PgPool) {
     let again = send(&app, "GET", "/api/filters", &[], None).await;
     assert_eq!(systems(&again.body), ["ALPHA", "BRAVO"]);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    scannerpulse::cert::make(&["radio-a.example.org".into()], &cert, &key).unwrap();
+    let mut state =
+        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.host = "radio-a".into();
+    state.machine = scannerpulse::web::Machine {
+        cert: Some(cert),
+        backups: Some("/srv/backups".into()),
+        pushes: vec!["dump"],
+    };
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    assert_eq!(
+        send(&app, "GET", "/api/admin/machine", &[], None)
+            .await
+            .status,
+        401
+    );
+    scannerpulse::backup::record(&pool, "dump").await.unwrap();
+    let (cookie, _) = signed(&pool, &app).await;
+    let got = send(
+        &app,
+        "GET",
+        "/api/admin/machine",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    let body = got.body;
+    assert_eq!(body["host"], "radio-a");
+    assert_eq!(body["certificate"]["names"], json!(["radio-a.example.org"]));
+    assert_eq!(body["certificate"]["self_signed"], true);
+    assert_eq!(body["backups"]["folder"], "/srv/backups");
+    assert!(body["backups"]["kinds"]["dump"]["newest"].is_string());
+    assert_eq!(body["backups"]["kinds"]["dump"]["push"], true);
+    assert!(body["backups"]["kinds"]["pgbackrest"]["newest"].is_null());
+    assert_eq!(body["backups"]["kinds"]["pgbackrest"]["push"], false);
+    let text = body.to_string();
+    assert!(!text.contains("http"), "no push address is shown: {text}");
+}

@@ -36,6 +36,7 @@ async fn web_serves_https_with_a_made_certificate_and_nothing_in_plain_text() {
         static_dir: None,
         host: "tls-test".into(),
         oidc_secret: None,
+        machine: Default::default(),
         tls: Some(Tls {
             cert: cert_path.clone(),
             key: key_path,
@@ -102,6 +103,7 @@ async fn run_refuses_plain_http_off_loopback_for_any_caller() {
         static_dir: None,
         host: "tls-test".into(),
         oidc_secret: None,
+        machine: Default::default(),
         tls: None,
     };
     let error = web::run(config, std::future::pending()).await.unwrap_err();

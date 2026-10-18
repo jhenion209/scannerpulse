@@ -129,6 +129,47 @@ pub const TRAFFIC_FOR: std::time::Duration = std::time::Duration::from_secs(600)
 /// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
 /// minutes on each host, since it reads months of calls; a changed time zone
 /// makes it again.
+/// `GET /api/admin/machine`: this machine's certificate, its backups'
+/// folder, the age of each kind's newest backup, and which kinds push; the
+/// admin page shows how to change each with a command run here as root.
+pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let certificate = state
+        .machine
+        .cert
+        .as_ref()
+        .map(|path| match crate::cert::read(path) {
+            Ok(found) => serde_json::json!({
+                "names": found.names,
+                "not_after": found.not_after,
+                "self_signed": found.self_signed,
+            }),
+            Err(why) => serde_json::json!({ "error": why }),
+        });
+    let backups = match &state.machine.backups {
+        None => Value::Null,
+        Some(folder) => {
+            let newest = crate::backup::newest(&state.pool).await?;
+            let kinds: serde_json::Map<String, Value> = crate::backup::KINDS
+                .iter()
+                .map(|kind| {
+                    let at = newest.iter().find(|(k, _)| k == kind).map(|(_, at)| *at);
+                    let push = state.machine.pushes.contains(kind);
+                    (
+                        kind.to_string(),
+                        serde_json::json!({ "newest": at, "push": push }),
+                    )
+                })
+                .collect();
+            serde_json::json!({ "folder": folder, "kinds": kinds })
+        }
+    };
+    Ok(Json(serde_json::json!({
+        "host": state.host,
+        "certificate": certificate,
+        "backups": backups,
+    })))
+}
+
 pub async fn traffic(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let zone = crate::settings::load(&state.pool).await?.time_zone;
     let mut kept = state.traffic.lock().await;

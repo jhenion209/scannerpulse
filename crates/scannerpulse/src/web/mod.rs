@@ -61,6 +61,21 @@ pub struct Config {
     /// The certificate and key `web` serves HTTPS with; without them it
     /// serves plain HTTP, on a loopback address only.
     pub tls: Option<Tls>,
+    /// What the settings file says of this machine, for the admin page.
+    pub machine: Machine,
+}
+
+/// What this machine's settings file says of it, for the admin page's
+/// "This machine": never a secret, only whether one is set.
+#[derive(Clone, Debug, Default)]
+pub struct Machine {
+    /// The certificate served.
+    pub cert: Option<PathBuf>,
+    /// Where the backups go (SCANNERPULSE_BACKUPS); none with a database
+    /// the person runs.
+    pub backups: Option<PathBuf>,
+    /// The backup kinds with a push address.
+    pub pushes: Vec<&'static str>,
 }
 
 /// A certificate and its private key, as PEM files.
@@ -97,6 +112,7 @@ impl std::fmt::Debug for Config {
                 &self.oidc_secret.as_ref().map(|_| "<hidden>"),
             )
             .field("tls", &self.tls)
+            .field("machine", &self.machine)
             .finish()
     }
 }
@@ -139,6 +155,18 @@ impl Config {
                 );
             }
         };
+        let machine = Machine {
+            cert: tls.as_ref().map(|t| t.cert.clone()),
+            backups: path("SCANNERPULSE_BACKUPS"),
+            pushes: crate::backup::KINDS
+                .into_iter()
+                .filter(|kind| {
+                    crate::backup::push_var(kind)
+                        .and_then(std::env::var_os)
+                        .is_some_and(|url| !url.is_empty())
+                })
+                .collect(),
+        };
         Ok(Config {
             database,
             listen,
@@ -146,6 +174,7 @@ impl Config {
             host,
             oidc_secret,
             tls,
+            machine,
         })
     }
 }
@@ -185,6 +214,8 @@ pub struct AppState {
         Arc<tokio::sync::Mutex<Option<(std::time::Instant, chrono_tz::Tz, serde_json::Value)>>>,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
+    /// What the settings file says of this machine.
+    pub machine: Machine,
 }
 
 impl AppState {
@@ -209,6 +240,7 @@ impl AppState {
             live: live::feed(),
             shutdown: tokio::sync::watch::channel(false).0,
             static_dir: None,
+            machine: Machine::default(),
         }
     }
 }
@@ -248,6 +280,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/viewers", get(viewers::list))
         .route("/api/admin/rescan", post(admin::rescan))
         .route("/api/admin/status", get(admin::status))
+        .route("/api/admin/machine", get(admin::machine))
         .route("/api/admin/reports/traffic", get(admin::traffic))
         .route("/api/admin/talkgroups", get(transcription::talkgroups))
         .route(
@@ -359,6 +392,7 @@ pub async fn run(
     state.static_dir = config.static_dir;
     state.host = config.host;
     state.oidc_secret = config.oidc_secret;
+    state.machine = config.machine;
     live::spawn(state.pool.clone(), state.live.clone());
     viewers::spawn(state.clone());
     let stop_live = state.shutdown.clone();

@@ -45,43 +45,27 @@ pub fn make(names: &[String], cert: &Path, key: &Path) -> Result<(), String> {
 pub struct Found {
     pub names: Vec<String>,
     pub not_after: chrono::DateTime<chrono::Utc>,
+    /// It signed itself, as the certificate setup makes does.
+    pub self_signed: bool,
 }
 
-/// Checks a certificate an administrator gives (`cert`, PEM: the site's own
-/// certificate first, then any chain) and its private key (`key`, PEM): both
-/// read, the key the certificate's, and the certificate within its dates.
-pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
+/// What the certificate in `cert` (PEM, the site's own first) says of
+/// itself.
+pub fn read(cert: &Path) -> Result<Found, String> {
     use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .and_then(|found| found.collect())
+    let first = rustls::pki_types::CertificateDer::pem_file_iter(cert)
+        .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?
+        .next()
+        .ok_or_else(|| format!("{} holds no certificate", cert.display()))?
         .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?;
-    let Some(first) = certs.first() else {
-        return Err(format!("{} holds no certificate", cert.display()));
-    };
-    let private = PrivateKeyDer::from_pem_file(key)
-        .map_err(|error| format!("{}: not a PEM private key ({error})", key.display()))?;
-    let signing = rustls::crypto::ring::sign::any_supported_type(&private)
-        .map_err(|_| format!("{}: a kind of key this program cannot use", key.display()))?;
-    rustls::sign::CertifiedKey::new(certs.clone(), signing)
-        .keys_match()
-        .map_err(|_| format!("{} is not the key of {}", key.display(), cert.display()))?;
-    let (_, parsed) = x509_parser::parse_x509_certificate(first)
-        .map_err(|_| format!("{}: its certificate cannot be read", cert.display()))?;
-    let at = |time: &x509_parser::time::ASN1Time| {
-        chrono::DateTime::from_timestamp(time.timestamp(), 0).unwrap_or_default()
-    };
-    let (from, until) = (
-        at(&parsed.validity().not_before),
-        at(&parsed.validity().not_after),
-    );
-    let now = chrono::Utc::now();
-    if now < from {
-        return Err(format!("{} is good only from {from}", cert.display()));
-    }
-    if now > until {
-        return Err(format!("{} ended on {until}", cert.display()));
-    }
+    describe(&first).map_err(|why| format!("{}: {why}", cert.display()))
+}
+
+fn describe(der: &[u8]) -> Result<Found, String> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(der)
+        .map_err(|_| "its certificate cannot be read".to_string())?;
+    let not_after = chrono::DateTime::from_timestamp(parsed.validity().not_after.timestamp(), 0)
+        .unwrap_or_default();
     let mut names = Vec::new();
     if let Ok(Some(alt)) = parsed.subject_alternative_name() {
         for name in &alt.value.general_names {
@@ -111,8 +95,43 @@ pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
     }
     Ok(Found {
         names,
-        not_after: until,
+        not_after,
+        self_signed: parsed.issuer() == parsed.subject(),
     })
+}
+
+/// Checks a certificate an administrator gives (`cert`, PEM: the site's own
+/// certificate first, then any chain) and its private key (`key`, PEM): both
+/// read, the key the certificate's, and the certificate within its dates.
+pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .and_then(|found| found.collect())
+        .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?;
+    let Some(first) = certs.first() else {
+        return Err(format!("{} holds no certificate", cert.display()));
+    };
+    let private = PrivateKeyDer::from_pem_file(key)
+        .map_err(|error| format!("{}: not a PEM private key ({error})", key.display()))?;
+    let signing = rustls::crypto::ring::sign::any_supported_type(&private)
+        .map_err(|_| format!("{}: a kind of key this program cannot use", key.display()))?;
+    rustls::sign::CertifiedKey::new(certs.clone(), signing)
+        .keys_match()
+        .map_err(|_| format!("{} is not the key of {}", key.display(), cert.display()))?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(first)
+        .map_err(|_| format!("{}: its certificate cannot be read", cert.display()))?;
+    let from = chrono::DateTime::from_timestamp(parsed.validity().not_before.timestamp(), 0)
+        .unwrap_or_default();
+    let found = describe(first).map_err(|why| format!("{}: {why}", cert.display()))?;
+    let now = chrono::Utc::now();
+    if now < from {
+        return Err(format!("{} is good only from {from}", cert.display()));
+    }
+    if now > found.not_after {
+        return Err(format!("{} ended on {}", cert.display(), found.not_after));
+    }
+    Ok(found)
 }
 
 /// Writes `bytes` to `path`, created with `mode` (an existing file keeps its
