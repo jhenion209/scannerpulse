@@ -67,9 +67,23 @@ pub fn sha256(data: &[u8]) -> Digest32 {
 /// The SHA-256 and the size of a file, read in full.
 pub fn file_digest(path: &Path) -> io::Result<(Digest32, u64)> {
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let size = io::copy(&mut file, &mut hasher)?;
-    Ok((hasher.finalize().into(), size))
+    let mut hashing = Hashing(Sha256::new());
+    let size = io::copy(&mut file, &mut hashing)?;
+    Ok((hashing.0.finalize().into(), size))
+}
+
+/// A hasher that `io::copy` can write into (sha2 has no `std` side).
+struct Hashing(Sha256);
+
+impl io::Write for Hashing {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.0.update(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Where a file belongs in its folder.
