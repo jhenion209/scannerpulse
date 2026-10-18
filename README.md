@@ -178,7 +178,7 @@ so the page shows the command, run on the machine:
   and checks that it may edit each name's zone, by writing and removing a TXT
   record there). The site keeps serving its
   certificate until the new one arrives; This machine shows the request's
-  outcome and each renewal. `tls install` and `tls self` turn Let's Encrypt
+  outcome and the last request. `tls install` and `tls self` turn Let's Encrypt
   off, another authority named for it included;
 - `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump` asks for a
   push address and sets it, with the database on this machine (with no terminal it reads the first line of
@@ -287,7 +287,8 @@ already set in the environment wins. So far:
   `/var/lib/scannerpulse/acme` and serving that pair until it arrives;
   `dns-cloudflare` needs `SCANNERPULSE_CLOUDFLARE_TOKEN`, and
   `SCANNERPULSE_ACME_DIRECTORY` names another ACME authority (Let's
-  Encrypt's staging one, say, or a private one), and
+  Encrypt's staging one, say, or a private one, whose own certificate must
+  then be in the system's store of authorities), and
   `SCANNERPULSE_CLOUDFLARE_API` a stand-in for Cloudflare's API, for a
   trial. Without them it serves plain HTTP,
   and only on a loopback address such as `127.0.0.1`, where a browser treats

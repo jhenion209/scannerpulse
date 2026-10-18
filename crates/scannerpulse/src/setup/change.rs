@@ -390,6 +390,16 @@ mod tests {
             ]
         );
         assert!(!settings(&steps).contains("ACME"), "Let's Encrypt is off");
+        let own = super::tls_self_steps(
+            &with_acme,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &["radio-a".to_string()],
+        )
+        .unwrap();
+        assert!(
+            !settings(&own).contains("ACME"),
+            "tls self turns it off too"
+        );
     }
 
     #[test]
