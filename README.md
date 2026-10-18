@@ -106,6 +106,18 @@ archive and how many calls it holds, and only a Yes leads to typing its name.
 and so does the database), with certificate errors ignored while the site
 uses setup's own certificate. `/health` says only that the process is up.
 
+**Updates.** Setup does not turn on automatic updates for the system.
+PostgreSQL and pgBackRest come from the PostgreSQL project's repository (and
+EPEL on the Red Hat family), so the system's own updates keep them patched.
+Debian's and Ubuntu's `unattended-upgrades` leaves that repository out unless
+told otherwise: add `"origin=apt.postgresql.org";` to
+`Unattended-Upgrade::Origins-Pattern` in a file under `/etc/apt/apt.conf.d/`.
+On the Red Hat family, `dnf-automatic` covers every enabled repository,
+that one included. ScannerPulse itself is one program: running the install
+script again installs the latest release, and
+`sudo systemctl restart scannerpulse-web scannerpulse-ingest` puts it to
+work.
+
 ## Commands
 
 `scannerpulse --help` lists them. Every command first reads the machine's
