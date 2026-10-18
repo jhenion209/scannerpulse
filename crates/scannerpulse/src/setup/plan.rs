@@ -96,6 +96,14 @@ impl Plan {
     }
 }
 
+/// The database's password in a plan kept for the same machines: setup
+/// run again on the first machine keeps it, since the first database
+/// machine already holds it.
+pub fn kept_password(kept: Option<Plan>, nodes: &[String]) -> Option<String> {
+    kept.filter(|plan| plan.nodes == nodes)
+        .map(|plan| plan.password)
+}
+
 /// The addresses `name` resolves to (an address resolves to itself).
 pub fn resolve(name: &str) -> Vec<IpAddr> {
     use std::net::ToSocketAddrs;
@@ -149,6 +157,19 @@ mod tests {
         };
         assert_eq!(plan.place(&["192.0.2.21".into()], dns), Some(0));
         assert_eq!(plan.place(&["web.example.org".into()], none), None);
+    }
+
+    #[test]
+    fn setup_run_again_for_the_same_machines_keeps_the_databases_password() {
+        // The first machine holds the password the plan gave it.
+        let nodes = plan().nodes;
+        assert_eq!(
+            super::kept_password(Some(plan()), &nodes).as_deref(),
+            Some("app-secret-1")
+        );
+        let other = vec!["db1.example.org".to_string(), "db3.example.org".to_string()];
+        assert_eq!(super::kept_password(Some(plan()), &other), None);
+        assert_eq!(super::kept_password(None, &nodes), None);
     }
 
     #[test]

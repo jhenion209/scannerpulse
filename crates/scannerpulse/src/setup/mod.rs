@@ -96,7 +96,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         }
     };
     let made_password = crate::sessions::random_hex(24);
-    let steps = loop {
+    let (steps, db_password) = loop {
         if answers.database == steps::Database::Here {
             system::other_postgres(&seen)?;
         }
@@ -137,7 +137,11 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             }
         }
         let db_password = match &answers.database {
-            steps::Database::Here | steps::Database::Nodes(_) => made_password.clone(),
+            steps::Database::Here => made_password.clone(),
+            steps::Database::Nodes(pair) => {
+                plan::kept_password(plan::Plan::read(Path::new(plan::PLAN)).ok(), &pair.nodes)
+                    .unwrap_or_else(|| made_password.clone())
+            }
             steps::Database::Theirs(remote) => remote.password.clone(),
         };
         let steps = steps::steps(&answers, &system, Path::new(BINARY), &db_password);
@@ -157,10 +161,10 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             return Ok(());
         }
         if answers_file.is_some() {
-            break steps;
+            break (steps, db_password);
         }
         match ask::next()? {
-            ask::Next::Go => break steps,
+            ask::Next::Go => break (steps, db_password),
             ask::Next::Quit => {
                 println!("Nothing was changed.");
                 return Ok(());
@@ -182,10 +186,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             .find(|(name, _)| *name == "DATABASE_URL")
             .map(|(_, url)| url)
             .unwrap_or_default(),
-        db_password: match &answers.database {
-            steps::Database::Here | steps::Database::Nodes(_) => made_password,
-            steps::Database::Theirs(remote) => remote.password.clone(),
-        },
+        db_password,
     };
     apply::apply(&steps, &context, true).await?;
     print!("{}", finished(&answers));
