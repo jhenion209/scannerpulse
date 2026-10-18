@@ -43,7 +43,11 @@ async fn healthz_fails_when_the_database_cannot_be_reached(pool: PgPool) {
         .unwrap()
         .port();
     let nowhere = PgConnectOptions::new().host("127.0.0.1").port(port);
-    let (status, body) = get(app(&pool, nowhere), "/healthz").await;
+    // The check asks the node the pool works on: after a failover, the
+    // new primary.
+    let lost = PgPool::connect_lazy_with(nowhere);
+    let options = (*pool.connect_options()).clone();
+    let (status, body) = get(app(&lost, options), "/healthz").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         body,

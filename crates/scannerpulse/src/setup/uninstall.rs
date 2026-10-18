@@ -271,12 +271,9 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
 /// What the database says the folders are: the sources, and the primary
 /// location; and how many calls it holds.
 pub(super) async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
-    use sqlx::Connection;
     let url = std::env::var("DATABASE_URL").ok()?;
-    let connect = sqlx::PgConnection::connect(&url);
-    let mut conn = tokio::time::timeout(std::time::Duration::from_secs(5), connect)
+    let mut conn = crate::primary::connect(&url, std::time::Duration::from_secs(5))
         .await
-        .ok()?
         .ok()?;
     let sources: Vec<String> = sqlx::query_scalar("SELECT path FROM sources ORDER BY id")
         .fetch_all(&mut conn)

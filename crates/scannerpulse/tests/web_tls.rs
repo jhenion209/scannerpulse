@@ -37,6 +37,7 @@ async fn web_serves_https_with_a_made_certificate_and_nothing_in_plain_text() {
         host: "tls-test".into(),
         oidc_secret: None,
         machine: Default::default(),
+        nodes: Vec::new(),
         acme_dir: Default::default(),
         tls: Some(Tls {
             cert: cert_path.clone(),
@@ -105,6 +106,7 @@ async fn run_refuses_plain_http_off_loopback_for_any_caller() {
         host: "tls-test".into(),
         oidc_secret: None,
         machine: Default::default(),
+        nodes: Vec::new(),
         acme_dir: Default::default(),
         tls: None,
     };
@@ -160,6 +162,7 @@ async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
             }),
             ..Default::default()
         },
+        nodes: Vec::new(),
         acme_dir: kept.clone(),
         tls: Some(Tls {
             cert: own,

@@ -63,6 +63,9 @@ pub struct Config {
     pub tls: Option<Tls>,
     /// What the settings file says of this machine, for the admin page.
     pub machine: Machine,
+    /// Every database node, when there is more than one: the web works on
+    /// the primary.
+    pub nodes: Vec<crate::primary::Node>,
     /// Where Let's Encrypt's account and certificate are kept.
     pub acme_dir: PathBuf,
 }
@@ -185,6 +188,7 @@ impl Config {
             oidc_secret,
             tls,
             machine,
+            nodes: crate::primary::from_env()?,
             acme_dir: PathBuf::from(crate::acme::STATE),
         })
     }
@@ -400,10 +404,13 @@ pub async fn run(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
     check_listen(config.listen, config.tls.is_some())?;
-    let pool = PgPoolOptions::new()
-        .max_connections(20)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect_lazy_with(config.database.clone());
+    let pool = crate::primary::pool(
+        &config.database,
+        &config.nodes,
+        PgPoolOptions::new()
+            .max_connections(20)
+            .acquire_timeout(Duration::from_secs(5)),
+    );
     crate::settings::follow_syslog(pool.clone(), "scannerpulse-web");
     let mut state = AppState::new(pool, config.database);
     state.static_dir = config.static_dir;
@@ -480,7 +487,8 @@ async fn health() -> &'static str {
 /// and it is the primary: a standby cannot take a person's edit.
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     let check = async {
-        let mut conn = PgConnection::connect_with(&state.database).await?;
+        // The node the pool works on: the primary, after a failover too.
+        let mut conn = PgConnection::connect_with(&state.pool.connect_options()).await?;
         let standby: bool = sqlx::query_scalar("SELECT pg_is_in_recovery()")
             .fetch_one(&mut conn)
             .await?;

@@ -16,6 +16,7 @@ const NAME: &str = "20310115_120000SYSC_East_Charlie__TO_330_FROM_5150.mp3";
 fn config(pool: &PgPool) -> Config {
     Config {
         database: (*pool.connect_options()).clone(),
+        nodes: Vec::new(),
         host: "host-a".to_string(),
         preferred: true,
         lease: Timings {

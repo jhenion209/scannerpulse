@@ -15,8 +15,8 @@ use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
 use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, talkgroups, web};
 use serde_json::json;
+use sqlx::Row;
 use sqlx::postgres::PgConnection;
-use sqlx::{Connection, Row};
 
 /// How long a command waits for the database server to accept the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -910,15 +910,7 @@ async fn shutdown() {
 /// CONNECT_TIMEOUT.
 async fn connect() -> Result<PgConnection, Box<dyn std::error::Error>> {
     let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set")?;
-    let conn = tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(&url))
-        .await
-        .map_err(|_| {
-            format!(
-                "the database server did not answer within {} seconds",
-                CONNECT_TIMEOUT.as_secs()
-            )
-        })??;
-    Ok(conn)
+    Ok(scannerpulse::primary::connect(&url, CONNECT_TIMEOUT).await?)
 }
 
 async fn lease_status() -> ExitCode {
@@ -1344,7 +1336,7 @@ async fn status_command() -> CommandResult {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(CONNECT_TIMEOUT)
-        .connect(&url)
+        .connect_with(scannerpulse::primary::options(&url).await?)
         .await?;
     let status = scannerpulse::status::read(&pool).await?;
     println!("{}", serde_json::to_string_pretty(&status)?);
@@ -1862,14 +1854,13 @@ async fn backup_succeeded(kind: &str, database_url: &str) {
             "backup: the {kind} backup's time was not kept: {why}"
         ))
     };
-    match tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(database_url)).await {
-        Ok(Ok(mut conn)) => {
+    match scannerpulse::primary::connect(database_url, CONNECT_TIMEOUT).await {
+        Ok(mut conn) => {
             if let Err(error) = scannerpulse::backup::record(&mut conn, kind).await {
                 not_kept(error.to_string());
             }
         }
-        Ok(Err(error)) => not_kept(error.to_string()),
-        Err(_) => not_kept("the database did not answer".into()),
+        Err(why) => not_kept(why),
     }
     if let Some(var) = scannerpulse::backup::push_var(kind)
         && let Ok(url) = std::env::var(var)

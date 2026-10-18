@@ -73,6 +73,9 @@ const PASS_SIZE: i64 = 20;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database: PgConnectOptions,
+    /// Every database node, when there is more than one: ingest works on
+    /// the primary.
+    pub nodes: Vec<crate::primary::Node>,
     /// The host's name in the lease.
     pub host: String,
     /// True on one host of a pair.
@@ -118,6 +121,7 @@ impl Config {
         };
         Ok(Config {
             database,
+            nodes: crate::primary::from_env()?,
             host,
             preferred,
             lease: Timings::default(),
@@ -294,25 +298,28 @@ fn lock<T>(counts: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// lease is released, so that the other host takes it at its next round.
 pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Result<(), String> {
     tokio::pin!(stop);
-    let pool = PgPoolOptions::new()
-        // Held at once: the lease, the rescan listener (for its whole life),
-        // a job step (up to the request limit), and one each for the file,
-        // transcribe, watch and maintenance loops; the eighth is headroom
-        // (and the syslog setting's check, a moment each minute).
-        .max_connections(8)
-        .acquire_timeout(RETRY)
-        // A connection given back after a cancelled call is pinged before it
-        // goes back to the pool, with no limit of its own: on a dead socket it
-        // would stay checked out until TCP gives up. Past 2 s it is closed.
-        .after_release(|conn, _| {
-            Box::pin(async move {
-                match tokio::time::timeout(Duration::from_secs(2), conn.ping()).await {
-                    Ok(answer) => answer.map(|()| true),
-                    Err(_) => Err(store::timed_out(Duration::from_secs(2))),
-                }
-            })
-        })
-        .connect_lazy_with(config.database.clone());
+    let pool = crate::primary::pool(
+        &config.database,
+        &config.nodes,
+        PgPoolOptions::new()
+            // Held at once: the lease, the rescan listener (for its whole life),
+            // a job step (up to the request limit), and one each for the file,
+            // transcribe, watch and maintenance loops; the eighth is headroom
+            // (and the syslog setting's check, a moment each minute).
+            .max_connections(8)
+            .acquire_timeout(RETRY)
+            // A connection given back after a cancelled call is pinged before it
+            // goes back to the pool, with no limit of its own: on a dead socket it
+            // would stay checked out until TCP gives up. Past 2 s it is closed.
+            .after_release(|conn, _| {
+                Box::pin(async move {
+                    match tokio::time::timeout(Duration::from_secs(2), conn.ping()).await {
+                        Ok(answer) => answer.map(|()| true),
+                        Err(_) => Err(store::timed_out(Duration::from_secs(2))),
+                    }
+                })
+            }),
+    );
     crate::settings::follow_syslog(pool.clone(), "scannerpulse-ingest");
     let setup = loop {
         tokio::select! {
@@ -466,7 +473,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         ),
     ];
     let lease_task = tokio::spawn(lease_loop(
-        config.database.clone(),
+        pool.clone(),
         lease.clone(),
         healthy.clone(),
         busy.clone(),
@@ -541,7 +548,8 @@ async fn bounded<T>(round: impl Future<Output = sqlx::Result<T>>) -> Result<T, S
 }
 
 async fn lease_loop(
-    options: PgConnectOptions,
+    // Its own connection, made on the node the pool works on: the primary.
+    pool: PgPool,
     lease: Arc<Lease>,
     healthy: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
@@ -551,7 +559,7 @@ async fn lease_loop(
     let mut was_held = false;
     loop {
         if conn.is_none() {
-            match connect_lease(&options).await {
+            match connect_lease(&pool.connect_options()).await {
                 Ok(new) => conn = Some(new),
                 Err(error) => log::warn(format!("the lease cannot reach the database: {error}")),
             }
@@ -589,7 +597,7 @@ async fn lease_loop(
         }
     }
     if conn.is_none() {
-        conn = connect_lease(&options).await.ok();
+        conn = connect_lease(&pool.connect_options()).await.ok();
     }
     match conn.as_mut() {
         Some(c) => match tokio::time::timeout(ROUND_LIMIT, lease.release(c)).await {
