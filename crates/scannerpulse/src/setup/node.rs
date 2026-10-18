@@ -318,13 +318,15 @@ pub fn steps(
         &[("KEY", plan.hub_key.trim())],
         Some(authorized_line(&plan.hub_key, hub, binary)),
     ));
+    // Open to all, as the nightly dump (postgres) looks in it for a settings
+    // file; this machine's file in it is root's alone.
     steps.push(run(
         "Make the settings folder",
         "install",
         &[
             "-d",
             "-m",
-            "0700",
+            "0755",
             "-o",
             "root",
             "-g",
@@ -1053,6 +1055,12 @@ mod tests {
             panic!()
         };
         assert_eq!(*mode, 0o600);
+        // The nightly dump runs as postgres, and every command first looks
+        // for the settings file there: none on a database machine.
+        let Action::Run { args, .. } = &first[at(&one, "Make the settings folder")].action else {
+            panic!()
+        };
+        assert_eq!(args[..3], ["-d", "-m", "0755"]);
         let file: NodeFile = serde_json::from_str(contents).unwrap();
         assert_eq!(file.index, 0);
         assert_eq!(file.other(), "db2.example.org");
