@@ -398,6 +398,58 @@ fn transcription_values_are_checked_even_while_it_is_off() {
 }
 
 #[test]
+fn the_syslog_server_is_udp_or_tcp_with_a_host() {
+    for good in [
+        "udp://192.0.2.30:514",
+        "tcp://logs.example.org:6514",
+        "udp://[2001:db8::30]:514",
+        "udp://192.0.2.30",
+    ] {
+        assert!(!refused("logs.syslog", Some(json!(good)), &[]), "{good}");
+    }
+    for bad in [
+        "192.0.2.30:514",
+        "http://192.0.2.30",
+        "udp://",
+        "tcp://192.0.2.30:0",
+        "udp://a@192.0.2.30",
+        "udp://192.0.2.30/x",
+    ] {
+        assert!(refused("logs.syslog", Some(json!(bad)), &[]), "{bad}");
+    }
+    assert!(refused("logs.syslog", Some(json!(514)), &[]));
+    assert!(!refused("logs.syslog", None, &[]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_service_follows_the_syslog_setting(pool: PgPool) -> sqlx::Result<()> {
+    let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_millis(10)))
+        .unwrap();
+    let mut conn = pool.acquire().await?;
+    let value = json!(format!("udp://{}", server.local_addr().unwrap()));
+    settings::change(&mut conn, "logs.syslog", Some(&value))
+        .await
+        .unwrap();
+    settings::follow_syslog(pool.clone(), "scannerpulse-test");
+    let mut got = [0u8; 512];
+    let mut heard = None;
+    for _ in 0..25 {
+        scannerpulse::log::info("following");
+        // The follower runs on this test's one thread: give it a turn.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Ok(n) = server.recv(&mut got) {
+            heard = Some(String::from_utf8_lossy(&got[..n]).into_owned());
+            break;
+        }
+    }
+    let heard = heard.expect("a line reached the server");
+    assert!(heard.ends_with("- - following"), "{heard}");
+    Ok(())
+}
+
+#[test]
 fn the_web_services_settings_have_their_forms() {
     assert!(!refused("maintenance.enabled", Some(json!(true)), &[]));
     assert!(refused("maintenance.enabled", Some(json!("on")), &[]));

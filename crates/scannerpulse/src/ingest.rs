@@ -297,7 +297,8 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
     let pool = PgPoolOptions::new()
         // Held at once: the lease, the rescan listener (for its whole life),
         // a job step (up to the request limit), and one each for the file,
-        // transcribe, watch and maintenance loops; the eighth is headroom.
+        // transcribe, watch and maintenance loops; the eighth is headroom
+        // (and the syslog setting's check, a moment each minute).
         .max_connections(8)
         .acquire_timeout(RETRY)
         // A connection given back after a cancelled call is pinged before it
@@ -312,6 +313,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
             })
         })
         .connect_lazy_with(config.database.clone());
+    crate::settings::follow_syslog(pool.clone(), "scannerpulse-ingest");
     let setup = loop {
         tokio::select! {
             _ = &mut stop => {

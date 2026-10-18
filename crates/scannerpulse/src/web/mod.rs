@@ -354,6 +354,7 @@ pub async fn run(
         .max_connections(20)
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy_with(config.database.clone());
+    crate::settings::follow_syslog(pool.clone(), "scannerpulse-web");
     let mut state = AppState::new(pool, config.database);
     state.static_dir = config.static_dir;
     state.host = config.host;

@@ -400,12 +400,35 @@ pub const WEB_KEYS: [&str; 9] = [
     "oidc.redirect_url",
 ];
 
+/// The settings every service reads: the syslog server its lines also go
+/// to (`udp://host:port` or `tcp://host:port`; unset, the journal only).
+pub const LOG_KEYS: [&str; 1] = ["logs.syslog"];
+
+/// Keeps this process's syslog server in step with `logs.syslog`, read now
+/// and each minute after; a database that does not answer leaves it as it
+/// was.
+pub fn follow_syslog(pool: sqlx::PgPool, app: &'static str) {
+    tokio::spawn(async move {
+        loop {
+            let value: sqlx::Result<Option<Value>> =
+                sqlx::query_scalar("SELECT value FROM settings WHERE key = 'logs.syslog'")
+                    .fetch_optional(&pool)
+                    .await;
+            if let Ok(value) = value {
+                crate::log::syslog(value.as_ref().and_then(Value::as_str), app);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+}
+
 /// Every setting some part of the program reads.
 pub fn known() -> impl Iterator<Item = &'static str> {
     KEYS.iter()
         .chain(&TRANSCRIPTION_KEYS)
         .chain(&IMPROVEMENT_KEYS)
         .chain(&WEB_KEYS)
+        .chain(&LOG_KEYS)
         .copied()
 }
 
@@ -468,6 +491,16 @@ pub fn check(
     }
     if IMPROVEMENT_KEYS.contains(&key) {
         return improvement_from_values(&after).map(drop);
+    }
+    if LOG_KEYS.contains(&key) {
+        return match after.get(key) {
+            None => Ok(()),
+            Some(value) if value.as_str().and_then(crate::log::target).is_some() => Ok(()),
+            Some(value) => Err(invalid(
+                "logs.syslog",
+                format!("{value} is not udp://host:port or tcp://host:port"),
+            )),
+        };
     }
     let Some(&key) = WEB_KEYS.iter().find(|k| **k == key) else {
         // A row no part reads (left by SQL or an older version) may be cleared.
