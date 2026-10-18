@@ -19,12 +19,23 @@ export interface BackupKind {
   push: boolean;
 }
 
+/** Let's Encrypt, when it gives the certificate: how the names are proved,
+ * and the last request. */
+export interface Acme {
+  proof: 'web' | 'dns-cloudflare';
+  names: string[];
+  tried: string | null;
+  renewed: string | null;
+  error: string | null;
+}
+
 export interface MachineInfo {
   host: string;
   /** Where the database runs: one setup installed here (it keeps backups),
    * or one the person runs. */
   database: 'here' | 'theirs';
   certificate: MachineCertificate | null;
+  acme: Acme | null;
   /** Null when the database is one the person runs, with its own backups. */
   backups: { folder: string; kinds: Record<string, BackupKind> } | null;
 }
@@ -46,6 +57,23 @@ export function certificateEnd(notAfter: string, now: Date): { text: string; ok:
   return { text: `ends in ${durationText(ms)}`, ok: ms > 30 * 86_400_000 };
 }
 
+/** How Let's Encrypt is shown the names, in words. */
+export const proofName = (proof: Acme['proof']) =>
+  proof === 'web' ? 'over the web' : 'through DNS at Cloudflare';
+
+/** Let's Encrypt's last request, and whether it needs a look. */
+export function renewalText(acme: Acme, now: Date): { text: string; ok: boolean } {
+  const ago = (at: string) => `${durationText(Math.max(0, now.getTime() - new Date(at).getTime()))} ago`;
+  if (acme.error !== null && acme.tried !== null) {
+    return { text: `the request ${ago(acme.tried)} failed: ${acme.error} (asked again within the hour)`, ok: false };
+  }
+  if (acme.tried !== null && (acme.renewed === null || new Date(acme.renewed) < new Date(acme.tried))) {
+    return { text: `asked ${ago(acme.tried)}, no answer yet`, ok: true };
+  }
+  if (acme.renewed !== null) return { text: `renewed ${ago(acme.renewed)}`, ok: true };
+  return { text: 'renewed when a third of its life is left', ok: true };
+}
+
 /** A kind of backup in words. */
 export const kindName = (kind: string) => ({ pgbackrest: 'pgBackRest', dump: 'Dump' })[kind] ?? kind;
 
@@ -53,6 +81,10 @@ export const kindName = (kind: string) => ({ pgbackrest: 'pgBackRest', dump: 'Du
 export const COMMANDS = {
   certificate: 'sudo /usr/local/bin/scannerpulse tls install /path/to/cert.pem /path/to/key.pem',
   ownCertificate: 'sudo /usr/local/bin/scannerpulse tls self',
+  letsEncryptWeb: 'sudo /usr/local/bin/scannerpulse tls letsencrypt web site.example.org',
+  // The token is asked for, never typed as an argument.
+  letsEncryptDns:
+    'sudo /usr/local/bin/scannerpulse tls letsencrypt dns-cloudflare site.example.org    (asks for the Cloudflare token)',
   // It asks for the address, which holds a token, so it is never typed as an argument.
   push: (kind: string) => `sudo /usr/local/bin/scannerpulse backups push ${kind}    (asks for the address; off removes it)`,
   location: 'sudo /usr/local/bin/scannerpulse backups location /path/to/folder',

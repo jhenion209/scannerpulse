@@ -13,4 +13,5 @@ test('this machine says what it serves and how each part is changed', async ({ p
   await expect(page.getByText("The site serves plain HTTP on this machine's own address only.")).toBeVisible();
   await expect(page.getByText('The database is one you run: its backups are yours.')).toBeVisible();
   await expect(page.getByText('sudo /usr/local/bin/scannerpulse tls install', { exact: false })).toBeVisible();
+  await expect(page.getByText('tls letsencrypt dns-cloudflare', { exact: false })).toBeVisible();
 });

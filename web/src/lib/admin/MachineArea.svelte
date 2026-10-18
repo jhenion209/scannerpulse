@@ -2,7 +2,15 @@
   import { onMount } from 'svelte';
   import { callTime } from '../format';
   import { siteZone } from '../status.svelte';
-  import { backupAge, certificateEnd, COMMANDS, kindName, type MachineInfo } from './machine';
+  import {
+    backupAge,
+    certificateEnd,
+    COMMANDS,
+    kindName,
+    proofName,
+    renewalText,
+    type MachineInfo,
+  } from './machine';
   import { admin, why } from './session.svelte';
 
   let data = $state<MachineInfo | null>(null);
@@ -49,9 +57,23 @@
         <dd>{data.certificate.self_signed ? 'itself: browsers warn once' : 'an authority'}</dd>
       </dl>
     {/if}
-    <p>To serve your own certificate, or go back to this machine's own:</p>
+    {#if data.acme}
+      {@const renewal = renewalText(data.acme, now())}
+      <dl class="facts">
+        <dt>From</dt>
+        <dd>Let's Encrypt, for {data.acme.names.join(', ')}, proved {proofName(data.acme.proof)}</dd>
+        <dt>Renewal</dt>
+        <dd><span class={renewal.ok ? '' : 'flag'}>{renewal.text}</span></dd>
+      </dl>
+    {/if}
+    <p>
+      To serve your own certificate, go back to this machine's own, or have Let's Encrypt's (proved over the web
+      when port 443 reaches this machine from the internet, or through DNS at Cloudflare):
+    </p>
     <pre><code>{COMMANDS.certificate}
-{COMMANDS.ownCertificate}</code></pre>
+{COMMANDS.ownCertificate}
+{COMMANDS.letsEncryptWeb}
+{COMMANDS.letsEncryptDns}</code></pre>
 
     <h2>Backups</h2>
     {#if data.backups === null}
