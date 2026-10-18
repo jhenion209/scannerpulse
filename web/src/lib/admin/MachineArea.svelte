@@ -78,6 +78,6 @@
 </section>
 
 <style>
-  pre { margin: 0.4rem 0 0; padding: 0.6rem 0.8rem; overflow-x: auto; border-radius: 4px; background: var(--panel, rgba(127, 127, 127, 0.1)); }
-  code { font-size: 0.9rem; white-space: pre; }
+  pre { margin: 0.4rem 0 0; padding: 0.6rem 0.8rem; border-radius: 4px; background: var(--panel, rgba(127, 127, 127, 0.1)); }
+  code { font-size: 0.9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
