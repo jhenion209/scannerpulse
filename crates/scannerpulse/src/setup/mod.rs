@@ -146,7 +146,6 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             steps::Database::Here => made_password,
             steps::Database::Theirs(remote) => remote.password.clone(),
         },
-        cert: steps::cert_path(),
     };
     apply::apply(&steps, &context, true).await?;
     print!("{}", finished(&answers));

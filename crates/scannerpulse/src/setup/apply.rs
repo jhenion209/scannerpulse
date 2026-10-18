@@ -17,7 +17,6 @@ pub const WEB_WAIT: Duration = Duration::from_secs(60);
 pub struct Context {
     pub database_url: String,
     pub db_password: String,
-    pub cert: std::path::PathBuf,
 }
 
 /// Runs `steps`, saying each; `quiet` keeps a step's own output (apt's, for
@@ -67,9 +66,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                     .await
                     .map_err(fail)?;
             }
-            Action::WaitForWeb { port } => {
-                wait_for_web(&context.cert, *port).await.map_err(fail)?
-            }
+            Action::WaitForWeb { port } => wait_for_web(*port).await.map_err(fail)?,
         }
     }
     Ok(())
@@ -187,11 +184,12 @@ pub async fn first_admin(
 }
 
 /// Waits until `web` answers `/health` over HTTPS with the certificate setup made.
-async fn wait_for_web(cert: &Path, port: u16) -> Result<(), String> {
-    let pem = std::fs::read(cert).map_err(|error| format!("{}: {error}", cert.display()))?;
-    let ca = reqwest::Certificate::from_pem(&pem).map_err(|error| error.to_string())?;
+/// Waits until `web` answers on this machine. Its certificate is not
+/// checked: one the person installs names their site, not 127.0.0.1, and
+/// nothing secret goes to the loopback address.
+async fn wait_for_web(port: u16) -> Result<(), String> {
     let client = reqwest::Client::builder()
-        .add_root_certificate(ca)
+        .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|error| error.to_string())?;
@@ -239,7 +237,6 @@ mod tests {
         Context {
             database_url: String::new(),
             db_password: String::new(),
-            cert: "/nonexistent".into(),
         }
     }
 
