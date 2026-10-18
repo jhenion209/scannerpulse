@@ -34,8 +34,8 @@ real machine SELinux, which they enforce, may keep PostgreSQL from archiving
 its WAL into the backups folder, and setup would then stop at "Take the
 first full backup".
 
-`scannerpulse setup` asks first for **Simple** or **Advanced** (Advanced
-arrives in a later version). Simple asks, explaining each first:
+`scannerpulse setup` asks first for **Simple** or **Advanced**. Simple asks,
+explaining each first:
 
 1. the recordings folder, where SDRTrunk (or another recorder) saves its
    files; ScannerPulse reads each new file and moves it into the archive;
@@ -74,6 +74,29 @@ until you say so. It:
 The site is then at `https://<this machine>/`, and the admin page at
 `/admin.html`.
 
+**Advanced** asks Simple's questions and, before them:
+
+1. where the database runs: on this machine, as Simple does, or a PostgreSQL
+   17 database you run (its host, port, database, role and password). Setup
+   checks that it answers, is version 17, and that the role may make tables
+   there; it then installs no PostgreSQL here and takes no backups, which
+   stay yours, and `uninstall` never drops that database;
+2. the certificate: setup's own, or yours (a PEM certificate with its chain
+   and its key, checked to belong together and to be within their dates);
+3. the reverse proxies in front of the site, if any (`web.trusted_proxies`),
+   so the visitors' own addresses are read from them;
+4. a syslog server the logs also go to (`udp://host:port` or
+   `tcp://host:port`, RFC 5424; `logs.syslog`), besides the journal;
+5. the HTTPS port.
+
+After Simple's questions, with the database on this machine, it asks where
+the backups go (the archive's `.scannerpulse-backups`, or a folder you name
+outside the recordings folder and the archive) and, for each kind, a push
+address to call after each backup that succeeds: an Uptime Kuma push
+monitor's, say, with an interval of a day and a little more. Push addresses
+carry a token, so they are kept in the settings file, not the database.
+Let's Encrypt and high availability come in later versions.
+
 For an unattended install, `setup --answers FILE` reads the answers from a
 file of `NAME="value"` lines, readable by its owner only:
 
@@ -86,6 +109,24 @@ ADMIN_PASSWORD="a long password"
 TIME_ZONE="America/Chicago"
 TRANSCRIPTION_URL="http://192.0.2.20:8000/v1/audio/transcriptions"
 TRANSCRIPTION_MODEL="Systran/faster-whisper-medium.en"
+```
+
+Advanced's answers have names too, each optional:
+
+```
+DATABASE="theirs"          # or "here", the default; "theirs" needs:
+DB_HOST="db.example.org"
+DB_PORT="5432"
+DB_NAME="scannerpulse"
+DB_ROLE="scannerpulse"
+DB_PASSWORD="its password"
+CERT_FILE="/root/site.pem" # with KEY_FILE, or neither
+KEY_FILE="/root/site.key"
+PROXIES="192.0.2.5 192.0.2.6"
+SYSLOG="udp://192.0.2.30:514"
+BACKUPS="/srv/backups"     # with the database here only
+PUSH_PGBACKREST="https://uptime.example.org/api/push/abc123?status=up"
+PUSH_DUMP="https://uptime.example.org/api/push/def456?status=up"
 ```
 
 `PORT` is optional too: without it setup takes 443, or the next free port;
@@ -103,10 +144,26 @@ its name. Backups kept inside the archive stay too, even with
 `--remove-archive` first asks a Yes/No question (default No) naming the
 archive and how many calls it holds, and only a Yes leads to typing its name.
 
+**Later changes.** The admin page's **This machine** shows the certificate
+(its names and end), the backups' folder and how old each kind's newest
+backup is. Logs and reverse proxies are in its Settings. The rest needs root,
+so the page shows the command, run on the machine:
+
+- `sudo /usr/local/bin/scannerpulse tls install CERT KEY` serves your
+  certificate from now on (checked first); `tls self` goes back to one the
+  machine makes;
+- `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump URL` sets a
+  push address (`off` removes it);
+- `sudo /usr/local/bin/scannerpulse backups location FOLDER` keeps the
+  backups in FOLDER from now on, starting with a full backup there; the old
+  ones stay where they were until you remove them.
+
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
 `https://<this machine>/healthz` expecting 200 (the web interface answers
 and so does the database), with certificate errors ignored while the site
 uses setup's own certificate. `/health` says only that the process is up.
+For the backups, a push monitor for each kind (above), with an interval of a
+day and a few hours: a backup missed or failed turns it red.
 
 **Updates.** Setup does not turn on automatic updates for the system.
 PostgreSQL and pgBackRest come from the PostgreSQL project's repository (and
@@ -128,7 +185,11 @@ settings file, `/etc/scannerpulse/scannerpulse.env` (or the file named by
 which the services also read as their systemd `EnvironmentFile`. A variable
 already set in the environment wins. So far:
 
-- `setup`, `uninstall` and `backup` are described under Install.
+- `setup`, `uninstall`, `backup`, `tls` and `backups` are described under
+  Install. `backup` reads `SCANNERPULSE_BACKUPS` and the push addresses
+  `SCANNERPULSE_BACKUP_PUSH_PGBACKREST` and `SCANNERPULSE_BACKUP_PUSH_DUMP`;
+  `web` reads the same to show them on the admin page (whether a push
+  address is set, never the address).
 - `db-update` creates or updates the database schema.
 - `ingest` watches the source folders and files each new call into the
   archive. Two hosts can run it side by side: a lease in the database lets one
@@ -262,6 +323,9 @@ already set in the environment wins. So far:
   - `/api/admin/viewers`: every open page of every host (its address,
     whether that address is local, its browser and whether an admin opened
     it), refreshed every 30 seconds; a page's row goes when it closes;
+  - `/api/admin/machine`: this host's certificate (names, end, whether it
+    signed itself), where its database runs, its backups' folder, and each
+    kind's newest backup and whether it pushes;
   - `/api/admin/jobs` lists the jobs, `/api/admin/jobs/<id>` shows one and
     `POST /api/admin/jobs/<id>/stop` stops it; `GET /api/admin/jobs/queue`
     (`talkgroup_id`, `from`, `to`) counts the calls a queue job would take
