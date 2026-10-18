@@ -68,7 +68,8 @@ pub struct Config {
 }
 
 /// What this machine's settings file says of it, for the admin page's
-/// "This machine": never a secret, only whether one is set.
+/// "This machine". The admin API shows no secret from it: only whether a
+/// push address is set, and never the Cloudflare token `acme` holds.
 #[derive(Clone, Debug, Default)]
 pub struct Machine {
     /// The certificate served.
