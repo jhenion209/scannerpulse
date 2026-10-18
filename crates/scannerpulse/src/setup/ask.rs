@@ -8,7 +8,7 @@ use inquire::validator::Validation;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
 
 use super::folders::{self, size};
-use super::steps::{Answers, Certificate, Database, Remote, Transcription};
+use super::steps::{Answers, Certificate, Database, Remote, SslMode, Transcription};
 
 /// What setup proposes before asking.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,12 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
     }
     if let Database::Theirs(remote) = &answers.database {
         check_remote_form(remote)?;
+        if let Some(ca) = &remote.root_cert {
+            if remote.sslmode != SslMode::VerifyFull {
+                return Err("a CA certificate for the database goes only with verify-full".into());
+            }
+            crate::cert::read(ca)?;
+        }
     }
     if let Certificate::Installed { cert, key } = &answers.certificate {
         crate::cert::check(cert, key)?;
@@ -199,15 +205,22 @@ pub async fn check_database(options: sqlx::postgres::PgConnectOptions) -> Result
 
 /// `check_database` for a database the person names.
 pub async fn check_remote(remote: &Remote) -> Result<String, String> {
-    check_database(
-        sqlx::postgres::PgConnectOptions::new()
-            .host(&remote.host)
-            .port(remote.port)
-            .database(&remote.name)
-            .username(&remote.role)
-            .password(&remote.password),
-    )
-    .await
+    use sqlx::postgres::PgSslMode;
+    let mut options = sqlx::postgres::PgConnectOptions::new()
+        .host(&remote.host)
+        .port(remote.port)
+        .database(&remote.name)
+        .username(&remote.role)
+        .password(&remote.password)
+        .ssl_mode(match remote.sslmode {
+            SslMode::Prefer => PgSslMode::Prefer,
+            SslMode::Require => PgSslMode::Require,
+            SslMode::VerifyFull => PgSslMode::VerifyFull,
+        });
+    if let Some(ca) = &remote.root_cert {
+        options = options.ssl_root_cert(ca);
+    }
+    check_database(options).await
 }
 
 fn check_zone(zone: &str) -> Result<(), String> {
@@ -293,6 +306,13 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
             name: need("DB_NAME")?,
             role: need("DB_ROLE")?,
             password: need("DB_PASSWORD")?,
+            sslmode: match get("DB_SSLMODE") {
+                None => SslMode::Prefer,
+                Some(mode) => SslMode::parse(&mode).ok_or_else(|| {
+                    format!("DB_SSLMODE is {mode:?}: prefer, require or verify-full")
+                })?,
+            },
+            root_cert: get("DB_SSLROOTCERT").map(PathBuf::from),
         }),
         Some(other) => return Err(format!("DATABASE is {other:?}: here or theirs")),
     };
@@ -674,12 +694,56 @@ fn ask_database(previous: Option<&Database>) -> Result<Database, inquire::Inquir
             .without_confirmation()
             .prompt()?,
     };
+    let modes = [
+        (
+            SslMode::Prefer,
+            "Encrypted when the server offers it (prefer)",
+        ),
+        (SslMode::Require, "Always encrypted (require)"),
+        (
+            SslMode::VerifyFull,
+            "Always encrypted, the server's certificate checked against its name (verify-full)",
+        ),
+    ];
+    let start = had
+        .and_then(|r| modes.iter().position(|(m, _)| *m == r.sslmode))
+        .unwrap_or(0);
+    let chosen = Select::new(
+        "The connection to it:",
+        modes.iter().map(|(_, label)| *label).collect(),
+    )
+    .with_starting_cursor(start)
+    .prompt()?;
+    let sslmode = modes
+        .iter()
+        .find(|(_, label)| *label == chosen)
+        .expect("a choice")
+        .0;
+    let root_cert = if sslmode == SslMode::VerifyFull {
+        let ca = text(
+            "The CA certificate that signed the server's (a PEM file), or nothing when a public authority signed it:",
+            had.and_then(|r| r.root_cert.as_deref())
+                .map(|p| p.to_str().unwrap_or_default()),
+            |p| {
+                if p.is_empty() {
+                    Ok(())
+                } else {
+                    crate::cert::read(Path::new(p)).map(drop)
+                }
+            },
+        )?;
+        (!ca.is_empty()).then(|| PathBuf::from(ca))
+    } else {
+        None
+    };
     Ok(Database::Theirs(Remote {
         host,
         port,
         name,
         role,
         password,
+        sslmode,
+        root_cert,
     }))
 }
 
@@ -1044,6 +1108,7 @@ mod tests {
                 name: "calls".into(),
                 role: "sp".into(),
                 password: "se:cret".into(),
+                ..Default::default()
             })
         );
         assert_eq!(
@@ -1055,6 +1120,17 @@ mod tests {
         );
         assert_eq!(answers.proxies, ["192.0.2.5", "2001:db8::5"]);
         assert_eq!(answers.syslog.as_deref(), Some("udp://192.0.2.30:514"));
+        let checked_tls = format!(
+            "{base}DATABASE=theirs\nDB_HOST=h\nDB_NAME=n\nDB_ROLE=r\nDB_PASSWORD=p\nDB_SSLMODE=verify-full\nDB_SSLROOTCERT={}\n",
+            cert.display()
+        );
+        let answers =
+            from_file(&answers_file(dir.path(), &checked_tls, 0o600), &defaults()).unwrap();
+        let Database::Theirs(remote) = answers.database else {
+            panic!()
+        };
+        assert_eq!(remote.sslmode, crate::setup::steps::SslMode::VerifyFull);
+        assert_eq!(remote.root_cert, Some(cert.clone()));
         let refused = |extra: &str, why: &str| {
             let error = from_file(
                 &answers_file(dir.path(), &format!("{base}{extra}"), 0o600),
@@ -1073,6 +1149,25 @@ mod tests {
         refused(
             "DATABASE=theirs\nDB_HOST=h\nDB_NAME=n\nDB_ROLE=r\nDB_PASSWORD=p\nPUSH_DUMP=https://kuma.example.org/api/push/x\n",
             "keeps its own backups",
+        );
+        let remote = "DATABASE=theirs\nDB_HOST=h\nDB_NAME=n\nDB_ROLE=r\nDB_PASSWORD=p\n";
+        refused(
+            &format!("{remote}DB_SSLMODE=allow\n"),
+            "prefer, require or verify-full",
+        );
+        refused(
+            &format!(
+                "{remote}DB_SSLMODE=require\nDB_SSLROOTCERT={}\n",
+                cert.display()
+            ),
+            "only with verify-full",
+        );
+        refused(
+            &format!(
+                "{remote}DB_SSLMODE=verify-full\nDB_SSLROOTCERT={}\n",
+                dir.path().join("none.pem").display()
+            ),
+            "none.pem",
         );
         refused(
             &format!("BACKUPS={}\n", arc.join("inner").display()),

@@ -62,13 +62,50 @@ pub enum Database {
 }
 
 /// A database the person runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Remote {
     pub host: String,
     pub port: u16,
     pub name: String,
     pub role: String,
     pub password: String,
+    pub sslmode: SslMode,
+    /// The CA certificate (PEM) that signed the server's, for `VerifyFull`
+    /// when no public authority did; copied to `db_ca_path()`.
+    pub root_cert: Option<PathBuf>,
+}
+
+/// How the connection to a database the person runs is protected, by
+/// PostgreSQL's names for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SslMode {
+    /// Encrypted when the server offers it.
+    #[default]
+    Prefer,
+    /// Always encrypted; the server's certificate is not checked.
+    Require,
+    /// Always encrypted, and the server's certificate checked against its
+    /// name.
+    VerifyFull,
+}
+
+impl SslMode {
+    pub fn parse(name: &str) -> Option<SslMode> {
+        match name {
+            "prefer" => Some(SslMode::Prefer),
+            "require" => Some(SslMode::Require),
+            "verify-full" => Some(SslMode::VerifyFull),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SslMode::Prefer => "prefer",
+            SslMode::Require => "require",
+            SslMode::VerifyFull => "verify-full",
+        }
+    }
 }
 
 impl Remote {
@@ -85,6 +122,14 @@ impl Remote {
         let _ = url.set_port(Some(self.port));
         let _ = url.set_username(&self.role);
         url.set_path(&self.name);
+        if self.sslmode != SslMode::Prefer {
+            url.query_pairs_mut()
+                .append_pair("sslmode", self.sslmode.name());
+        }
+        if self.root_cert.is_some() {
+            url.query_pairs_mut()
+                .append_pair("sslrootcert", &db_ca_path().display().to_string());
+        }
         url.to_string()
     }
 
@@ -202,6 +247,9 @@ pub fn cert_path() -> PathBuf {
 }
 pub fn key_path() -> PathBuf {
     Path::new(ETC).join("tls/key.pem")
+}
+pub fn db_ca_path() -> PathBuf {
+    Path::new(ETC).join("db-ca.pem")
 }
 /// The backups' folder inside the archive; the dot keeps it from ever
 /// reading as a date folder.
@@ -610,6 +658,26 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             owner: format!("{ACCOUNT}:{ACCOUNT}"),
         },
     });
+    if let Database::Theirs(Remote {
+        root_cert: Some(ca),
+        ..
+    }) = &answers.database
+    {
+        steps.push(run(
+            "Copy the database's CA certificate",
+            "install",
+            &[
+                "-m",
+                "0644",
+                "-o",
+                "root",
+                "-g",
+                ACCOUNT,
+                &ca.display().to_string(),
+                &db_ca_path().display().to_string(),
+            ],
+        ));
+    }
     let pairs = env_pairs(answers);
     let rendered: Vec<(&str, &str)> = pairs.iter().map(|(n, v)| (*n, v.as_str())).collect();
     steps.push(Step {
@@ -1465,6 +1533,7 @@ mod tests {
                 name: "calls".into(),
                 role: "sp".into(),
                 password: "se:cret".into(),
+                ..Default::default()
             }),
             ..answers()
         }
@@ -1534,6 +1603,65 @@ mod tests {
     }
 
     #[test]
+    fn a_database_you_run_can_require_tls_or_a_checked_certificate() {
+        let mut remote = super::Remote {
+            host: "db.example.org".into(),
+            port: 5432,
+            name: "calls".into(),
+            role: "sp".into(),
+            password: "p".into(),
+            ..Default::default()
+        };
+        assert_eq!(remote.url(), "postgres://sp@db.example.org:5432/calls");
+        remote.sslmode = super::SslMode::Require;
+        assert_eq!(
+            remote.url(),
+            "postgres://sp@db.example.org:5432/calls?sslmode=require"
+        );
+        remote.sslmode = super::SslMode::VerifyFull;
+        remote.root_cert = Some("/root/db-ca.pem".into());
+        assert_eq!(
+            remote.url(),
+            "postgres://sp@db.example.org:5432/calls?sslmode=verify-full&sslrootcert=%2Fetc%2Fscannerpulse%2Fdb-ca.pem"
+        );
+        remote
+            .url()
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .unwrap();
+        let answers = Answers {
+            database: Database::Theirs(remote),
+            ..theirs()
+        };
+        let all = steps(
+            &answers,
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "unused",
+        );
+        let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+        let Action::Run { program, args, .. } =
+            &all[at("Copy the database's CA certificate")].action
+        else {
+            panic!()
+        };
+        assert_eq!(program, "install");
+        assert_eq!(
+            args,
+            &[
+                "-m",
+                "0644",
+                "-o",
+                "root",
+                "-g",
+                "scannerpulse",
+                "/root/db-ca.pem",
+                "/etc/scannerpulse/db-ca.pem"
+            ]
+        );
+        assert!(at("Copy the database's CA certificate") < at("Make the database's tables"));
+    }
+
+    #[test]
     fn an_address_with_odd_characters_stays_one_address() {
         let remote = super::Remote {
             host: "2001:db8::40".into(),
@@ -1541,6 +1669,7 @@ mod tests {
             name: "radio calls".into(),
             role: "sp@site".into(),
             password: "a\\b:c".into(),
+            ..Default::default()
         };
         assert_eq!(
             remote.url(),

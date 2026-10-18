@@ -204,8 +204,12 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
                 system.postgres_data()
             ),
             steps::Database::Theirs(remote) => format!(
-                "yours: {} on {}:{}, as {}",
-                remote.name, remote.host, remote.port, remote.role
+                "yours: {} on {}:{}, as {}, TLS {}",
+                remote.name,
+                remote.host,
+                remote.port,
+                remote.role,
+                remote.sslmode.name()
             ),
         },
         match steps::backups_folder(answers) {

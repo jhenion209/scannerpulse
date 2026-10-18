@@ -19,6 +19,7 @@ fn the_services_read_back_the_password_setup_wrote() {
             name: "calls".into(),
             role: "sp".into(),
             password: "se:cret".into(),
+            ..Default::default()
         },
         Remote {
             host: "2001:db8::40".into(),
@@ -26,6 +27,7 @@ fn the_services_read_back_the_password_setup_wrote() {
             name: "radio calls".into(),
             role: "sp@site".into(),
             password: "a\\b:c d".into(),
+            ..Default::default()
         },
     ] {
         std::fs::write(&path, remote.pgpass_line()).unwrap();
