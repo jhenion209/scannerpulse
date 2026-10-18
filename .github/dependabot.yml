@@ -9,13 +9,6 @@ updates:
     groups:
       cargo:
         update-types: [minor, patch]
-    ignore:
-      # jsonwebtoken 10 and later need a crypto backend chosen: aws-lc-rs
-      # (C, a harder static build) or RustCrypto (which builds rsa, open
-      # advisory RUSTSEC-2023-0071). 9 uses ring, as rustls here does; the
-      # weekly audit says if 9 needs leaving.
-      - dependency-name: jsonwebtoken
-        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: /web
     schedule:
