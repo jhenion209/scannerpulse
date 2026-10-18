@@ -84,7 +84,7 @@ The site is then at `https://<this machine>/`, and the admin page at
    certificate you give). Setup checks that it answers, is version 17, and
    that the role may make tables there; it then installs no PostgreSQL here
    and takes no backups, which stay yours, and `uninstall` never drops that
-   database;
+   database; or two database machines of its own (below);
 2. the certificate: setup's own; yours (a PEM certificate with its chain and
    its key, checked to belong together and to be within their dates); or
    Let's Encrypt's, which the site gets and renews by itself, a third of the
@@ -188,6 +188,40 @@ so the page shows the command, run on the machine:
   backups in FOLDER from now on, starting with a full backup there; the old
   ones stay where they were until you remove them.
 
+**Two database machines.** Advanced can put the database on two machines
+of its own: the first starts as the primary, and the second keeps a live
+copy as its standby. This machine (the install's first) plans them: their
+names or addresses, and its own address as they reach it. It writes the plan
+and a key of its own for them, installs itself, and waits. On each database
+machine, run the install line and `sudo /usr/local/bin/scannerpulse setup`,
+choose Advanced and then "join an existing install", and give the first
+machine's address and a login there that may use sudo (the second waits
+for the first). The joining machine reads its place over SSH, installs
+PostgreSQL 17, lets in only this machine and the other database machine
+(TLS and a password), and the second copies the first and follows it. Each
+lets this machine's key run only `scannerpulse node serve` (status, stop,
+promote, follow). Then this machine makes the tables and starts. Its
+services are given both machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on
+the one that is the primary, moving to the other within seconds after a
+change of roles. The primary keeps a nightly dump in
+`/var/backups/scannerpulse` (the newest 14).
+
+- If the primary dies, run `sudo scannerpulse db promote` on the standby. It
+  is refused while the other machine still answers as the primary, so two
+  primaries never write at once.
+- When the old primary is back, `sudo scannerpulse db rejoin` there makes it
+  the new primary's standby: rewound to where their histories split, or,
+  if that fails and you agree, copied whole.
+- `sudo scannerpulse db switchover` on this machine swaps the roles while
+  both are healthy and the standby is caught up: writes pause for seconds,
+  and nothing is lost.
+
+An unattended join reads `JOIN` (the first machine's address) and, unless
+the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers
+file; SSH must not ask for a password then. The first machine's answers
+file sets `DATABASE="nodes"`, `DB_NODES="db1.example.org db2.example.org"`
+and, if its own address is not the one other machines reach, `HUB`.
+
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
 `https://<this machine>/healthz` expecting 200 (the web interface answers
 and so does the database), with certificate errors ignored while the site
@@ -222,6 +256,10 @@ already set in the environment wins. So far:
   `web` reads the same to show them on the admin page (whether a push
   address is set, never the address).
 - `db-update` creates or updates the database schema.
+- `db promote`, `db rejoin` and `db switchover`, as root, change the two
+  database machines' roles (above); `node serve`, `node status` and `node
+  backup` are a database machine's own, and `join info` and `join done` the
+  first machine's side of a join.
 - `ingest` watches the source folders and files each new call into the
   archive. Two hosts can run it side by side: a lease in the database lets one
   of them work at a time, and the other takes over when it stops. It reads
