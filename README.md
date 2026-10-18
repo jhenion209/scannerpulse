@@ -286,7 +286,9 @@ already set in the environment wins. So far:
   `/var/lib/scannerpulse/acme` and serving that pair until it arrives;
   `dns-cloudflare` needs `SCANNERPULSE_CLOUDFLARE_TOKEN`, and
   `SCANNERPULSE_ACME_DIRECTORY` names another ACME authority (Let's
-  Encrypt's staging one, say, or a private one). Without them it serves plain HTTP,
+  Encrypt's staging one, say, or a private one), and
+  `SCANNERPULSE_CLOUDFLARE_API` a stand-in for Cloudflare's API, for a
+  trial. Without them it serves plain HTTP,
   and only on a loopback address such as `127.0.0.1`, where a browser treats
   the page as secure: an address other machines reach is refused without a
   certificate, since the admin page's session needs HTTPS. It never writes to
