@@ -9,7 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-argon2 = "0.5"
+argon2 = "0.6"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
