@@ -97,6 +97,30 @@ impl System {
         }
     }
 
+    /// PostgreSQL 17's programs (pg_basebackup, pg_rewind).
+    pub fn postgres_bin(&self) -> &'static str {
+        match self.family {
+            Family::Apt => "/usr/lib/postgresql/17/bin",
+            Family::Dnf => "/usr/pgsql-17/bin",
+        }
+    }
+
+    /// Its access rules.
+    pub fn postgres_hba(&self) -> &'static str {
+        match self.family {
+            Family::Apt => "/etc/postgresql/17/main/pg_hba.conf",
+            Family::Dnf => "/var/lib/pgsql/17/data/pg_hba.conf",
+        }
+    }
+
+    /// The postgres account's home, where its password file goes.
+    pub fn postgres_home(&self) -> &'static str {
+        match self.family {
+            Family::Apt => "/var/lib/postgresql",
+            Family::Dnf => "/var/lib/pgsql",
+        }
+    }
+
     /// What this machine has of PostgreSQL before setup changes anything.
     pub fn seen(&self) -> Seen {
         use std::net::{SocketAddr, TcpStream};

@@ -67,6 +67,9 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse backups push pgbackrest|dump [off]
        scannerpulse backups location FOLDER
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
+       scannerpulse db promote | db rejoin | db switchover
+       scannerpulse node serve | node status | node backup
+       scannerpulse join info NAME... | join done NODE
        scannerpulse --version
        scannerpulse --help
 
@@ -172,10 +175,43 @@ backups     as root: push asks for an address (or reads it from standard
             each backup of that kind that succeeds, and off removes it;
             location keeps the backups in FOLDER from
             now on, starting with a full backup there (the old ones stay)
+db          as root, with two database machines: promote, on the standby
+            when the primary is gone, makes it the primary (refused while
+            the other still answers as one); rejoin, on a former primary,
+            makes it the new primary's standby; switchover, on the
+            ScannerPulse machine, swaps the roles while both are healthy
+node        a database machine's own: serve is what the ScannerPulse
+            machine's key may run there (status, stop, promote, follow
+            HOST); backup, from its timer, dumps the database on the primary
+join        on the ScannerPulse machine, as root, for a joining database
+            machine: info gives its place and the plan; done notes it
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
             the backups stay unless each is named, and each named one is
             deleted only after its name is typed";
+
+/// The hub's side of a database machine joining.
+#[derive(Debug, PartialEq, Eq)]
+enum Joined {
+    Info(Vec<String>),
+    Done(String),
+}
+
+/// A database machine's own commands.
+#[derive(Debug, PartialEq, Eq)]
+enum NodeCommand {
+    Serve,
+    Status,
+    Backup,
+}
+
+/// Changing the database machines' roles.
+#[derive(Debug, PartialEq, Eq)]
+enum DbCommand {
+    Promote,
+    Rejoin,
+    Switchover,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -214,6 +250,9 @@ enum Command {
     Backup,
     Change(scannerpulse::setup::change::Change),
     Uninstall(scannerpulse::setup::uninstall::Remove),
+    Join(Joined),
+    Node(NodeCommand),
+    Db(DbCommand),
     Talkgroups,
     TalkgroupSwitch {
         talkgroup: String,
@@ -544,6 +583,16 @@ fn parse(args: &[&str]) -> Option<Command> {
             Some(Command::Change(Change::Location(PathBuf::from(folder))))
         }
         ["uninstall", rest @ ..] => parse_uninstall(rest),
+        ["join", "info", names @ ..] if !names.is_empty() => Some(Command::Join(Joined::Info(
+            names.iter().map(|n| n.to_string()).collect(),
+        ))),
+        ["join", "done", node] => Some(Command::Join(Joined::Done(node.to_string()))),
+        ["node", "serve"] => Some(Command::Node(NodeCommand::Serve)),
+        ["node", "status"] => Some(Command::Node(NodeCommand::Status)),
+        ["node", "backup"] => Some(Command::Node(NodeCommand::Backup)),
+        ["db", "promote"] => Some(Command::Db(DbCommand::Promote)),
+        ["db", "rejoin"] => Some(Command::Db(DbCommand::Rejoin)),
+        ["db", "switchover"] => Some(Command::Db(DbCommand::Switchover)),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
         ["talkgroup", "correct", talkgroup, rest @ ..] => {
@@ -841,6 +890,27 @@ async fn run() -> ExitCode {
                 }
             }
         }
+        Some(Command::Join(joined)) => node_answer(join_command(joined)),
+        Some(Command::Node(command)) => node_answer(match command {
+            NodeCommand::Serve => as_root().and_then(|()| scannerpulse::setup::node::serve()),
+            NodeCommand::Status => as_root().and_then(|()| {
+                serde_json::to_string(&scannerpulse::setup::node::status())
+                    .map_err(|e| e.to_string())
+            }),
+            NodeCommand::Backup => scannerpulse::setup::node::backup(),
+        }),
+        Some(Command::Db(command)) => node_answer(as_root().and_then(|()| match command {
+            DbCommand::Promote => scannerpulse::setup::node::db_promote(),
+            DbCommand::Rejoin => scannerpulse::setup::node::db_rejoin(|question| {
+                inquire::Confirm::new(question)
+                    .with_default(false)
+                    .prompt()
+                    .unwrap_or(false)
+            }),
+            DbCommand::Switchover => {
+                scannerpulse::setup::node::db_switchover(|line| println!("{line}"))
+            }
+        })),
         Some(Command::Uninstall(remove)) => {
             match scannerpulse::setup::uninstall::run_uninstall(remove).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -900,6 +970,42 @@ async fn shutdown() {
         }
         Err(_) => {
             let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Prints a node or join command's answer, or its error.
+fn node_answer(result: Result<String, String>) -> ExitCode {
+    match result {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn as_root() -> Result<(), String> {
+    if rustix::process::geteuid().is_root() {
+        Ok(())
+    } else {
+        Err("this changes the machine's own database: run it as root (sudo /usr/local/bin/scannerpulse ...)".into())
+    }
+}
+
+/// The hub's side of a join, as root: the plan is root's alone.
+fn join_command(joined: Joined) -> Result<String, String> {
+    as_root()?;
+    match joined {
+        Joined::Info(names) => scannerpulse::setup::join::info(&names),
+        Joined::Done(node) => {
+            let mut keys = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut keys)
+                .map_err(|error| format!("cannot read the host keys: {error}"))?;
+            scannerpulse::setup::join::done(&node, &keys)
         }
     }
 }
@@ -1937,7 +2043,8 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Admin, Asr, Change, Command, Data, Favorites, Jobs, Settings, parse, talkgroup_list,
+        Admin, Asr, Change, Command, Data, DbCommand, Favorites, Jobs, Joined, NodeCommand,
+        Settings, parse, talkgroup_list,
     };
 
     #[test]
@@ -2026,6 +2133,49 @@ mod tests {
             parse(&["tls", "letsencrypt", "http", "radio.example.org"]),
             None
         );
+    }
+
+    #[test]
+    fn the_database_machines_commands_name_what_they_do() {
+        assert_eq!(
+            parse(&["join", "info", "db2", "192.0.2.22"]),
+            Some(Command::Join(Joined::Info(vec![
+                "db2".into(),
+                "192.0.2.22".into()
+            ])))
+        );
+        assert_eq!(
+            parse(&["join", "done", "db2"]),
+            Some(Command::Join(Joined::Done("db2".into())))
+        );
+        assert_eq!(parse(&["join", "info"]), None);
+        assert_eq!(
+            parse(&["node", "serve"]),
+            Some(Command::Node(NodeCommand::Serve))
+        );
+        assert_eq!(
+            parse(&["node", "status"]),
+            Some(Command::Node(NodeCommand::Status))
+        );
+        assert_eq!(
+            parse(&["node", "backup"]),
+            Some(Command::Node(NodeCommand::Backup))
+        );
+        // The hub's key reaches a node only through `node serve`.
+        assert_eq!(parse(&["node", "promote"]), None);
+        assert_eq!(
+            parse(&["db", "promote"]),
+            Some(Command::Db(DbCommand::Promote))
+        );
+        assert_eq!(
+            parse(&["db", "rejoin"]),
+            Some(Command::Db(DbCommand::Rejoin))
+        );
+        assert_eq!(
+            parse(&["db", "switchover"]),
+            Some(Command::Db(DbCommand::Switchover))
+        );
+        assert_eq!(parse(&["db", "failover"]), None);
     }
 
     #[test]

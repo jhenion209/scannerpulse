@@ -145,7 +145,7 @@ pub fn nightly(backups: &Path, database_url: &str) -> Vec<(&'static str, Result<
 /// Writes `scannerpulse-<stamp>.dump` in `folder`, checks that pg_restore
 /// reads it before giving it its name, and removes the oldest beyond
 /// `KEEP_DUMPS`.
-fn dump(folder: &Path, database_url: &str, stamp: &str) -> Result<String, String> {
+pub fn dump(folder: &Path, database_url: &str, stamp: &str) -> Result<String, String> {
     let name = format!("scannerpulse-{stamp}.dump");
     let partial = folder.join(format!(".{name}.partial"));
     let partial_arg = partial.display().to_string();

@@ -266,10 +266,9 @@ fn check_server(url: &str) -> Result<(), String> {
     }
 }
 
-/// The answers in `path`: `NAME=value` lines, as the settings file is
-/// written. ADMIN_PASSWORD is in the file, so the file must be its owner's
-/// alone.
-pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
+/// An answers file's `NAME=value` pairs; it holds a password, so it must
+/// be its owner's alone.
+fn read_pairs(path: &Path) -> Result<Vec<(String, String)>, String> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if meta.permissions().mode() & 0o077 != 0 {
@@ -280,8 +279,91 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
     }
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let pairs =
-        crate::hostfile::parse(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    crate::hostfile::parse(&text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// A database machine's answers file: JOIN (the install's first
+/// ScannerPulse machine), JOIN_LOGIN (root unless given; SSH must not ask
+/// it a password) and, for another login, JOIN_SUDO_PASSWORD. None when
+/// the file sets up a ScannerPulse machine instead.
+pub fn join_from_file(path: &Path) -> Result<Option<super::join::Hub>, String> {
+    let pairs = read_pairs(path)?;
+    let get = |name: &str| {
+        pairs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let Some(address) = get("JOIN") else {
+        return Ok(None);
+    };
+    let login = get("JOIN_LOGIN").unwrap_or_else(|| "root".into());
+    let sudo_password = get("JOIN_SUDO_PASSWORD");
+    if login != "root" && sudo_password.is_none() {
+        return Err(format!(
+            "{}: JOIN_LOGIN {login} needs JOIN_SUDO_PASSWORD (root needs none)",
+            path.display()
+        ));
+    }
+    Ok(Some(super::join::Hub {
+        address,
+        login,
+        sudo_password,
+        batch: true,
+    }))
+}
+
+/// Advanced's first question: a new install, or this machine joining one
+/// as a database machine.
+pub fn ask_join() -> Result<Option<super::join::Hub>, inquire::InquireError> {
+    const NEW: &str = "A new install";
+    const JOIN: &str = "Join an existing install, as one of its database machines";
+    say(
+        "Advanced: a new install, or a database machine joining an install whose first ScannerPulse machine planned it (that machine's setup waits for it). Joining needs that machine's address and a login there that may use sudo; nothing here keeps the login.",
+    );
+    if Select::new("This machine:", vec![NEW, JOIN]).prompt()? == NEW {
+        return Ok(None);
+    }
+    let named = |n: &str| {
+        if n.is_empty() || n.contains(char::is_whitespace) {
+            Err("a name or an address".into())
+        } else {
+            Ok(())
+        }
+    };
+    let address = text(
+        "The install's first ScannerPulse machine (name or address):",
+        None,
+        named,
+    )?;
+    let login = text(
+        "Your login there, one that may use sudo:",
+        Some("root"),
+        named,
+    )?;
+    let sudo_password = if login == "root" {
+        None
+    } else {
+        Some(
+            Password::new("Its sudo password (used for this join, kept nowhere):")
+                .with_display_mode(PasswordDisplayMode::Masked)
+                .without_confirmation()
+                .prompt()?,
+        )
+    };
+    Ok(Some(super::join::Hub {
+        address,
+        login,
+        sudo_password,
+        batch: false,
+    }))
+}
+
+/// The answers in `path`: `NAME=value` lines, as the settings file is
+/// written. ADMIN_PASSWORD is in the file, so the file must be its owner's
+/// alone.
+pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
+    let pairs = read_pairs(path)?;
     let get = |name: &str| {
         pairs
             .iter()

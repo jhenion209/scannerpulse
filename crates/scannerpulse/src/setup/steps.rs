@@ -510,7 +510,7 @@ pub(super) fn setfacl(title: &str, args: &[&str]) -> Step {
 
 /// The SQL that makes the role and the database, run by the `postgres`
 /// account; it does nothing that is already done.
-fn database_sql(password: &str) -> String {
+pub(super) fn database_sql(password: &str) -> String {
     let quoted = password.replace('\'', "''");
     format!(
         "SELECT format('CREATE ROLE {ACCOUNT} LOGIN PASSWORD %L', '{quoted}') \

@@ -5,6 +5,8 @@ pub mod apply;
 pub mod ask;
 pub mod change;
 pub mod folders;
+pub mod join;
+pub mod node;
 pub mod plan;
 pub mod screen;
 pub mod steps;
@@ -57,6 +59,11 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     // Another PostgreSQL here matters only to a database setup installs here.
     let seen = system.seen();
     let defaults = ask::defaults();
+    if let Some(path) = answers_file
+        && let Some(hub) = ask::join_from_file(path)?
+    {
+        return join::run(hub, dry_run, |_| true).await;
+    }
     let mut answers = match answers_file {
         Some(path) => ask::from_file(path, &defaults)?,
         None => {
@@ -70,6 +77,14 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             };
             if kind == screen::Kind::Simple {
                 system::other_postgres(&seen)?;
+            } else if let Some(hub) = ask::ask_join().map_err(|e| e.to_string())? {
+                return join::run(hub, dry_run, |question| {
+                    inquire::Confirm::new(question)
+                        .with_default(true)
+                        .prompt()
+                        .unwrap_or(false)
+                })
+                .await;
             }
             match ask::interactive(&defaults, None, kind == screen::Kind::Advanced)? {
                 Some(answers) => answers,
