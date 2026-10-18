@@ -21,7 +21,7 @@ getrandom = "0.4"
 id3 = "1"
 include_dir = "0.7"
 inquire = "0.9"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 notify = "8"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 regex = "1"
