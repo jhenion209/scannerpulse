@@ -76,8 +76,6 @@ pub struct Machine {
     pub backups: Option<PathBuf>,
     /// The backup kinds with a push address.
     pub pushes: Vec<&'static str>,
-    /// The database is on this machine, not one the person runs elsewhere.
-    pub local_db: bool,
 }
 
 /// A certificate and its private key, as PEM files.
@@ -168,7 +166,6 @@ impl Config {
                         .is_some_and(|url| !url.is_empty())
                 })
                 .collect(),
-            local_db: crate::setup::uninstall::local_database(Some(&url)),
         };
         Ok(Config {
             database,

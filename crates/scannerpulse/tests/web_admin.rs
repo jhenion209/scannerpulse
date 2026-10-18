@@ -260,7 +260,6 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
         cert: Some(cert),
         backups: Some("/srv/backups".into()),
         pushes: vec!["dump"],
-        local_db: true,
     };
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
@@ -294,4 +293,23 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     assert_eq!(body["backups"]["kinds"]["pgbackrest"]["push"], false);
     let text = body.to_string();
     assert!(!text.contains("http"), "no push address is shown: {text}");
+    // Without a backups folder the database is not one setup installed,
+    // wherever its address points.
+    let mut state =
+        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.machine = scannerpulse::web::Machine::default();
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let (cookie, _) = signed(&pool, &app).await;
+    let got = send(
+        &app,
+        "GET",
+        "/api/admin/machine",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(got.body["database"], "theirs");
+    assert!(got.body["backups"].is_null());
 }

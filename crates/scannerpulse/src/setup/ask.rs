@@ -109,19 +109,29 @@ pub(super) fn check_backups(
     archive: &Path,
 ) -> Result<folders::Folder, String> {
     let found = folders::check(path)?;
-    for (other, what) in [
-        (recordings, "the recordings folder"),
-        (archive, "the archive"),
-    ] {
-        if found.path.starts_with(other) || other.starts_with(&found.path) {
+    backups_apart(
+        &found.path,
+        &[
+            (recordings, "the recordings folder"),
+            (archive, "the archive"),
+        ],
+    )?;
+    Ok(found)
+}
+
+/// A backups `folder` may be inside none of `others` (each with what it
+/// is), nor hold one.
+pub(super) fn backups_apart(folder: &Path, others: &[(&Path, &str)]) -> Result<(), String> {
+    for (other, what) in others {
+        if folder.starts_with(other) || other.starts_with(folder) {
             return Err(format!(
                 "{} and {what} ({}) may not be inside each other; for backups inside the archive, keep the default",
-                found.path.display(),
+                folder.display(),
                 other.display()
             ));
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 /// A push (heartbeat) address: http or https, such as an Uptime Kuma push
@@ -136,7 +146,8 @@ pub(super) fn check_push(url: &str) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err(format!("{url:?} is not a full http:// or https:// address"))
+        // The address carries a token: it is not repeated.
+        Err("the push address is not a full http:// or https:// address".into())
     }
 }
 

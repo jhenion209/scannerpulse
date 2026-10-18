@@ -47,20 +47,6 @@ pub struct Found {
     /// The folders above that are not there (an unmounted share, a deleted
     /// folder): their access entries cannot be taken off.
     pub gone: Vec<PathBuf>,
-    /// The database is this machine's, not one the person runs elsewhere.
-    pub local_db: bool,
-}
-
-/// Whether `DATABASE_URL` (unset: setup's own) names this machine.
-pub fn local_database(url: Option<&str>) -> bool {
-    url.is_none_or(|url| {
-        reqwest::Url::parse(url).is_ok_and(|u| {
-            matches!(
-                u.host_str(),
-                None | Some("localhost" | "127.0.0.1" | "[::1]" | "")
-            )
-        })
-    })
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -88,7 +74,9 @@ fn postgres(title: &str, sql: &str) -> Step {
 
 /// The steps that undo setup on `system`, keeping what `remove` does not name.
 pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>, String> {
-    if remove.database && !found.local_db {
+    // Setup writes the backups' folder only for a database it installed;
+    // any other, even at localhost, is the person's.
+    if remove.database && found.backups.is_none() {
         return Err("the database is one you run on another machine: uninstall leaves it; drop it there if it should go".into());
     }
     if remove.archive && found.archive.is_none() {
@@ -187,10 +175,23 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         }
     }
     if let (true, Some(backups)) = (remove.backups, &found.backups) {
+        // Only setup's own folders go: a folder the person named may hold
+        // other things, and stays unless nothing else is left in it.
+        let own = |sub: &str| backups.join(sub).display().to_string();
         steps.push(run(
             "Remove the backups",
             "rm",
-            &["-rf", &backups.display().to_string()],
+            &["-rf", &own("pgbackrest"), &own("dump")],
+        ));
+        steps.push(run(
+            "Remove the backups' folder, if nothing else is in it",
+            "sh",
+            &[
+                "-c",
+                "[ -d \"$1\" ] || exit 0; rmdir --ignore-fail-on-non-empty -- \"$1\"",
+                "rmdir",
+                &backups.display().to_string(),
+            ],
         ));
     }
     if let (true, Some(archive)) = (remove.archive, &found.archive) {
@@ -353,7 +354,6 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             .and_then(|listen| listen.parse::<std::net::SocketAddr>().ok())
             .map(|listen| listen.port()),
         gone,
-        local_db: local_database(std::env::var("DATABASE_URL").ok().as_deref()),
     };
     let steps = steps(&found, remove, &system)?;
     println!("\nUninstall will:");
@@ -375,7 +375,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             })
         }),
         (!remove.database).then(|| {
-            if found.local_db {
+            if found.backups.is_some() {
                 format!("the database {DATABASE}")
             } else {
                 "the database you run".into()
@@ -401,7 +401,10 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         go = typed(&format!("The database {DATABASE}"), DATABASE)?;
     }
     if let (true, true, Some(backups)) = (go, remove.backups, &found.backups) {
-        go = typed("The backups", &backups.display().to_string())?;
+        go = typed(
+            &format!("The backups (pgbackrest and dump in {})", backups.display()),
+            &backups.display().to_string(),
+        )?;
     }
     if let (true, true, Some(archive)) = (go, remove.archive, &found.archive) {
         go = Confirm::new(&archive_question(archive, calls))
@@ -449,7 +452,6 @@ mod tests {
             backups: Some(PathBuf::from("/srv/archive/.scannerpulse-backups")),
             port: Some(443),
             gone: vec![],
-            local_db: true,
         }
     }
 
@@ -576,7 +578,12 @@ mod tests {
         };
         let text = lines(&steps(&found(), all, &system).unwrap()).join("\n");
         assert!(text.contains("DROP DATABASE IF EXISTS scannerpulse WITH (FORCE);"));
-        assert!(text.contains("rm -rf /srv/archive/.scannerpulse-backups"));
+        assert!(text.contains(
+            "rm -rf /srv/archive/.scannerpulse-backups/pgbackrest /srv/archive/.scannerpulse-backups/dump"
+        ));
+        assert!(text.contains(
+            "rmdir --ignore-fail-on-non-empty -- \"$1\" rmdir /srv/archive/.scannerpulse-backups"
+        ));
         assert!(text.contains("find /srv/archive -mindepth 1 -delete"));
         assert!(!text.contains("setfacl -R -x u:scannerpulse -x d:u:scannerpulse /srv/archive"));
     }
@@ -644,17 +651,9 @@ mod tests {
 
     #[test]
     fn a_database_you_run_is_never_dropped_by_uninstall() {
-        use super::local_database;
-        assert!(local_database(None));
-        assert!(local_database(Some(
-            "postgres://scannerpulse@localhost:5432/scannerpulse"
-        )));
-        assert!(!local_database(Some(
-            "postgres://sp@db.example.org:5433/calls"
-        )));
         let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
         let theirs = Found {
-            local_db: false,
+            backups: None,
             pgbackrest: false,
             ..found()
         };
@@ -669,5 +668,41 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("one you run on another machine"), "{error}");
         assert!(steps(&theirs, Remove::default(), &system).is_ok());
+        // Setup writes the backups' folder only for a database it installed:
+        // without one, a database at localhost is the person's too.
+        let theirs_here = Found {
+            backups: None,
+            pgbackrest: false,
+            ..found()
+        };
+        let drop = Remove {
+            database: true,
+            ..Remove::default()
+        };
+        assert!(steps(&theirs_here, drop, &system).is_err());
+    }
+
+    #[test]
+    fn removing_backups_kept_in_a_shared_folder_removes_only_scannerpulses() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let shared = Found {
+            backups: Some(PathBuf::from("/srv/backups")),
+            ..found()
+        };
+        let backups = Remove {
+            backups: true,
+            ..Remove::default()
+        };
+        let all = lines(&steps(&shared, backups, &system).unwrap());
+        let text = all.join("\n");
+        assert!(
+            text.contains("rm -rf /srv/backups/pgbackrest /srv/backups/dump"),
+            "{text}"
+        );
+        assert!(text.contains("rmdir --ignore-fail-on-non-empty -- \"$1\" rmdir /srv/backups"));
+        assert!(
+            !all.iter().any(|l| l.trim() == "rm -rf /srv/backups"),
+            "{text}"
+        );
     }
 }

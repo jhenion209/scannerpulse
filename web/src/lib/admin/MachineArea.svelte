@@ -54,11 +54,8 @@
 {COMMANDS.ownCertificate}</code></pre>
 
     <h2>Backups</h2>
-    {#if data.backups === null && data.database === 'theirs'}
-      <p>The database is one you run elsewhere: its backups are yours.</p>
-    {:else if data.backups === null}
-      <p>No backups are set up on this machine. To keep them in a folder:</p>
-      <pre><code>{COMMANDS.location}</code></pre>
+    {#if data.backups === null}
+      <p>The database is one you run: its backups are yours.</p>
     {:else}
       <dl class="facts">
         <dt>Folder</dt>

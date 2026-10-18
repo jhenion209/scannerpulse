@@ -15,8 +15,10 @@ pub enum Change {
     TlsInstall { cert: PathBuf, key: PathBuf },
     /// Go back to a certificate this machine makes for itself.
     TlsSelf,
-    /// Call `url` after each backup of `kind` succeeds, or nothing (`None`).
-    Push { kind: String, url: Option<String> },
+    /// After each backup of `kind` succeeds, call the address read from
+    /// standard input, or nothing (`off`). The address carries a token, so
+    /// it is never an argument: sudo logs arguments, and ps shows them.
+    Push { kind: String, off: bool },
     /// Keep the backups in `folder` from now on.
     Location(PathBuf),
 }
@@ -126,6 +128,44 @@ pub fn location_steps(
     Ok(steps)
 }
 
+/// A new backups `folder` may be inside neither a recordings folder nor the
+/// archive that the database records (`known`, from it), nor hold one. The
+/// database must answer to say which they are.
+pub(super) fn location_apart(
+    folder: &Path,
+    known: Option<(Vec<PathBuf>, Option<PathBuf>, i64)>,
+) -> Result<(), String> {
+    let Some((recordings, archive, _)) = known else {
+        return Err("the database must answer, to check the folder against the recordings folder and the archive (and for the full backup that follows): start PostgreSQL, then try again".into());
+    };
+    let mut others: Vec<(&Path, &str)> = recordings
+        .iter()
+        .map(|r| (r.as_path(), "the recordings folder"))
+        .collect();
+    others.extend(archive.as_deref().map(|a| (a, "the archive")));
+    super::ask::backups_apart(folder, &others)
+}
+
+/// The push address after each backup of `kind`: asked with hidden input on
+/// a terminal, else the first line of standard input.
+fn read_address(kind: &str) -> Result<String, String> {
+    use std::io::IsTerminal;
+    let url = if std::io::stdin().is_terminal() {
+        inquire::Password::new(&format!("The push address after each {kind} backup:"))
+            .with_display_mode(inquire::PasswordDisplayMode::Masked)
+            .without_confirmation()
+            .prompt()
+            .map_err(|error| error.to_string())?
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| format!("cannot read the address: {error}"))?;
+        line
+    };
+    Ok(url.trim().to_string())
+}
+
 /// Makes `change` on this machine, as root, saying each step.
 pub async fn run_change(change: Change) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
@@ -158,15 +198,22 @@ pub async fn run_change(change: Change) -> Result<(), String> {
             );
             (tls_self_steps(binary, &names), said)
         }
-        Change::Push { kind, url } => (
-            push_steps(&text, kind, url.as_deref())?,
-            match url {
-                Some(_) => {
-                    format!("Each {kind} backup that succeeds is pushed to the address given.")
-                }
-                None => format!("No push follows a {kind} backup."),
-            },
-        ),
+        Change::Push { kind, off } => {
+            let url = if *off {
+                None
+            } else {
+                Some(read_address(kind)?)
+            };
+            (
+                push_steps(&text, kind, url.as_deref())?,
+                match url {
+                    Some(_) => {
+                        format!("Each {kind} backup that succeeds is pushed to the address given.")
+                    }
+                    None => format!("No push follows a {kind} backup."),
+                },
+            )
+        }
         Change::Location(folder) => {
             if !Path::new(crate::backup::PGBACKREST_CONF).exists() {
                 return Err(
@@ -174,11 +221,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                 );
             }
             let found = super::folders::check(folder)?;
-            if let Some((recordings, Some(archive), _)) = super::uninstall::folders().await {
-                for source in &recordings {
-                    super::ask::check_backups(&found.path, source, &archive)?;
-                }
-            }
+            location_apart(&found.path, super::uninstall::folders().await)?;
             let os_release = std::fs::read_to_string("/etc/os-release")
                 .map_err(|error| format!("/etc/os-release: {error}"))?;
             let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
@@ -253,6 +296,11 @@ mod tests {
                 .contains("not a kind of backup")
         );
         assert!(push_steps(SETTINGS, "dump", Some("kuma")).is_err());
+        let refused = push_steps(SETTINGS, "dump", Some("kuma-token-4f2a")).unwrap_err();
+        assert!(
+            !refused.contains("kuma-token-4f2a"),
+            "the address is not echoed: {refused}"
+        );
     }
 
     #[test]
@@ -288,5 +336,23 @@ mod tests {
                 "Restart the web service, to show it on the admin page"
             ]
         );
+    }
+
+    #[test]
+    fn a_new_backups_folder_is_checked_against_the_recorded_folders() {
+        use super::location_apart;
+        use std::path::PathBuf;
+        let (rec, arc) = (
+            PathBuf::from("/srv/recordings"),
+            PathBuf::from("/srv/archive"),
+        );
+        let silent = location_apart(Path::new("/srv/backups"), None).unwrap_err();
+        assert!(silent.contains("the database must answer"), "{silent}");
+        let no_source = Some((vec![], Some(arc.clone()), 0));
+        let inside = location_apart(Path::new("/srv/archive/b"), no_source).unwrap_err();
+        assert!(inside.contains("may not be inside each other"), "{inside}");
+        let known = Some((vec![rec.clone()], Some(arc.clone()), 0));
+        assert!(location_apart(Path::new("/srv/recordings/b"), known.clone()).is_err());
+        assert!(location_apart(Path::new("/srv/backups"), known).is_ok());
     }
 }

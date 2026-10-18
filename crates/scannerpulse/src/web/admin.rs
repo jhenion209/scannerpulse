@@ -165,7 +165,8 @@ pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Val
     };
     Ok(Json(serde_json::json!({
         "host": state.host,
-        "database": if state.machine.local_db { "here" } else { "theirs" },
+        // Setup writes the backups' folder only for a database it installed.
+        "database": if state.machine.backups.is_some() { "here" } else { "theirs" },
         "certificate": certificate,
         "backups": backups,
     })))

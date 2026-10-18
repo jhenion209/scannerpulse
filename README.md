@@ -141,6 +141,8 @@ and the backups unless `--remove-archive`, `--remove-database` or
 `--remove-backups` names them, and each named one goes only after you type
 its name. Backups kept inside the archive stay too, even with
 `--remove-archive`, unless `--remove-backups` is named as well.
+`--remove-backups` removes ScannerPulse's own `pgbackrest` and `dump`
+folders, and the backups' folder only when nothing else is left in it.
 `--remove-archive` first asks a Yes/No question (default No) naming the
 archive and how many calls it holds, and only a Yes leads to typing its name.
 
@@ -152,8 +154,10 @@ so the page shows the command, run on the machine:
 - `sudo /usr/local/bin/scannerpulse tls install CERT KEY` serves your
   certificate from now on (checked first); `tls self` goes back to one the
   machine makes;
-- `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump URL` sets a
-  push address (`off` removes it);
+- `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump` asks for a
+  push address and sets it (with no terminal it reads the first line of
+  standard input; the address holds a token, so it is never an argument,
+  which sudo would log); `... backups push dump off` removes it;
 - `sudo /usr/local/bin/scannerpulse backups location FOLDER` keeps the
   backups in FOLDER from now on, starting with a full backup there; the old
   ones stay where they were until you remove them.

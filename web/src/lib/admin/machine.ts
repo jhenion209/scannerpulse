@@ -21,7 +21,8 @@ export interface BackupKind {
 
 export interface MachineInfo {
   host: string;
-  /** Where the database runs: on this machine, or one the person runs. */
+  /** Where the database runs: one setup installed here (it keeps backups),
+   * or one the person runs. */
   database: 'here' | 'theirs';
   certificate: MachineCertificate | null;
   /** Null when the database is one the person runs, with its own backups. */
@@ -52,6 +53,7 @@ export const kindName = (kind: string) => ({ pgbackrest: 'pgBackRest', dump: 'Du
 export const COMMANDS = {
   certificate: 'sudo /usr/local/bin/scannerpulse tls install /path/to/cert.pem /path/to/key.pem',
   ownCertificate: 'sudo /usr/local/bin/scannerpulse tls self',
-  push: (kind: string) => `sudo /usr/local/bin/scannerpulse backups push ${kind} https://… (or off)`,
+  // It asks for the address, which holds a token, so it is never typed as an argument.
+  push: (kind: string) => `sudo /usr/local/bin/scannerpulse backups push ${kind}    (asks for the address; off removes it)`,
   location: 'sudo /usr/local/bin/scannerpulse backups location /path/to/folder',
 };

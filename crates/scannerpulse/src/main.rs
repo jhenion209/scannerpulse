@@ -63,7 +63,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse setup [--answers FILE] [--dry-run]
        scannerpulse backup
        scannerpulse tls install CERT KEY | tls self
-       scannerpulse backups push pgbackrest|dump URL|off
+       scannerpulse backups push pgbackrest|dump [off]
        scannerpulse backups location FOLDER
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse --version
@@ -162,8 +162,10 @@ backup      take the nightly backups, as root (the backup timer runs it):
             time for the admin page, and its push address if one is set
 tls         as root: install serves CERT and KEY (PEM, checked first) from
             now on; self goes back to a certificate this machine makes
-backups     as root: push calls URL after each backup of that kind that
-            succeeds (off: none); location keeps the backups in FOLDER from
+backups     as root: push asks for an address (or reads it from standard
+            input; never an argument, since it holds a token) to call after
+            each backup of that kind that succeeds, and off removes it;
+            location keeps the backups in FOLDER from
             now on, starting with a full backup there (the old ones stay)
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
@@ -516,9 +518,13 @@ fn parse(args: &[&str]) -> Option<Command> {
             key: PathBuf::from(key),
         })),
         ["tls", "self"] => Some(Command::Change(Change::TlsSelf)),
-        ["backups", "push", kind, url] => Some(Command::Change(Change::Push {
+        ["backups", "push", kind] => Some(Command::Change(Change::Push {
             kind: kind.to_string(),
-            url: (*url != "off").then(|| url.to_string()),
+            off: false,
+        })),
+        ["backups", "push", kind, "off"] => Some(Command::Change(Change::Push {
+            kind: kind.to_string(),
+            off: true,
         })),
         ["backups", "location", folder] => {
             Some(Command::Change(Change::Location(PathBuf::from(folder))))
@@ -1961,13 +1967,16 @@ mod tests {
             parse(&["tls", "self"]),
             Some(Command::Change(Change::TlsSelf))
         );
-        assert_eq!(
+        // The address carries a token: it is read from standard input, never
+        // given as an argument (sudo logs arguments; ps shows them).
+        assert!(matches!(
+            parse(&["backups", "push", "dump"]),
+            Some(Command::Change(Change::Push { .. }))
+        ));
+        assert!(matches!(
             parse(&["backups", "push", "dump", "off"]),
-            Some(Command::Change(Change::Push {
-                kind: "dump".into(),
-                url: None
-            }))
-        );
+            Some(Command::Change(Change::Push { .. }))
+        ));
         assert_eq!(
             parse(&[
                 "backups",
@@ -1975,10 +1984,7 @@ mod tests {
                 "pgbackrest",
                 "https://kuma.example.org/api/push/x"
             ]),
-            Some(Command::Change(Change::Push {
-                kind: "pgbackrest".into(),
-                url: Some("https://kuma.example.org/api/push/x".into())
-            }))
+            None
         );
         assert_eq!(
             parse(&["backups", "location", "/srv/backups"]),

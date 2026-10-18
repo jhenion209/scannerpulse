@@ -88,16 +88,18 @@ impl Remote {
         url.to_string()
     }
 
-    /// Its line in the password file; `:` and `\` are escaped there.
+    /// Its line in the password file, as the services' reader (sqlx) takes
+    /// it: any host (the file serves this one database), the name and the
+    /// role with `:` and `\` escaped, and the password as typed, to the end
+    /// of the line.
     pub fn pgpass_line(&self) -> String {
         let esc = |s: &str| s.replace('\\', "\\\\").replace(':', "\\:");
         format!(
-            "{}:{}:{}:{}:{}\n",
-            esc(&self.host),
+            "*:{}:{}:{}:{}\n",
             self.port,
             esc(&self.name),
             esc(&self.role),
-            esc(&self.password)
+            self.password
         )
     }
 }
@@ -840,10 +842,21 @@ pub(super) fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path,
         ],
     ));
     // The archive's default ACL would give the service account its way into
-    // the backups; they are PostgreSQL's and root's alone.
+    // the backups; they are PostgreSQL's and root's alone. Only setup's own
+    // folders are stripped: a folder the person names may hold other things.
+    let own = |sub: &str| backups.join(sub).display().to_string();
+    if backups
+        .file_name()
+        .is_some_and(|name| name == ".scannerpulse-backups")
+    {
+        steps.push(setfacl(
+            "Keep the archive's access off its backups folder",
+            &["-b", &backups.display().to_string()],
+        ));
+    }
     steps.push(setfacl(
         "Keep the backups to PostgreSQL and root",
-        &["-R", "-b", &backups.display().to_string()],
+        &["-R", "-b", &own("pgbackrest"), &own("dump")],
     ));
     // PostgreSQL archives its WAL there: every folder above must let it in.
     steps.push(run(
@@ -1377,7 +1390,22 @@ mod tests {
         };
         assert_eq!(
             &args[2..],
-            ["setfacl", "-R", "-b", "/srv/archive/.scannerpulse-backups"]
+            [
+                "setfacl",
+                "-R",
+                "-b",
+                "/srv/archive/.scannerpulse-backups/pgbackrest",
+                "/srv/archive/.scannerpulse-backups/dump"
+            ]
+        );
+        let Action::Run { args, .. } =
+            &all[at("Keep the archive's access off its backups folder")].action
+        else {
+            panic!()
+        };
+        assert_eq!(
+            &args[2..],
+            ["setfacl", "-b", "/srv/archive/.scannerpulse-backups"]
         );
         assert!(
             at("Make the folder of the nightly dumps")
@@ -1474,7 +1502,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(contents, "db.example.org:5433:calls:sp:se\\:cret\n");
+        assert_eq!(contents, "*:5433:calls:sp:se:cret\n");
         let Some(Action::Write { contents: web, .. }) = all
             .iter()
             .find(|s| s.title == "Write the web service")
@@ -1518,10 +1546,7 @@ mod tests {
             remote.url(),
             "postgres://sp%40site@[2001:db8::40]:5432/radio%20calls"
         );
-        assert_eq!(
-            remote.pgpass_line(),
-            "2001\\:db8\\:\\:40:5432:radio calls:sp@site:a\\\\b\\:c\n"
-        );
+        assert_eq!(remote.pgpass_line(), "*:5432:radio calls:sp@site:a\\b:c\n");
     }
 
     #[test]
@@ -1611,5 +1636,32 @@ mod tests {
             contents.contains("repo1-path=/srv/backups/pgbackrest\n"),
             "{contents}"
         );
+    }
+
+    #[test]
+    fn a_backups_folder_you_name_keeps_whatever_else_it_holds() {
+        let answers = Answers {
+            backups: Some("/srv/backups".into()),
+            ..answers()
+        };
+        let all = steps(
+            &answers,
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let touched: Vec<&String> = all
+            .iter()
+            .filter_map(|s| match &s.action {
+                Action::Run { args, .. } if args.get(2).map(String::as_str) == Some("setfacl") => {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(!touched.iter().any(|a| *a == "/srv/backups"), "{touched:?}");
+        assert!(touched.iter().any(|a| *a == "/srv/backups/pgbackrest"));
+        assert!(touched.iter().any(|a| *a == "/srv/backups/dump"));
     }
 }
