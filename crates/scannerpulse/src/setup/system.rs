@@ -167,7 +167,7 @@ pub fn other_postgres(seen: &Seen) -> Result<(), String> {
         return Ok(());
     };
     Err(format!(
-        "this machine already has {found}. Simple setup installs its own PostgreSQL 17 on port 5432 and sets it up for ScannerPulse, which would change the one you have. Remove it first; Advanced setup, in a later version, will use an existing PostgreSQL."
+        "this machine already has {found}. Simple setup installs its own PostgreSQL 17 on port 5432 and sets it up for ScannerPulse, which would change the one you have. Remove it first, or choose Advanced in setup and give it as a database you run (it must be PostgreSQL 17)."
     ))
 }
 
@@ -229,7 +229,7 @@ mod tests {
         });
         assert_eq!(
             debian,
-            "this machine already has PostgreSQL 15 (/etc/postgresql/15). Simple setup installs its own PostgreSQL 17 on port 5432 and sets it up for ScannerPulse, which would change the one you have. Remove it first; Advanced setup, in a later version, will use an existing PostgreSQL."
+            "this machine already has PostgreSQL 15 (/etc/postgresql/15). Simple setup installs its own PostgreSQL 17 on port 5432 and sets it up for ScannerPulse, which would change the one you have. Remove it first, or choose Advanced in setup and give it as a database you run (it must be PostgreSQL 17)."
         );
         assert!(
             refused(Seen {

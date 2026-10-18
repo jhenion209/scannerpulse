@@ -53,7 +53,8 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = system::detect(&os_release, std::env::consts::ARCH)?;
-    system::other_postgres(&system.seen())?;
+    // Another PostgreSQL here matters only to a database setup installs here.
+    let seen = system.seen();
     let defaults = ask::defaults();
     let mut answers = match answers_file {
         Some(path) => ask::from_file(path, &defaults)?,
@@ -66,6 +67,9 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                 println!("Setup left; nothing was changed.");
                 return Ok(());
             };
+            if kind == screen::Kind::Simple {
+                system::other_postgres(&seen)?;
+            }
             match ask::interactive(&defaults, None, kind == screen::Kind::Advanced)? {
                 Some(answers) => answers,
                 None => {
@@ -77,6 +81,9 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     };
     let made_password = crate::sessions::random_hex(24);
     let steps = loop {
+        if answers.database == steps::Database::Here {
+            system::other_postgres(&seen)?;
+        }
         // A database the person runs must answer, be PostgreSQL 17 and let
         // its role make tables, before anything is planned on it.
         if let steps::Database::Theirs(remote) = &answers.database {
