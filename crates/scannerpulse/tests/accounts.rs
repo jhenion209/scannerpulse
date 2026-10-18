@@ -77,6 +77,14 @@ fn an_empty_or_broken_hash_matches_nothing() {
     );
 }
 
+#[test]
+fn a_password_hashed_by_version_0_1_still_signs_in() {
+    // Made by argon2 0.5, which ScannerPulse 0.1 hashed with.
+    let old = "$argon2id$v=19$m=19456,t=2,p=1$c2Nhbm5lcnB1bHNlLXRlc3Q$LWuF7C5e8FyNXGNCs/Rm6OrDRmU3PwoRSLUqRB+Qzuc";
+    assert!(accounts::verify_password(old, "an old pass phrase"));
+    assert!(!accounts::verify_password(old, PASSWORD));
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn the_last_enabled_admin_cannot_be_disabled(pool: PgPool) {
     let mut conn = pool.acquire().await.unwrap();

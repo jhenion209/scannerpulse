@@ -1,7 +1,6 @@
 //! Admin sessions and the lockout of failed password sign-ins. Both live in
 //! the database, so any web host can serve any request.
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgConnection;
 
@@ -28,7 +27,7 @@ pub struct Session {
 /// `bytes` random bytes, as lowercase hex.
 pub fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    OsRng.fill_bytes(&mut buf);
+    getrandom::fill(&mut buf).expect("the system's random source works");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

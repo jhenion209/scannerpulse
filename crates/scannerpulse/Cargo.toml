@@ -9,7 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-argon2 = "0.5"
+argon2 = "0.6"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
@@ -17,6 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 chrono-tz = "0.10"
 crc32fast = "1"
 crossterm = "0.29"
+getrandom = "0.4"
 id3 = "1"
 include_dir = "0.7"
 inquire = "0.9"

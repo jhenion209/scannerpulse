@@ -5,8 +5,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use argon2::Argon2;
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::Connection;
@@ -87,9 +86,8 @@ pub fn check_password(password: &str) -> Result<(), AccountError> {
 
 /// An Argon2id hash of `password`, with a fresh salt.
 pub fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .expect("Argon2 with its default parameters hashes any password")
         .to_string()
 }
@@ -100,11 +98,9 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
     if password.len() > MAX_PASSWORD {
         return false;
     }
-    PasswordHash::new(hash).is_ok_and(|parsed| {
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok()
-    })
+    Argon2::default()
+        .verify_password(password.as_bytes(), hash)
+        .is_ok()
 }
 
 /// Takes as long as checking a real password, for a name that has no
