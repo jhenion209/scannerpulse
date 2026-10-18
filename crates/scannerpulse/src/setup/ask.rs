@@ -1007,8 +1007,10 @@ mod tests {
         }
         let (cert, key) = (dir.path().join("site.pem"), dir.path().join("site.key"));
         crate::cert::make(&["radio-a.example.org".into()], &cert, &key).unwrap();
+        // No PORT: checking one binds it, which races the other test that
+        // checks port 1 wherever low ports may be bound (macOS, root).
         let base = format!(
-            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"long enough secret\"\nPORT=1\n",
+            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"long enough secret\"\n",
             rec.display(),
             arc.display()
         );
