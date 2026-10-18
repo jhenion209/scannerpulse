@@ -39,6 +39,82 @@ pub fn make(names: &[String], cert: &Path, key: &Path) -> Result<(), String> {
     write(key, pair.serialize_pem().as_bytes(), 0o600)
 }
 
+/// What a certificate says of itself: the names and addresses it covers,
+/// and when it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub names: Vec<String>,
+    pub not_after: chrono::DateTime<chrono::Utc>,
+}
+
+/// Checks a certificate an administrator gives (`cert`, PEM: the site's own
+/// certificate first, then any chain) and its private key (`key`, PEM): both
+/// read, the key the certificate's, and the certificate within its dates.
+pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .and_then(|found| found.collect())
+        .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?;
+    let Some(first) = certs.first() else {
+        return Err(format!("{} holds no certificate", cert.display()));
+    };
+    let private = PrivateKeyDer::from_pem_file(key)
+        .map_err(|error| format!("{}: not a PEM private key ({error})", key.display()))?;
+    let signing = rustls::crypto::ring::sign::any_supported_type(&private)
+        .map_err(|_| format!("{}: a kind of key this program cannot use", key.display()))?;
+    rustls::sign::CertifiedKey::new(certs.clone(), signing)
+        .keys_match()
+        .map_err(|_| format!("{} is not the key of {}", key.display(), cert.display()))?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(first)
+        .map_err(|_| format!("{}: its certificate cannot be read", cert.display()))?;
+    let at = |time: &x509_parser::time::ASN1Time| {
+        chrono::DateTime::from_timestamp(time.timestamp(), 0).unwrap_or_default()
+    };
+    let (from, until) = (
+        at(&parsed.validity().not_before),
+        at(&parsed.validity().not_after),
+    );
+    let now = chrono::Utc::now();
+    if now < from {
+        return Err(format!("{} is good only from {from}", cert.display()));
+    }
+    if now > until {
+        return Err(format!("{} ended on {until}", cert.display()));
+    }
+    let mut names = Vec::new();
+    if let Ok(Some(alt)) = parsed.subject_alternative_name() {
+        for name in &alt.value.general_names {
+            match name {
+                x509_parser::extensions::GeneralName::DNSName(dns) => names.push(dns.to_string()),
+                x509_parser::extensions::GeneralName::IPAddress(bytes) => {
+                    let ip = match bytes.len() {
+                        4 => <[u8; 4]>::try_from(*bytes).map(std::net::IpAddr::from).ok(),
+                        16 => <[u8; 16]>::try_from(*bytes)
+                            .map(std::net::IpAddr::from)
+                            .ok(),
+                        _ => None,
+                    };
+                    names.extend(ip.map(|ip| ip.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+    if names.is_empty() {
+        names.extend(
+            parsed
+                .subject()
+                .iter_common_name()
+                .filter_map(|cn| cn.as_str().ok().map(String::from)),
+        );
+    }
+    Ok(Found {
+        names,
+        not_after: until,
+    })
+}
+
 /// Writes `bytes` to `path`, created with `mode` (an existing file keeps its
 /// owner and gets the mode).
 fn write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
