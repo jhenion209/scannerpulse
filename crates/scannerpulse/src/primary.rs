@@ -66,29 +66,46 @@ fn on(options: &PgConnectOptions, node: &Node) -> PgConnectOptions {
     options.clone().host(&node.host).port(node.port)
 }
 
-/// Whether the node `options` reaches is the primary: it answers within
-/// `ASK_LIMIT` and is not a standby.
-async fn is_primary(options: &PgConnectOptions) -> bool {
+/// The timeline of the node `options` reaches if it is a primary: it
+/// answers within `ASK_LIMIT` and is not a standby. Each promotion starts a
+/// newer timeline.
+async fn timeline(options: &PgConnectOptions) -> Option<u32> {
     let ask = async {
         let mut conn = PgConnection::connect_with(options).await?;
-        let standby: bool = sqlx::query_scalar("SELECT pg_is_in_recovery()")
-            .fetch_one(&mut conn)
-            .await?;
+        // The current WAL file's name starts with its timeline, in hex.
+        let wal: Option<String> = sqlx::query_scalar(
+            "SELECT CASE WHEN pg_is_in_recovery() THEN NULL \
+             ELSE pg_walfile_name(pg_current_wal_lsn()) END",
+        )
+        .fetch_one(&mut conn)
+        .await?;
         let _ = conn.close().await;
-        Ok::<bool, sqlx::Error>(!standby)
+        Ok::<_, sqlx::Error>(wal)
     };
-    matches!(tokio::time::timeout(ASK_LIMIT, ask).await, Ok(Ok(true)))
+    let wal = tokio::time::timeout(ASK_LIMIT, ask).await.ok()?.ok()??;
+    u32::from_str_radix(wal.get(..8)?, 16).ok()
+}
+
+/// Which of the nodes' timelines (`None` for a standby or no answer) is
+/// the primary's: the newest, so a former primary back after a failover
+/// is never taken for it.
+fn newest(timelines: &[Option<u32>]) -> Option<usize> {
+    timelines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| Some((i, (*t)?)))
+        .max_by_key(|&(i, t)| (t, std::cmp::Reverse(i)))
+        .map(|(i, _)| i)
 }
 
 /// Which of `nodes` is the primary now, asking each with `options` (the
 /// name, the role, the TLS mode).
 pub async fn find(options: &PgConnectOptions, nodes: &[Node]) -> Option<usize> {
-    for (i, node) in nodes.iter().enumerate() {
-        if is_primary(&on(options, node)).await {
-            return Some(i);
-        }
+    let mut timelines = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        timelines.push(timeline(&on(options, node)).await);
     }
-    None
+    newest(&timelines)
 }
 
 /// A pool on the primary. With more than one node it starts on `options`,
@@ -170,4 +187,21 @@ pub async fn connect(url: &str, limit: Duration) -> Result<PgConnection, String>
             )
         })?
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest;
+
+    #[test]
+    fn of_two_primaries_the_newest_timeline_is_the_primary() {
+        // A former primary back after a failover answers as a primary on
+        // the timeline it had; the machine promoted since is on a newer one.
+        assert_eq!(newest(&[Some(3), Some(4)]), Some(1));
+        assert_eq!(newest(&[Some(5), Some(4)]), Some(0));
+        assert_eq!(newest(&[None, Some(2)]), Some(1));
+        assert_eq!(newest(&[Some(2), None]), Some(0));
+        assert_eq!(newest(&[Some(4), Some(4)]), Some(0));
+        assert_eq!(newest(&[None, None]), None);
+    }
 }
