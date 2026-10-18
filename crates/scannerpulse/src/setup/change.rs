@@ -52,7 +52,9 @@ fn settings_with(text: &str, changes: &[(&str, Option<&str>)]) -> Result<Step, S
     })
 }
 
-/// Let's Encrypt off: another certificate is served.
+/// Let's Encrypt off: another certificate is served. Another authority or
+/// a stand-in named for a trial goes too, so a later `tls letsencrypt` asks
+/// Let's Encrypt itself.
 fn without_acme(text: &str) -> Result<Step, String> {
     settings_with(
         text,
@@ -60,6 +62,8 @@ fn without_acme(text: &str) -> Result<Step, String> {
             ("SCANNERPULSE_ACME", None),
             ("SCANNERPULSE_ACME_NAMES", None),
             ("SCANNERPULSE_CLOUDFLARE_TOKEN", None),
+            ("SCANNERPULSE_ACME_DIRECTORY", None),
+            ("SCANNERPULSE_CLOUDFLARE_API", None),
         ],
     )
 }
@@ -367,7 +371,7 @@ mod tests {
     #[test]
     fn an_installed_certificate_is_copied_and_the_web_restarted() {
         let with_acme = format!(
-            "{SETTINGS}SCANNERPULSE_ACME=\"web\"\nSCANNERPULSE_ACME_NAMES=\"radio.example.org\"\n"
+            "{SETTINGS}SCANNERPULSE_ACME=\"web\"\nSCANNERPULSE_ACME_NAMES=\"radio.example.org\"\nSCANNERPULSE_ACME_DIRECTORY=\"https://acme-staging-v02.api.letsencrypt.org/directory\"\n"
         );
         let steps = tls_install_steps(
             &with_acme,

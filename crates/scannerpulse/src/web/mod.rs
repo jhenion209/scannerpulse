@@ -415,10 +415,7 @@ pub async fn run(
             .map_err(|error| format!("cannot serve HTTPS: {error}"))?;
         let certs = Arc::new(crate::acme::Certs::new(Arc::new(own)));
         if let Some(acme) = config.machine.acme.clone() {
-            if let Some(kept) = crate::acme::stored(&config.acme_dir, &acme.names) {
-                certs.serve(Arc::new(kept));
-            }
-            crate::acme::spawn(acme, config.acme_dir, certs.clone(), state.renewal.clone());
+            crate::acme::start(acme, config.acme_dir, certs.clone(), state.renewal.clone());
         }
         state.certs = Some(certs);
     }

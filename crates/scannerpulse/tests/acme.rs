@@ -279,20 +279,143 @@ fn a_tls_alpn_check_is_shown_the_challenge_and_everyone_else_the_site() {
     assert_eq!(cert, renewed.cert[0].to_vec(), "a new certificate at once");
 }
 
+/// A certificate for `names` signed by a test authority (not by itself),
+/// as PEM: the chain, then the key.
+fn issued(names: &[&str]) -> (String, String) {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+    let mut authority = CertificateParams::new(Vec::<String>::new()).unwrap();
+    authority.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    authority
+        .distinguished_name
+        .push(DnType::CommonName, "Test Authority");
+    let authority_key = KeyPair::generate().unwrap();
+    let mut leaf =
+        CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>()).unwrap();
+    leaf.distinguished_name.push(DnType::CommonName, names[0]);
+    let key = KeyPair::generate().unwrap();
+    let cert = leaf
+        .signed_by(&key, &Issuer::new(authority, authority_key))
+        .unwrap();
+    (cert.pem(), key.serialize_pem())
+}
+
+fn web(names: &[&str], directory: &str) -> Settings {
+    Settings {
+        proof: Proof::Web,
+        names: names.iter().map(|n| n.to_string()).collect(),
+        directory: directory.into(),
+        cloudflare_api: None,
+    }
+}
+
 #[test]
-fn the_certificate_kept_on_disk_is_served_only_for_the_names_asked() {
+fn the_certificate_kept_on_disk_is_served_only_for_the_names_and_authority_asked() {
     let dir = tempfile::tempdir().unwrap();
-    let names = vec!["radio.example.org".to_string()];
-    assert!(acme::stored(dir.path(), &names).is_none(), "none yet");
-    cert::make(
-        &names,
-        &dir.path().join("cert.pem"),
-        &dir.path().join("key.pem"),
+    let settings = web(&["radio.example.org"], acme::LETS_ENCRYPT);
+    assert!(acme::stored(dir.path(), &settings).is_none(), "none yet");
+    let (chain, key) = issued(&["radio.example.org"]);
+    acme::keep_certificate(dir.path(), &settings, &chain, &key).unwrap();
+    let kept = acme::stored(dir.path(), &settings).expect("kept");
+    assert_eq!(cert::found(&kept).unwrap().names, settings.names);
+    assert!(acme::stored(dir.path(), &web(&["other.example.org"], acme::LETS_ENCRYPT)).is_none());
+    // One from Let's Encrypt's staging server is not Let's Encrypt's own.
+    let staging = web(
+        &["radio.example.org"],
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+    );
+    assert!(acme::stored(dir.path(), &staging).is_none());
+}
+
+/// Waits up to 5 s for the renewal to have tried.
+async fn tried(renewal: &Mutex<acme::Renewal>) -> bool {
+    for _ in 0..50 {
+        if renewal.lock().unwrap().tried.is_some() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_certificate_the_site_did_not_get_from_the_authority_is_replaced_at_once() {
+    // An installed certificate for the same names, signed by another
+    // authority and far from its end: the site still asks for its own.
+    let installed = tempfile::tempdir().unwrap();
+    let (chain, key) = issued(&["radio.example.org"]);
+    let (c, k) = (
+        installed.path().join("cert.pem"),
+        installed.path().join("key.pem"),
+    );
+    std::fs::write(&c, chain).unwrap();
+    std::fs::write(&k, key).unwrap();
+    let certs = Arc::new(Certs::new(Arc::new(cert::certified(&c, &k).unwrap())));
+    let renewal = Arc::new(Mutex::new(acme::Renewal::default()));
+    let dir = tempfile::tempdir().unwrap();
+    acme::start(
+        web(&["radio.example.org"], "https://127.0.0.1:1/directory"),
+        dir.path().to_path_buf(),
+        certs,
+        renewal.clone(),
+    );
+    assert!(tried(&renewal).await, "asked at once");
+}
+
+#[tokio::test]
+async fn the_kept_certificate_is_served_and_nothing_asked_while_it_is_young() {
+    let settings = web(&["radio.example.org"], "https://127.0.0.1:1/directory");
+    let dir = tempfile::tempdir().unwrap();
+    let (chain, key) = issued(&["radio.example.org"]);
+    acme::keep_certificate(dir.path(), &settings, &chain, &key).unwrap();
+    let (_own, own) = made(&["radio-a"]);
+    let certs = Arc::new(Certs::new(own));
+    let renewal = Arc::new(Mutex::new(acme::Renewal::default()));
+    acme::start(
+        settings.clone(),
+        dir.path().to_path_buf(),
+        certs.clone(),
+        renewal.clone(),
+    );
+    assert_eq!(
+        cert::found(&certs.current()).unwrap().names,
+        settings.names,
+        "served from the start"
+    );
+    assert!(!tried(&renewal).await, "nothing asked");
+}
+
+#[tokio::test]
+async fn a_request_that_gets_no_answer_ends_within_its_limit() {
+    // Takes the connection and never answers.
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = silent.local_addr().unwrap();
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        loop {
+            if let Ok((socket, _)) = silent.accept().await {
+                open.push(socket);
+            }
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (_own, own) = made(&["radio-a"]);
+    let certs = Certs::new(own);
+    let ended = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        acme::obtain(
+            &web(
+                &["radio.example.org"],
+                &format!("https://{address}/directory"),
+            ),
+            dir.path(),
+            &certs,
+            std::time::Duration::from_secs(2),
+        ),
     )
-    .unwrap();
-    let kept = acme::stored(dir.path(), &names).expect("kept");
-    assert_eq!(cert::found(&kept).unwrap().names, names);
-    assert!(acme::stored(dir.path(), &["other.example.org".to_string()]).is_none());
+    .await;
+    held.abort();
+    let error = ended.expect("it ends").unwrap_err();
+    assert!(error.contains("did not answer within"), "{error}");
 }
 
 /// A stand-in for Cloudflare's API: one zone, `example.org`; it keeps every

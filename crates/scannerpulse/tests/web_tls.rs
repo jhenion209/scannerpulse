@@ -120,10 +120,26 @@ async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
     cert::make(&["localhost".into(), "127.0.0.1".into()], &own, &own_key).unwrap();
     let kept = dir.path().join("acme");
     std::fs::create_dir(&kept).unwrap();
+    // Kept as Let's Encrypt's would be: it signed itself here, so the
+    // renewal asks at once, fails (nothing answers there), and it stays.
+    let made = dir.path().join("made");
+    std::fs::create_dir(&made).unwrap();
     cert::make(
         &["radio.example.org".into()],
-        &kept.join("cert.pem"),
-        &kept.join("key.pem"),
+        &made.join("cert.pem"),
+        &made.join("key.pem"),
+    )
+    .unwrap();
+    scannerpulse::acme::keep_certificate(
+        &kept,
+        &Settings {
+            proof: Proof::Web,
+            names: vec!["radio.example.org".into()],
+            directory: "https://127.0.0.1:1/directory".into(),
+            cloudflare_api: None,
+        },
+        &std::fs::read_to_string(made.join("cert.pem")).unwrap(),
+        &std::fs::read_to_string(made.join("key.pem")).unwrap(),
     )
     .unwrap();
     let port = free_port();

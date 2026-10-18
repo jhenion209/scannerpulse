@@ -41,6 +41,11 @@ describe("Let's Encrypt's renewals", () => {
       text: 'asked 1 min ago, no answer yet',
       ok: true,
     });
+    // A request ends within ten minutes: one unanswered for longer is stuck.
+    expect(renewalText({ ...acme, tried: '2026-10-18T11:30:00Z' }, now)).toEqual({
+      text: 'asked 30 min ago, no answer yet',
+      ok: false,
+    });
     expect(
       renewalText({ ...acme, tried: '2026-10-18T09:00:00Z', renewed: '2026-10-18T09:01:00Z' }, now),
     ).toEqual({ text: 'renewed 2 h 59 min ago', ok: true });

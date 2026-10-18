@@ -68,7 +68,9 @@ export function renewalText(acme: Acme, now: Date): { text: string; ok: boolean 
     return { text: `the request ${ago(acme.tried)} failed: ${acme.error} (asked again within the hour)`, ok: false };
   }
   if (acme.tried !== null && (acme.renewed === null || new Date(acme.renewed) < new Date(acme.tried))) {
-    return { text: `asked ${ago(acme.tried)}, no answer yet`, ok: true };
+    // A request ends within ten minutes: one unanswered for longer is stuck.
+    const stuck = now.getTime() - new Date(acme.tried).getTime() > 15 * 60_000;
+    return { text: `asked ${ago(acme.tried)}, no answer yet`, ok: !stuck };
   }
   if (acme.renewed !== null) return { text: `renewed ${ago(acme.renewed)}`, ok: true };
   return { text: 'renewed when a third of its life is left', ok: true };

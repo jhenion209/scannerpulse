@@ -178,7 +178,7 @@ so the page shows the command, run on the machine:
   and checks that it reaches each name's zone). The site keeps serving its
   certificate until the new one arrives; This machine shows the request's
   outcome and each renewal. `tls install` and `tls self` turn Let's Encrypt
-  off;
+  off, another authority named for it included;
 - `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump` asks for a
   push address and sets it, with the database on this machine (with no terminal it reads the first line of
   standard input; the address holds a token, so it is never an argument,

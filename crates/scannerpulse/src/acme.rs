@@ -31,6 +31,11 @@ const ACME_TLS: &[u8] = b"acme-tls/1";
 const CHECK: Duration = Duration::from_secs(12 * 3600);
 const RETRY: Duration = Duration::from_secs(3600);
 
+/// How long one request may take, from the account to the certificate: the
+/// authority's client sets no limit of its own, and a request that hangs
+/// would stop every renewal after it.
+const ORDER_LIMIT: Duration = Duration::from_secs(600);
+
 /// How long Cloudflare's servers get to answer with a new TXT record before
 /// the authority is told to look.
 // ponytail: a fixed wait; ask Cloudflare's servers for the record first if
@@ -248,10 +253,36 @@ pub fn server_config(certs: Arc<Certs>) -> rustls::ServerConfig {
 
 /// The certificate kept in `dir` (cert.pem, key.pem), if it is for exactly
 /// `names` and has not ended.
-pub fn stored(dir: &Path, names: &[String]) -> Option<CertifiedKey> {
+pub fn stored(dir: &Path, settings: &Settings) -> Option<CertifiedKey> {
+    // A certificate from another authority (Let's Encrypt's staging server,
+    // say) is not this one's, whatever it names.
+    let authority = std::fs::read_to_string(dir.join("authority")).ok()?;
+    if authority.trim() != settings.directory {
+        return None;
+    }
     let key = crate::cert::certified(&dir.join("cert.pem"), &dir.join("key.pem")).ok()?;
     let found = crate::cert::found(&key).ok()?;
-    (same_names(&found.names, names) && found.not_after > Utc::now()).then_some(key)
+    (same_names(&found.names, &settings.names) && found.not_after > Utc::now()).then_some(key)
+}
+
+/// Keeps the certificate the authority gave (`chain` and `key`, PEM) in
+/// `dir`, with the authority's directory beside it, and gives it ready to
+/// serve.
+pub fn keep_certificate(
+    dir: &Path,
+    settings: &Settings,
+    chain: &str,
+    key: &str,
+) -> Result<CertifiedKey, String> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|error| format!("{}: {error}", dir.display()))?;
+    keep(&dir.join("key.pem"), key.as_bytes(), 0o600)?;
+    keep(&dir.join("cert.pem"), chain.as_bytes(), 0o644)?;
+    keep(&dir.join("authority"), settings.directory.as_bytes(), 0o644)?;
+    crate::cert::certified(&dir.join("cert.pem"), &dir.join("key.pem"))
 }
 
 /// What the admin page shows of the renewals.
@@ -262,20 +293,30 @@ pub struct Renewal {
     pub error: Option<String>,
 }
 
-/// Renews in the background: at once when the certificate served is not the
-/// authority's for these names, then whenever a third of its life is left.
-pub fn spawn(settings: Settings, dir: PathBuf, certs: Arc<Certs>, renewal: Arc<Mutex<Renewal>>) {
+/// Serves the certificate kept in `dir` when this authority gave it for
+/// these names, and renews in the background: at once when the one served
+/// is not that kept one, then whenever a third of its life is left.
+pub fn start(settings: Settings, dir: PathBuf, certs: Arc<Certs>, renewal: Arc<Mutex<Renewal>>) {
+    let mut ours = match stored(&dir, &settings) {
+        Some(kept) => {
+            certs.serve(Arc::new(kept));
+            true
+        }
+        None => false,
+    };
     tokio::spawn(async move {
         let names = settings.names.join(", ");
         loop {
-            let due = crate::cert::found(&certs.current())
-                .map_or(true, |found| due(&found, &settings.names, Utc::now()));
+            let due = !ours
+                || crate::cert::found(&certs.current())
+                    .map_or(true, |found| due(&found, &settings.names, Utc::now()));
             let wait = if due {
                 renewal.lock().unwrap_or_else(|e| e.into_inner()).tried = Some(Utc::now());
-                let result = obtain(&settings, &dir, &certs).await;
+                let result = obtain(&settings, &dir, &certs, ORDER_LIMIT).await;
                 let mut kept = renewal.lock().unwrap_or_else(|e| e.into_inner());
                 match result {
                     Ok(()) => {
+                        ours = true;
                         crate::log::info(format!("acme: a new certificate for {names} is served"));
                         kept.renewed = Some(Utc::now());
                         kept.error = None;
@@ -296,21 +337,16 @@ pub fn spawn(settings: Settings, dir: PathBuf, certs: Arc<Certs>, renewal: Arc<M
 }
 
 /// Asks the authority for a certificate for `settings.names`, proving each
-/// one; keeps it in `dir`, and serves it.
-pub async fn obtain(settings: &Settings, dir: &Path, certs: &Certs) -> Result<(), String> {
+/// one, within `limit`; keeps it in `dir`, and serves it.
+pub async fn obtain(
+    settings: &Settings,
+    dir: &Path,
+    certs: &Certs,
+    limit: Duration,
+) -> Result<(), String> {
     use instant_acme::{
         AuthorizationStatus, ChallengeType, Identifier, NewOrder, OrderStatus, RetryPolicy,
     };
-    let account = account(settings, dir).await?;
-    let identifiers: Vec<Identifier> = settings
-        .names
-        .iter()
-        .map(|n| Identifier::Dns(n.clone()))
-        .collect();
-    let mut order = account
-        .new_order(&NewOrder::new(&identifiers))
-        .await
-        .map_err(|error| format!("the authority refused the order: {error}"))?;
     let cloudflare = match &settings.proof {
         Proof::Web => None,
         Proof::Cloudflare { token } => Some(match &settings.cloudflare_api {
@@ -322,7 +358,17 @@ pub async fn obtain(settings: &Settings, dir: &Path, certs: &Certs) -> Result<()
     let polls = RetryPolicy::new()
         .initial_delay(Duration::from_secs(2))
         .timeout(Duration::from_secs(180));
-    let proved = async {
+    let attempt = async {
+        let account = account(settings, dir).await?;
+        let identifiers: Vec<Identifier> = settings
+            .names
+            .iter()
+            .map(|n| Identifier::Dns(n.clone()))
+            .collect();
+        let mut order = account
+            .new_order(&NewOrder::new(&identifiers))
+            .await
+            .map_err(|error| format!("the authority refused the order: {error}"))?;
         let mut authorizations = order.authorizations();
         while let Some(authz) = authorizations.next().await {
             let mut authz = authz.map_err(|error| format!("the authority: {error}"))?;
@@ -381,8 +427,16 @@ pub async fn obtain(settings: &Settings, dir: &Path, certs: &Certs) -> Result<()
             .await
             .map_err(|error| format!("the certificate did not come: {error}"))?;
         Ok((chain, key))
-    }
-    .await;
+    };
+    // Whatever happened, the proofs go after.
+    let proved = tokio::time::timeout(limit, attempt)
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "the authority did not answer within {} s",
+                limit.as_secs()
+            ))
+        });
     for name in &settings.names {
         certs.forget(name);
     }
@@ -394,14 +448,7 @@ pub async fn obtain(settings: &Settings, dir: &Path, certs: &Certs) -> Result<()
         }
     }
     let (chain, key) = proved?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|error| format!("{}: {error}", dir.display()))?;
-    keep(&dir.join("key.pem"), key.as_bytes(), 0o600)?;
-    keep(&dir.join("cert.pem"), chain.as_bytes(), 0o644)?;
-    let served = crate::cert::certified(&dir.join("cert.pem"), &dir.join("key.pem"))?;
+    let served = keep_certificate(dir, settings, &chain, &key)?;
     certs.serve(Arc::new(served));
     Ok(())
 }
