@@ -12,7 +12,7 @@ publish = false
 argon2 = "0.6"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 chrono-tz = "0.10"
 crc32fast = "1"
