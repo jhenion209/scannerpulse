@@ -120,9 +120,32 @@ impl Settings {
     }
 }
 
+/// Endings that only private networks use: no public authority proves a
+/// name under them.
+const PRIVATE: [&str; 9] = [
+    "lan",
+    "local",
+    "home.arpa",
+    "internal",
+    "localhost",
+    "test",
+    "invalid",
+    "home",
+    "corp",
+];
+
 /// A name the authority can prove: a DNS name of two labels or more, not an
-/// address and not a wildcard.
+/// address, not a wildcard, and not under an ending private networks use.
 pub fn check_name(name: &str) -> Result<(), String> {
+    let lower = name.to_ascii_lowercase();
+    if PRIVATE
+        .iter()
+        .any(|end| lower.ends_with(&format!(".{end}")))
+    {
+        return Err(format!(
+            "{name:?} is a private name: Let's Encrypt proves only names under a public domain"
+        ));
+    }
     let label = |l: &str| {
         !l.is_empty()
             && l.len() <= 63

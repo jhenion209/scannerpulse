@@ -108,6 +108,19 @@ fn a_name_for_lets_encrypt_is_a_public_dns_name() {
     ] {
         assert!(acme::check_name(bad).is_err(), "{bad:?}");
     }
+    // Names a home network uses, which no public authority can prove.
+    for private in [
+        "radio.lan",
+        "radio.local",
+        "radio.home.arpa",
+        "radio.internal",
+        "radio.localhost",
+        "radio.test",
+        "Radio.LAN",
+    ] {
+        let error = acme::check_name(private).unwrap_err();
+        assert!(error.contains("private"), "{private}: {error}");
+    }
 }
 
 fn found(names: &[&str], days_old: i64, days_left: i64) -> cert::Found {
