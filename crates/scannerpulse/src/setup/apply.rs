@@ -183,7 +183,6 @@ pub async fn first_admin(
     .map_err(|error| format!("the admin {login}: {error}"))
 }
 
-/// Waits until `web` answers `/health` over HTTPS with the certificate setup made.
 /// Waits until `web` answers on this machine. Its certificate is not
 /// checked: one the person installs names their site, not 127.0.0.1, and
 /// nothing secret goes to the loopback address.

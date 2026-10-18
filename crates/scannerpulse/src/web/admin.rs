@@ -126,9 +126,6 @@ pub async fn status(_: Admin, State(state): State<AppState>) -> Result<Json<Valu
 /// How long a traffic report is kept before it is made again.
 pub const TRAFFIC_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
-/// minutes on each host, since it reads months of calls; a changed time zone
-/// makes it again.
 /// `GET /api/admin/machine`: this machine's certificate, its backups'
 /// folder, the age of each kind's newest backup, and which kinds push; the
 /// admin page shows how to change each with a command run here as root.
@@ -172,6 +169,9 @@ pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Val
     })))
 }
 
+/// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
+/// minutes on each host, since it reads months of calls; a changed time zone
+/// makes it again.
 pub async fn traffic(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let zone = crate::settings::load(&state.pool).await?.time_zone;
     let mut kept = state.traffic.lock().await;

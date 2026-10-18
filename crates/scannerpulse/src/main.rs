@@ -1838,7 +1838,6 @@ fn confirm(question: &str) -> std::io::Result<bool> {
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// Prints one JSON line per file. Exits 0 when every file was read.
 /// After a backup of `kind` succeeds: its time for the admin page, and its
 /// push address, if the settings file has one. Neither fails the backup;
 /// each says when it could not be done.
@@ -1862,6 +1861,7 @@ async fn backup_succeeded(kind: &str, database_url: &str) {
     }
 }
 
+/// Prints one JSON line per file. Exits 0 when every file was read.
 fn read(zone: &str, files: &[String]) -> ExitCode {
     let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
         eprintln!("read: {zone:?} is not a known time zone");
