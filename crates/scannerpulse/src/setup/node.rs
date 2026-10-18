@@ -106,7 +106,8 @@ pub fn authorized_line(hub_key: &str, hub: &[IpAddr], binary: &Path) -> String {
 fn replicator_sql(password: &str) -> String {
     let quoted = password.replace('\'', "''");
     format!(
-        "SELECT format('CREATE ROLE {REPLICATOR} REPLICATION LOGIN PASSWORD %L', '{quoted}') \
+        "SET log_min_error_statement = panic;\n\
+         SELECT format('CREATE ROLE {REPLICATOR} REPLICATION LOGIN PASSWORD %L', '{quoted}') \
          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{REPLICATOR}') \\gexec\n\
          ALTER ROLE {REPLICATOR} PASSWORD '{quoted}';\n\
          GRANT EXECUTE ON FUNCTION pg_ls_dir(text, boolean, boolean) TO {REPLICATOR};\n\
@@ -116,27 +117,15 @@ fn replicator_sql(password: &str) -> String {
     )
 }
 
-fn psql_step(title: &str, sql: String) -> Step {
-    Step {
-        title: title.into(),
-        action: Action::Run {
-            program: "runuser".into(),
-            args: [
-                "-u",
-                "postgres",
-                "--",
-                "psql",
-                "-q",
-                "-v",
-                "ON_ERROR_STOP=1",
-            ]
-            .map(String::from)
-            .to_vec(),
-            input: Some(sql),
-            env: Vec::new(),
-            unless: None,
-        },
-    }
+/// A psql step that has nothing to change while this machine has no
+/// cluster (a standby's copy cut short leaves none; the copy makes one).
+fn psql_if_cluster(title: &str, data: &str, sql: String) -> Step {
+    script(
+        title,
+        "[ -f \"$DATA/PG_VERSION\" ] || exit 0\nrunuser -u postgres -- psql -q -v ON_ERROR_STOP=1",
+        &[("DATA", data)],
+        Some(sql),
+    )
 }
 
 /// A shell script run as a step, its values as named variables and
@@ -251,6 +240,7 @@ pub fn steps(
         "systemctl",
         &["enable", "--now", service],
     ));
+    steps.push(super::steps::firewall(true, 5432));
     if system.family == Family::Dnf {
         // Debian's packages give PostgreSQL a certificate; these do not.
         steps.push(script(
@@ -263,13 +253,15 @@ pub fn steps(
             ],
             None,
         ));
-        steps.push(psql_step(
+        steps.push(psql_if_cluster(
             "Turn on TLS",
+            data,
             "ALTER SYSTEM SET ssl = on;\n".into(),
         ));
     }
-    steps.push(psql_step(
+    steps.push(psql_if_cluster(
         "Let PostgreSQL take connections from the network, and keep what a rewind needs",
+        data,
         "ALTER SYSTEM SET listen_addresses = '*';\nALTER SYSTEM SET wal_log_hints = on;\n".into(),
     ));
     steps.push(script(
@@ -278,10 +270,11 @@ pub fn steps(
         &[("MARK", MARK), ("HBA", system.postgres_hba())],
         Some(hba(plan, hub, nodes)),
     ));
-    steps.push(run(
+    steps.push(script(
         "Restart PostgreSQL 17",
-        "systemctl",
-        &["restart", service],
+        "[ -f \"$DATA/PG_VERSION\" ] || exit 0\nsystemctl restart \"$SERVICE\"",
+        &[("DATA", data), ("SERVICE", system.postgres_cluster())],
+        None,
     ));
     let pgpass = Path::new(system.postgres_home()).join(".pgpass");
     steps.push(Step {
@@ -294,10 +287,15 @@ pub fn steps(
         },
     });
     if index == 0 {
-        steps.push(psql_step(
+        // A standby since a change of roles has them from the primary.
+        steps.push(script(
             "Make the database, its role, and the copying role",
-            super::steps::database_sql(&plan.password)
-                + &replicator_sql(&plan.replication_password),
+            "if runuser -u postgres -- psql -tAXc 'SELECT pg_is_in_recovery()' | grep -qx t; then\n  echo \"a standby: its roles come from the primary\"; exit 0\nfi\nrunuser -u postgres -- psql -q -v ON_ERROR_STOP=1",
+            &[],
+            Some(
+                super::steps::database_sql(&plan.password)
+                    + &replicator_sql(&plan.replication_password),
+            ),
         ));
     } else {
         steps.push(script(
@@ -306,8 +304,10 @@ pub fn steps(
             &[
                 ("DATA", data),
                 ("BIN", system.postgres_bin()),
-                ("SERVICE", service),
+                ("SERVICE", system.postgres_cluster()),
                 ("PRIMARY", &plan.nodes[0]),
+                ("NODE", NODE),
+                ("DATABASE", super::steps::DATABASE),
             ],
             None,
         ));
@@ -381,14 +381,21 @@ pub fn steps(
 }
 
 /// The standby's copy: refused over a cluster that holds databases of its
-/// own; a machine already following its primary is left as it is.
+/// own; a machine already following its primary, or already the primary of
+/// this install (after a change of roles), is left as it is; a copy cut
+/// short (no cluster) is made again.
 const COPY: &str = r#"set -e
-if runuser -u postgres -- psql -tAXc 'SELECT pg_is_in_recovery()' | grep -qx t; then
-  echo "already a standby"; exit 0
-fi
-n=$(runuser -u postgres -- psql -tAXc "SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1')")
-if [ "$n" != 0 ]; then
-  echo "this machine's PostgreSQL holds databases of its own: setup will not replace them" >&2; exit 1
+if [ -f "$DATA/PG_VERSION" ]; then
+  if runuser -u postgres -- psql -tAXc 'SELECT pg_is_in_recovery()' | grep -qx t; then
+    echo "already a standby"; exit 0
+  fi
+  n=$(runuser -u postgres -- psql -tAXc "SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1')")
+  if [ "$n" != 0 ]; then
+    if [ -f "$NODE" ] && runuser -u postgres -- psql -tAXc "SELECT 1 FROM pg_database WHERE datname = '$DATABASE'" | grep -qx 1; then
+      echo "already the primary"; exit 0
+    fi
+    echo "this machine's PostgreSQL holds databases of its own: setup will not replace them" >&2; exit 1
+  fi
 fi
 systemctl stop "$SERVICE"
 find "$DATA" -mindepth 1 -delete
@@ -1099,6 +1106,104 @@ mod tests {
 
     fn titles(steps: &[Step]) -> Vec<&str> {
         steps.iter().map(|s| s.title.as_str()).collect()
+    }
+
+    /// A step's program, its arguments, its environment and its input.
+    type Ran<'a> = (
+        &'a str,
+        &'a [String],
+        &'a [(String, String)],
+        Option<&'a str>,
+    );
+
+    fn ran<'a>(steps: &'a [Step], title: &str) -> Ran<'a> {
+        let step = steps
+            .iter()
+            .find(|s| s.title == title)
+            .unwrap_or_else(|| panic!("{title}"));
+        let Action::Run {
+            program,
+            args,
+            env,
+            input,
+            ..
+        } = &step.action
+        else {
+            panic!("{title}")
+        };
+        (program, args, env, input.as_deref())
+    }
+
+    #[test]
+    fn a_join_runs_again_whatever_role_the_machine_has_now() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let binary = Path::new("/usr/local/bin/scannerpulse");
+        let (hub, nodes) = (ips(&["192.0.2.10"]), ips(&["192.0.2.21", "192.0.2.22"]));
+        let first = steps(&plan(), 0, &debian, binary, &hub, &nodes);
+        let second = steps(&plan(), 1, &debian, binary, &hub, &nodes);
+        // Machine 1, a standby since a change of roles, takes its roles
+        // from the primary; and no password reaches PostgreSQL's log.
+        let (program, args, _, input) =
+            ran(&first, "Make the database, its role, and the copying role");
+        assert_eq!(program, "/bin/sh");
+        let body = &args[1];
+        assert!(
+            body.find("pg_is_in_recovery").unwrap() < body.find("ON_ERROR_STOP").unwrap(),
+            "{body}"
+        );
+        assert!(
+            input
+                .unwrap()
+                .starts_with("SET log_min_error_statement = panic;\n"),
+            "{input:?}"
+        );
+        // Machine 2, the primary since a change of roles, is left as it is;
+        // a copy cut short is made again; Debian's cluster is stopped by
+        // its own unit, which waits.
+        let (_, args, env, _) = ran(&second, "Copy the primary's data, and follow it");
+        assert!(args[1].contains("already the primary"), "{}", args[1]);
+        assert!(args[1].contains("PG_VERSION"), "{}", args[1]);
+        assert!(env.contains(&("SERVICE".into(), "postgresql@17-main".into())));
+        // With no cluster left by a copy cut short, the steps before the
+        // copy have nothing to change.
+        for title in [
+            "Let PostgreSQL take connections from the network, and keep what a rewind needs",
+            "Restart PostgreSQL 17",
+        ] {
+            let (program, args, env, _) = ran(&second, title);
+            assert_eq!(program, "/bin/sh", "{title}");
+            assert!(
+                args[1].starts_with("[ -f \"$DATA/PG_VERSION\" ] || exit 0"),
+                "{title}"
+            );
+            assert!(env.contains(&("DATA".into(), "/var/lib/postgresql/17/main".into())));
+        }
+        let (_, _, env, _) = ran(&second, "Restart PostgreSQL 17");
+        assert!(env.contains(&("SERVICE".into(), "postgresql@17-main".into())));
+    }
+
+    #[test]
+    fn a_database_machine_under_firewalld_lets_postgresql_in() {
+        use crate::setup::system::detect;
+        let rocky = detect("ID=\"rocky\"\nVERSION_ID=\"9.6\"\n", "x86_64").unwrap();
+        let all = steps(
+            &plan(),
+            1,
+            &rocky,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        let list = titles(&all);
+        let at = |title: &str| {
+            list.iter()
+                .position(|t| *t == title)
+                .unwrap_or_else(|| panic!("{title}: {list:?}"))
+        };
+        let open = super::super::steps::firewall(true, 5432).title;
+        assert!(at("Start PostgreSQL 17, now and at boot") < at(&open));
+        assert!(at(&open) < at("Copy the primary's data, and follow it"));
     }
 
     #[test]

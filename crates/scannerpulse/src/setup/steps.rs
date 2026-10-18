@@ -512,8 +512,11 @@ pub(super) fn setfacl(title: &str, args: &[&str]) -> Step {
 /// account; it does nothing that is already done.
 pub(super) fn database_sql(password: &str) -> String {
     let quoted = password.replace('\'', "''");
+    // A statement that fails is not written to PostgreSQL's log with its
+    // password.
     format!(
-        "SELECT format('CREATE ROLE {ACCOUNT} LOGIN PASSWORD %L', '{quoted}') \
+        "SET log_min_error_statement = panic;\n\
+         SELECT format('CREATE ROLE {ACCOUNT} LOGIN PASSWORD %L', '{quoted}') \
          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ACCOUNT}') \\gexec\n\
          ALTER ROLE {ACCOUNT} PASSWORD '{quoted}';\n\
          SELECT 'CREATE DATABASE {DATABASE} OWNER {ACCOUNT} TEMPLATE template0 ENCODING ''UTF8'' \
