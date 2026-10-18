@@ -5,6 +5,7 @@ pub mod apply;
 pub mod ask;
 pub mod change;
 pub mod folders;
+pub mod plan;
 pub mod screen;
 pub mod steps;
 pub mod system;
@@ -121,7 +122,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             }
         }
         let db_password = match &answers.database {
-            steps::Database::Here => made_password.clone(),
+            steps::Database::Here | steps::Database::Nodes(_) => made_password.clone(),
             steps::Database::Theirs(remote) => remote.password.clone(),
         };
         let steps = steps::steps(&answers, &system, Path::new(BINARY), &db_password);
@@ -167,7 +168,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             .map(|(_, url)| url)
             .unwrap_or_default(),
         db_password: match &answers.database {
-            steps::Database::Here => made_password,
+            steps::Database::Here | steps::Database::Nodes(_) => made_password,
             steps::Database::Theirs(remote) => remote.password.clone(),
         },
     };
@@ -236,6 +237,10 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
                 remote.port,
                 remote.role,
                 remote.sslmode.name()
+            ),
+            steps::Database::Nodes(pair) => format!(
+                "two machines of its own: {} (the primary) and {} (its standby, promoted by hand); this machine waits for them to join at {}",
+                pair.nodes[0], pair.nodes[1], pair.hub
             ),
         },
         match steps::backups_folder(answers) {
@@ -324,6 +329,13 @@ fn detail(step: &Step) -> String {
             format!("add the admin {login} in the database, or give it the new password")
         }
         Action::WaitForWeb { port } => format!("wait for https://127.0.0.1:{port}/health"),
+        Action::Plan { nodes, hub, .. } => format!(
+            "write {} (the database machines {} and {}, this machine as {hub}, the database's passwords; root's alone)",
+            plan::PLAN,
+            nodes[0],
+            nodes[1]
+        ),
+        Action::WaitForNodes => "wait until both database machines have joined".into(),
     }
 }
 

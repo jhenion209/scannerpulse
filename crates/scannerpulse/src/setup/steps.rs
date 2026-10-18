@@ -59,6 +59,49 @@ pub enum Database {
     Here,
     /// One the person runs; its failover and backups stay theirs.
     Theirs(Remote),
+    /// Two database machines of their own, which join this one.
+    Nodes(Pair),
+}
+
+/// Two database machines: the first starts as the primary, the second is
+/// its standby, promoted by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pair {
+    /// Their names or addresses.
+    pub nodes: [String; 2],
+    /// This machine's address, as they reach it.
+    pub hub: String,
+}
+
+impl Pair {
+    /// The database's address on the first machine; the settings file names
+    /// both (SCANNERPULSE_DATABASE_HOSTS), and the services find the primary.
+    /// Their PostgreSQL always speaks TLS.
+    pub fn url(&self) -> String {
+        Remote {
+            host: self.nodes[0].clone(),
+            port: PORT_PG,
+            name: DATABASE.into(),
+            role: ACCOUNT.into(),
+            sslmode: SslMode::Require,
+            ..Default::default()
+        }
+        .url()
+    }
+
+    pub fn hosts(&self) -> String {
+        self.nodes
+            .iter()
+            .map(|n| {
+                if n.contains(':') {
+                    format!("[{n}]:{PORT_PG}")
+                } else {
+                    format!("{n}:{PORT_PG}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// A database the person runs.
@@ -201,6 +244,16 @@ pub enum Action {
     Admin { login: String, password: String },
     /// Waits until `web` answers on this machine.
     WaitForWeb { port: u16 },
+    /// Writes the plan of the database machines (keeping who has joined, and
+    /// the replication role's password), with this machine's public key.
+    Plan {
+        nodes: Vec<String>,
+        hub: String,
+        password: String,
+    },
+    /// Waits until both database machines have joined and one is the
+    /// primary.
+    WaitForNodes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,7 +325,7 @@ pub fn backups_folder(answers: &Answers) -> Option<PathBuf> {
                 .clone()
                 .unwrap_or_else(|| backups_path(&answers.archive)),
         ),
-        Database::Theirs(_) => None,
+        Database::Theirs(_) | Database::Nodes(_) => None,
     }
 }
 
@@ -351,6 +404,7 @@ pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
     let url = match &answers.database {
         Database::Here => format!("postgres://{ACCOUNT}@localhost:{PORT_PG}/{DATABASE}"),
         Database::Theirs(remote) => remote.url(),
+        Database::Nodes(pair) => pair.url(),
     };
     let mut pairs = vec![
         ("DATABASE_URL", url),
@@ -364,6 +418,9 @@ pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
         ("SCANNERPULSE_TLS_CERT", cert_path().display().to_string()),
         ("SCANNERPULSE_TLS_KEY", key_path().display().to_string()),
     ];
+    if let Database::Nodes(pair) = &answers.database {
+        pairs.push((crate::primary::HOSTS, pair.hosts()));
+    }
     if let Certificate::LetsEncrypt { proof, names } = &answers.certificate {
         pairs.push(("SCANNERPULSE_ACME", proof.name().to_string()));
         pairs.push(("SCANNERPULSE_ACME_NAMES", names.join(" ")));
@@ -478,6 +535,19 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 "apt-get",
                 &["-o", "DPkg::Lock::Timeout=300", "update"],
             ));
+            if matches!(answers.database, Database::Nodes(_)) {
+                steps.push(run(
+                    "Install SSH, for the database machines",
+                    "apt-get",
+                    &[
+                        "-o",
+                        "DPkg::Lock::Timeout=300",
+                        "install",
+                        "-y",
+                        "openssh-client",
+                    ],
+                ));
+            }
             steps.push(run(
                 "Install the tool for folders' access lists",
                 "apt-get",
@@ -487,7 +557,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         Family::Dnf if !here => steps.push(run(
             "Install the tool for folders' access lists",
             "dnf",
-            &["install", "-y", "acl"],
+            &["install", "-y", "acl", "openssh-clients"],
         )),
         Family::Apt => {
             // A fresh machine's unattended upgrades may hold apt's lock a while.
@@ -666,6 +736,14 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                     format!("localhost:{PORT_PG}:{DATABASE}:{ACCOUNT}:{db_password}\n")
                 }
                 Database::Theirs(remote) => remote.pgpass_line(),
+                Database::Nodes(_) => Remote {
+                    port: PORT_PG,
+                    name: DATABASE.into(),
+                    role: ACCOUNT.into(),
+                    password: db_password.to_string(),
+                    ..Default::default()
+                }
+                .pgpass_line(),
             },
             mode: 0o600,
             owner: format!("{ACCOUNT}:{ACCOUNT}"),
@@ -770,6 +848,36 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             unless: None,
         },
     };
+    if let Database::Nodes(pair) = &answers.database {
+        let key = format!("{}/id_ed25519", super::plan::SSH);
+        steps.push(Step {
+            title: "Make this machine's key for the database machines".into(),
+            action: Action::Run {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "install -d -m 0700 \"$1\" && ssh-keygen -q -t ed25519 -N '' -C scannerpulse-hub -f \"$1/id_ed25519\"".into(),
+                    "keygen".into(),
+                    super::plan::SSH.into(),
+                ],
+                input: None,
+                env: Vec::new(),
+                unless: Some(PathBuf::from(key)),
+            },
+        });
+        steps.push(Step {
+            title: "Write the plan of the database machines".into(),
+            action: Action::Plan {
+                nodes: pair.nodes.to_vec(),
+                hub: pair.hub.clone(),
+                password: db_password.to_string(),
+            },
+        });
+        steps.push(Step {
+            title: "Wait for the database machines to join".into(),
+            action: Action::WaitForNodes,
+        });
+    }
     let mut more = vec![
         bin("Make the database's tables", &["db-update"], None),
         bin(
@@ -1613,6 +1721,82 @@ mod tests {
                 .iter()
                 .any(|s| s.title.contains("PostgreSQL") || s.title.contains("EPEL"))
         );
+    }
+
+    fn pair() -> Answers {
+        Answers {
+            advanced: true,
+            database: Database::Nodes(super::Pair {
+                nodes: ["db1.example.org".into(), "2001:db8::22".into()],
+                hub: "192.0.2.10".into(),
+            }),
+            ..answers()
+        }
+    }
+
+    #[test]
+    fn with_two_database_machines_this_one_plans_them_and_waits_for_them() {
+        let all = steps(
+            &pair(),
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
+        for gone in [
+            "Install PostgreSQL 17 and pgBackRest",
+            "Make the database and its role",
+            "Take the first full backup",
+        ] {
+            assert!(!titles.contains(&gone), "{gone}");
+        }
+        let at = |title: &str| {
+            titles
+                .iter()
+                .position(|t| *t == title)
+                .unwrap_or_else(|| panic!("{title}: {titles:?}"))
+        };
+        assert!(
+            at("Make this machine's key for the database machines")
+                < at("Write the plan of the database machines")
+        );
+        assert!(
+            at("Write the plan of the database machines")
+                < at("Wait for the database machines to join")
+        );
+        assert!(at("Wait for the database machines to join") < at("Make the database's tables"));
+        let Action::Plan {
+            nodes,
+            hub,
+            password,
+        } = &all[at("Write the plan of the database machines")].action
+        else {
+            panic!()
+        };
+        assert_eq!(
+            nodes,
+            &["db1.example.org".to_string(), "2001:db8::22".to_string()]
+        );
+        assert_eq!(hub, "192.0.2.10");
+        assert_eq!(password, "db secret");
+        let pairs = env_pairs(&pair());
+        assert!(pairs.contains(&(
+            "DATABASE_URL",
+            "postgres://scannerpulse@db1.example.org:5432/scannerpulse?sslmode=require".to_string()
+        )));
+        assert!(pairs.contains(&(
+            "SCANNERPULSE_DATABASE_HOSTS",
+            "db1.example.org:5432 [2001:db8::22]:5432".to_string()
+        )));
+        assert!(!pairs.iter().any(|(n, _)| *n == "SCANNERPULSE_BACKUPS"));
+        let Some(Action::Write { contents, .. }) = all
+            .iter()
+            .find(|s| s.title == "Write the database's password file")
+            .map(|s| &s.action)
+        else {
+            panic!()
+        };
+        assert_eq!(contents, "*:5432:scannerpulse:scannerpulse:db secret\n");
     }
 
     #[test]

@@ -67,6 +67,12 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                     .map_err(fail)?;
             }
             Action::WaitForWeb { port } => wait_for_web(*port).await.map_err(fail)?,
+            Action::Plan {
+                nodes,
+                hub,
+                password,
+            } => write_plan(nodes, hub, password).map_err(fail)?,
+            Action::WaitForNodes => wait_for_nodes(context).await.map_err(fail)?,
         }
     }
     Ok(())
@@ -181,6 +187,78 @@ pub async fn first_admin(
         Some(_) => accounts::set_password(conn, login, password).await,
     }
     .map_err(|error| format!("the admin {login}: {error}"))
+}
+
+/// Writes the plan of the database machines with this machine's public
+/// key. A plan for the same machines keeps who has joined and the
+/// replication role's password, so setup can run again.
+fn write_plan(nodes: &[String], hub: &str, password: &str) -> Result<(), String> {
+    use super::plan::{PLAN, Plan, SSH};
+    let key_path = format!("{SSH}/id_ed25519.pub");
+    let hub_key = std::fs::read_to_string(&key_path)
+        .map_err(|error| format!("{key_path}: {error}"))?
+        .trim()
+        .to_string();
+    let kept = Plan::read(Path::new(PLAN))
+        .ok()
+        .filter(|old| old.nodes == nodes);
+    let plan = Plan {
+        hub: hub.to_string(),
+        hub_key,
+        nodes: nodes.to_vec(),
+        database: super::steps::DATABASE.into(),
+        role: super::steps::ACCOUNT.into(),
+        password: password.to_string(),
+        replication_password: kept
+            .as_ref()
+            .map(|old| old.replication_password.clone())
+            .unwrap_or_else(|| crate::sessions::random_hex(24)),
+        joined: kept.map(|old| old.joined).unwrap_or_default(),
+    };
+    plan.write(Path::new(PLAN))
+}
+
+/// Waits until both database machines have joined (each says so through
+/// `scannerpulse join done`) and one of them answers as the primary.
+async fn wait_for_nodes(context: &Context) -> Result<(), String> {
+    use super::plan::{PLAN, Plan};
+    let mut said = None;
+    loop {
+        let plan = Plan::read(Path::new(PLAN))?;
+        let waiting: Vec<String> = plan.waiting().into_iter().map(String::from).collect();
+        if waiting.is_empty() {
+            let options = context
+                .database_url
+                .parse::<sqlx::postgres::PgConnectOptions>()
+                .map_err(|error| error.to_string())?
+                .password(&context.db_password);
+            let nodes: Vec<crate::primary::Node> = plan
+                .nodes
+                .iter()
+                .map(|host| crate::primary::Node {
+                    host: host.clone(),
+                    port: super::steps::PORT_PG,
+                })
+                .collect();
+            if crate::primary::find(&options, &nodes).await.is_some() {
+                return Ok(());
+            }
+        }
+        if said.as_ref() != Some(&waiting) {
+            if waiting.is_empty() {
+                println!("      both have joined; waiting for the primary to answer");
+            } else {
+                let first = waiting.first().map(String::as_str).unwrap_or("");
+                println!(
+                    "      waiting for: {}. On each, run the install line, then `sudo /usr/local/bin/scannerpulse setup`, choose Advanced, then \"join an existing install\", and give this machine's address ({}). {first} goes first.",
+                    waiting.join(", "),
+                    plan.hub
+                );
+            }
+            said = Some(waiting);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// Waits until `web` answers on this machine. Its certificate is not

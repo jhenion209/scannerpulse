@@ -8,7 +8,7 @@ use inquire::validator::Validation;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
 
 use super::folders::{self, size};
-use super::steps::{Answers, Certificate, Database, Remote, SslMode, Transcription};
+use super::steps::{Answers, Certificate, Database, Pair, Remote, SslMode, Transcription};
 
 /// What setup proposes before asking.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,10 +74,19 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
     if answers.database != Database::Here
         && (answers.backups.is_some() || !answers.pushes.is_empty())
     {
-        return Err(
-            "a database you run keeps its own backups: leave the backup folder and push addresses out"
-                .into(),
-        );
+        return Err(match answers.database {
+            Database::Nodes(_) => "the backups are on the database machines: leave the backup folder and push addresses out",
+            _ => "a database you run keeps its own backups: leave the backup folder and push addresses out",
+        }
+        .into());
+    }
+    if let Database::Nodes(pair) = &answers.database {
+        if pair.nodes[0].eq_ignore_ascii_case(&pair.nodes[1]) {
+            return Err("the database machines are two different machines".into());
+        }
+        if pair.hub.is_empty() || pair.hub.contains(char::is_whitespace) {
+            return Err("this machine's address, as the database machines reach it, is a name or an address".into());
+        }
     }
     if let Some(backups) = &answers.backups {
         answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
@@ -334,7 +343,20 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
             },
             root_cert: get("DB_SSLROOTCERT").map(PathBuf::from),
         }),
-        Some(other) => return Err(format!("DATABASE is {other:?}: here or theirs")),
+        Some("nodes") => {
+            let nodes: Vec<String> = need("DB_NODES")?
+                .split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect();
+            let nodes = <[String; 2]>::try_from(nodes).map_err(|_| {
+                "DB_NODES names the two database machines, with a space between".to_string()
+            })?;
+            Database::Nodes(Pair {
+                nodes,
+                hub: get("HUB").unwrap_or_else(|| default_hub(defaults)),
+            })
+        }
+        Some(other) => return Err(format!("DATABASE is {other:?}: here, theirs or nodes")),
     };
     let certificate = match (get("CERT_FILE"), get("KEY_FILE"), get("LETSENCRYPT")) {
         (Some(cert), Some(key), None) => Certificate::Installed {
@@ -493,9 +515,9 @@ pub fn interactive(
         let port = match previous {
             _ if advanced => {
                 say(
-                    "Advanced 1 of 4. Where the database runs: PostgreSQL 17 on this machine, installed and backed up by setup; or a PostgreSQL 17 database you run elsewhere, whose failover and backups stay yours. ScannerPulse needs a database and a role that may make tables in it.",
+                    "Advanced 1 of 4. Where the database runs: PostgreSQL 17 on this machine, installed and backed up by setup; a PostgreSQL 17 database you run elsewhere, whose failover and backups stay yours; or two machines of its own, a primary and a standby that keeps a live copy (if the primary dies, you promote the standby with one command). Each of the two runs the install and setup itself, joining this machine, which waits for them. ScannerPulse needs a database and a role that may make tables in it.",
                 );
-                database = ask_database(previous.map(|a| &a.database))?;
+                database = ask_database(previous.map(|a| &a.database), defaults)?;
                 say(
                     "Advanced 2 of 4. Web access. ScannerPulse serves HTTPS only. Its certificate is one setup makes for this machine (the browser warns once), one you have (a PEM certificate and its key), or Let's Encrypt's, which the site gets and renews itself: proved over the web when port 443 reaches this machine from the internet under the site's name, or through DNS when the name's zone is at Cloudflare (an API token with Zone, DNS, Edit on it). If a reverse proxy sits in front of the site, give its addresses, so the visitors' own addresses are read from it.",
                 );
@@ -662,20 +684,67 @@ fn text(
     Ok(prompt.prompt()?.trim().to_string())
 }
 
-fn ask_database(previous: Option<&Database>) -> Result<Database, inquire::InquireError> {
+fn ask_database(
+    previous: Option<&Database>,
+    defaults: &Defaults,
+) -> Result<Database, inquire::InquireError> {
     const HERE: &str = "On this machine";
     const THEIRS: &str = "One I run";
+    const NODES: &str = "Two machines of its own: a primary, and a standby you promote by hand";
     let had = match previous {
         Some(Database::Theirs(remote)) => Some(remote),
         _ => None,
     };
-    let choices = if had.is_some() {
-        vec![THEIRS, HERE]
-    } else {
-        vec![HERE, THEIRS]
+    let start = match previous {
+        Some(Database::Theirs(_)) => 1,
+        Some(Database::Nodes(_)) => 2,
+        _ => 0,
     };
-    if Select::new("Database:", choices).prompt()? == HERE {
+    let chosen = Select::new("Database:", vec![HERE, THEIRS, NODES])
+        .with_starting_cursor(start)
+        .prompt()?;
+    if chosen == HERE {
         return Ok(Database::Here);
+    }
+    if chosen == NODES {
+        let had = match previous {
+            Some(Database::Nodes(pair)) => Some(pair),
+            _ => None,
+        };
+        let named = |n: &str| {
+            if n.is_empty() || n.contains(char::is_whitespace) {
+                Err("a name or an address".into())
+            } else {
+                Ok(())
+            }
+        };
+        let first = text(
+            "The first database machine, which starts as the primary (name or address):",
+            had.map(|p| p.nodes[0].as_str()),
+            named,
+        )?;
+        let first_lower = first.to_ascii_lowercase();
+        let second = text(
+            "The second, its standby (name or address):",
+            had.map(|p| p.nodes[1].as_str()),
+            move |n| {
+                named(n)?;
+                if n.eq_ignore_ascii_case(&first_lower) {
+                    Err("a different machine".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        let hub = text(
+            "This machine's address, as the database machines reach it:",
+            Some(&had.map_or_else(|| default_hub(defaults), |p| p.hub.clone())),
+            named,
+        )?;
+        return Ok(Database::Nodes(Pair {
+            nodes: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
+            hub,
+        }));
     }
     let host = text(
         "Its host (name or address):",
@@ -1032,6 +1101,20 @@ pub fn defaults() -> Defaults {
     }
 }
 
+/// This machine's address as other machines reach it: its outward address,
+/// or its name.
+pub fn default_hub(defaults: &Defaults) -> String {
+    defaults
+        .names
+        .iter()
+        .find(|n| {
+            n.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| !ip.is_loopback())
+        })
+        .cloned()
+        .unwrap_or_else(|| defaults.host.clone())
+}
+
 /// The address this machine reaches the network from; the route is only
 /// looked up, nothing is sent (192.0.2.1 is a documentation address).
 fn outward_address() -> Option<String> {
@@ -1229,6 +1312,17 @@ mod tests {
         };
         assert_eq!(remote.sslmode, crate::setup::steps::SslMode::VerifyFull);
         assert_eq!(remote.root_cert, Some(cert.clone()));
+        let nodes = format!(
+            "{base}DATABASE=nodes\nDB_NODES=\"DB1.example.org 2001:db8::22\"\nHUB=192.0.2.10\n"
+        );
+        let answers = from_file(&answers_file(dir.path(), &nodes, 0o600), &defaults()).unwrap();
+        assert_eq!(
+            answers.database,
+            Database::Nodes(crate::setup::steps::Pair {
+                nodes: ["db1.example.org".into(), "2001:db8::22".into()],
+                hub: "192.0.2.10".into(),
+            })
+        );
         let lets_encrypt = format!(
             "{base}LETSENCRYPT=dns-cloudflare\nLETSENCRYPT_NAMES=\"Radio.example.org www.example.org\"\nCLOUDFLARE_TOKEN=cf-token-1\n"
         );
@@ -1289,6 +1383,21 @@ mod tests {
         refused(
             &format!("BACKUPS={}\n", arc.join("inner").display()),
             "may not be inside each other",
+        );
+        refused(
+            "DATABASE=nodes\nDB_NODES=db1.example.org\n",
+            "two database machines",
+        );
+        refused(
+            "DATABASE=nodes\nDB_NODES=\"db1.example.org DB1.example.org\"\n",
+            "two different machines",
+        );
+        refused(
+            &format!(
+                "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nBACKUPS={}\n",
+                bak.display()
+            ),
+            "on the database machines",
         );
         refused(
             "LETSENCRYPT=http\nLETSENCRYPT_NAMES=radio.example.org\n",
