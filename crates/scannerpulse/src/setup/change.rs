@@ -34,9 +34,11 @@ fn settings_file(text: &str, name: &str, value: Option<&str>) -> Result<Step, St
     })
 }
 
-fn restart_web() -> Step {
+/// The web service reads the settings file when it starts: restarting it
+/// serves a new certificate and shows the admin page a change.
+fn restart_web(why: &str) -> Step {
     run(
-        "Restart the web service, to serve the certificate",
+        &format!("Restart the web service, {why}"),
         "systemctl",
         &["restart", "scannerpulse-web"],
     )
@@ -64,7 +66,7 @@ pub fn tls_install_steps(cert: &Path, key: &Path) -> Vec<Step> {
                 "-m", "0600", "-o", ACCOUNT, "-g", ACCOUNT, &from_key, &to_key,
             ],
         ),
-        restart_web(),
+        restart_web("to serve the certificate"),
     ]
 }
 
@@ -87,7 +89,7 @@ pub fn tls_self_steps(binary: &Path, names: &[String]) -> Vec<Step> {
             "chown",
             &[&format!("{ACCOUNT}:{ACCOUNT}"), &key],
         ),
-        restart_web(),
+        restart_web("to serve the certificate"),
     ]
 }
 
@@ -98,7 +100,10 @@ pub fn push_steps(text: &str, kind: &str, url: Option<&str>) -> Result<Vec<Step>
     if let Some(url) = url {
         super::ask::check_push(url)?;
     }
-    Ok(vec![settings_file(text, var, url)?])
+    Ok(vec![
+        settings_file(text, var, url)?,
+        restart_web("to show it on the admin page"),
+    ])
 }
 
 /// The backups moved to `folder`: pgBackRest's place made there (its first
@@ -117,6 +122,7 @@ pub fn location_steps(
     )?];
     backup_steps(&mut steps, folder, binary, system);
     steps.push(run("Read the new units", "systemctl", &["daemon-reload"]));
+    steps.push(restart_web("to show it on the admin page"));
     Ok(steps)
 }
 
@@ -275,6 +281,12 @@ mod tests {
         );
         let titles: Vec<&str> = steps.iter().map(|s| s.title.as_str()).collect();
         assert!(titles.contains(&"Take the first full backup"));
-        assert_eq!(titles.last(), Some(&"Read the new units"));
+        assert_eq!(
+            &titles[titles.len() - 2..],
+            [
+                "Read the new units",
+                "Restart the web service, to show it on the admin page"
+            ]
+        );
     }
 }

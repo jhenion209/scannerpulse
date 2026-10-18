@@ -381,11 +381,11 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
                 "the database you run".into()
             }
         }),
-        (!remove.backups).then(|| {
-            found.backups.as_ref().map_or("the backups".into(), |b| {
-                format!("the backups {}", b.display())
-            })
-        }),
+        found
+            .backups
+            .as_ref()
+            .filter(|_| !remove.backups)
+            .map(|b| format!("the backups {}", b.display())),
     ]
     .into_iter()
     .flatten()
