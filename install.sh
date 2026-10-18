@@ -38,7 +38,10 @@ main() {
         *) fail "${PRETTY_NAME:-$ID $VERSION_ID} is not supported; ScannerPulse runs on $SUPPORTED." ;;
     esac
     [ -n "$RELEASE_KEY" ] || fail "this install script carries no release key, so it cannot check what it downloads."
-    command -v gpgv >/dev/null || fail "gpgv checks the release's signature: install it first (Debian and Ubuntu: apt-get install gpgv; Fedora, Rocky and Alma: dnf install gnupg2)."
+    # Debian 13's apt checks signatures with sqv, so a minimal Debian 13 has
+    # no gpgv; either one checks the release.
+    command -v gpgv >/dev/null || command -v sqv >/dev/null ||
+        fail "gpgv checks the release's signature: install it first (Debian and Ubuntu: apt-get install gpgv; Fedora, Rocky and Alma: dnf install gnupg2)."
 
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
@@ -47,8 +50,11 @@ main() {
         curl -fsSL -o "$tmp/$file" "$RELEASE/$file" || fail "cannot download $RELEASE/$file"
     done
     printf '%s' "$RELEASE_KEY" | base64 -d >"$tmp/key.gpg"
-    GNUPGHOME=$tmp gpgv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" 2>/dev/null ||
-        fail "the release's signature does not check out; nothing was installed."
+    if command -v gpgv >/dev/null; then
+        GNUPGHOME=$tmp gpgv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" 2>/dev/null
+    else
+        sqv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" >/dev/null 2>&1
+    fi || fail "the release's signature does not check out; nothing was installed."
     (cd "$tmp" && grep "  $program\$" SHA256SUMS | sha256sum -c --quiet -) ||
         fail "the program does not match its signed checksum; nothing was installed."
 

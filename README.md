@@ -20,6 +20,8 @@ curl -fsSL https://github.com/jhenion209/scannerpulse/releases/latest/download/i
 sudo /usr/local/bin/scannerpulse setup
 ```
 
+A minimal Debian has no `curl`: `apt-get install curl` first.
+
 The script checks the system and the processor, downloads the program and
 its checksums from the latest release, checks the checksums' signature and
 the program's checksum, and installs `/usr/local/bin/scannerpulse`. Nothing
