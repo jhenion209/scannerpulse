@@ -36,6 +36,11 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// would stop every renewal after it.
 const ORDER_LIMIT: Duration = Duration::from_secs(600);
 
+/// How the order and the certificate are polled: every 5 s (or when the
+/// authority says to look again) for 3 minutes. A wait that doubled would
+/// stop looking at about a minute, and give up at two.
+const POLLS: (Duration, f32, Duration) = (Duration::from_secs(5), 1.0, Duration::from_secs(180));
+
 /// How long Cloudflare's servers get to answer with a new TXT record before
 /// the authority is told to look.
 // ponytail: a fixed wait; ask Cloudflare's servers for the record first if
@@ -379,8 +384,9 @@ pub async fn obtain(
     };
     let mut records = Vec::new();
     let polls = RetryPolicy::new()
-        .initial_delay(Duration::from_secs(2))
-        .timeout(Duration::from_secs(180));
+        .initial_delay(POLLS.0)
+        .backoff(POLLS.1)
+        .timeout(POLLS.2);
     let attempt = async {
         let account = account(settings, dir).await?;
         let identifiers: Vec<Identifier> = settings
@@ -560,4 +566,33 @@ fn keep(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
         .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
         .and_then(|()| std::fs::rename(&new, path));
     written.map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    /// When the authority's client looks again, for a first wait of
+    /// `delay`, a factor of `backoff` and a `limit` (seconds): it sleeps,
+    /// grows the wait, and stops when the next wait would pass the limit.
+    fn checks(delay: f32, backoff: f32, limit: f32) -> Vec<f32> {
+        let (mut at, mut delay, mut seen) = (0.0, delay, Vec::new());
+        loop {
+            at += delay;
+            delay *= backoff;
+            if at + delay > limit {
+                return seen;
+            }
+            seen.push(at);
+        }
+    }
+
+    #[test]
+    fn the_polls_look_until_near_their_limit() {
+        let (delay, backoff, limit) = super::POLLS;
+        let at = checks(delay.as_secs_f32(), backoff, limit.as_secs_f32());
+        assert!(
+            *at.last().unwrap() >= limit.as_secs_f32() - 10.0,
+            "the last look comes long before the limit: {at:?}"
+        );
+        assert!(at.len() <= 60, "too many looks: {at:?}");
+    }
 }
