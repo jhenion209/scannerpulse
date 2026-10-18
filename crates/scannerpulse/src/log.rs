@@ -135,8 +135,7 @@ fn send(server: Target, host: String, app: String, queue: Receiver<(u8, DateTime
         let waiting = failed_at.is_some_and(|at| at.elapsed() < RETRY);
         let sent = if server.tcp {
             if tcp.is_none() && !waiting {
-                tcp = resolve(&server.address)
-                    .and_then(|to| TcpStream::connect_timeout(&to, Duration::from_secs(2)).ok());
+                tcp = resolve(&server.address).and_then(connect);
             }
             // Octet counting (RFC 6587): the length, a space, the message.
             tcp.as_mut()
@@ -151,7 +150,7 @@ fn send(server: Target, host: String, app: String, queue: Receiver<(u8, DateTime
                 });
             }
             udp.as_ref()
-                .is_some_and(|(socket, to)| socket.send_to(text.as_bytes(), to).is_ok())
+                .is_some_and(|(socket, to)| socket.send_to(datagram(&text).as_bytes(), to).is_ok())
         };
         if sent {
             failed_at = None;
@@ -165,13 +164,35 @@ fn send(server: Target, host: String, app: String, queue: Receiver<(u8, DateTime
     }
 }
 
+/// How long one write to a TCP server may wait: a server that stops reading
+/// must not stop the sender for good.
+const WRITE_LIMIT: Duration = Duration::from_secs(5);
+
+fn connect(to: SocketAddr) -> Option<TcpStream> {
+    let stream = TcpStream::connect_timeout(&to, Duration::from_secs(2)).ok()?;
+    stream.set_write_timeout(Some(WRITE_LIMIT)).ok()?;
+    Some(stream)
+}
+
+/// The longest UDP message: what RFC 5426 says every receiver should take.
+/// A longer line is cut there (the journal keeps it whole).
+const DATAGRAM: usize = 2048;
+
+fn datagram(text: &str) -> &str {
+    let mut end = text.len().min(DATAGRAM);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn resolve(address: &str) -> Option<SocketAddr> {
     address.to_socket_addrs().ok()?.next()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Target, message, syslog, target};
+    use super::{Target, connect, datagram, message, syslog, target};
     use chrono::{TimeZone, Utc};
     use std::io::{BufRead, BufReader, Read};
     use std::net::{TcpListener, UdpSocket};
@@ -203,6 +224,26 @@ mod tests {
             })
         );
         assert_eq!(target("192.0.2.30:514"), None);
+    }
+
+    #[test]
+    fn a_udp_line_is_cut_to_what_every_receiver_takes() {
+        let short = "é".repeat(10);
+        assert_eq!(datagram(&short), short);
+        let long = format!("a{}", "é".repeat(2000));
+        let cut = datagram(&long);
+        assert_eq!(cut.len(), 2047, "cut on a character's edge");
+        assert!(long.starts_with(cut));
+    }
+
+    #[test]
+    fn a_tcp_server_that_stops_reading_holds_a_line_for_5_seconds_at_most() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = connect(server.local_addr().unwrap()).unwrap();
+        assert_eq!(
+            stream.write_timeout().unwrap(),
+            Some(Duration::from_secs(5))
+        );
     }
 
     // One test for both, since the server is the process's own setting.
