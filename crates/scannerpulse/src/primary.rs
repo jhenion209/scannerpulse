@@ -66,24 +66,27 @@ fn on(options: &PgConnectOptions, node: &Node) -> PgConnectOptions {
     options.clone().host(&node.host).port(node.port)
 }
 
+/// A primary's current WAL file; nothing (NULL) on a standby.
+pub const CURRENT_WAL: &str = "SELECT CASE WHEN pg_is_in_recovery() THEN NULL \
+     ELSE pg_walfile_name(pg_current_wal_lsn()) END";
+
+/// The timeline in a WAL file's name: its first 8 hex digits.
+pub fn timeline_of(wal: &str) -> Option<u32> {
+    u32::from_str_radix(wal.get(..8)?, 16).ok()
+}
+
 /// The timeline of the node `options` reaches if it is a primary: it
 /// answers within `ASK_LIMIT` and is not a standby. Each promotion starts a
 /// newer timeline.
 async fn timeline(options: &PgConnectOptions) -> Option<u32> {
     let ask = async {
         let mut conn = PgConnection::connect_with(options).await?;
-        // The current WAL file's name starts with its timeline, in hex.
-        let wal: Option<String> = sqlx::query_scalar(
-            "SELECT CASE WHEN pg_is_in_recovery() THEN NULL \
-             ELSE pg_walfile_name(pg_current_wal_lsn()) END",
-        )
-        .fetch_one(&mut conn)
-        .await?;
+        let wal: Option<String> = sqlx::query_scalar(CURRENT_WAL).fetch_one(&mut conn).await?;
         let _ = conn.close().await;
         Ok::<_, sqlx::Error>(wal)
     };
     let wal = tokio::time::timeout(ASK_LIMIT, ask).await.ok()?.ok()??;
-    u32::from_str_radix(wal.get(..8)?, 16).ok()
+    timeline_of(&wal)
 }
 
 /// Which of the nodes' timelines (`None` for a standby or no answer) is

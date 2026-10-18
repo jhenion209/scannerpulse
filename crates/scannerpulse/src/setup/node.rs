@@ -453,6 +453,21 @@ fn psql(sql: &str) -> Result<String, String> {
 /// whether it is a standby: `Some(true)` a standby, `Some(false)` the
 /// primary, `None` no answer.
 fn other_is_standby(other: &str) -> Option<bool> {
+    match ask_other(other, "SELECT pg_is_in_recovery()")?.as_str() {
+        "t" => Some(true),
+        "f" => Some(false),
+        _ => None,
+    }
+}
+
+/// The other database machine's timeline, if it answers as a primary.
+fn other_timeline(other: &str) -> Option<u32> {
+    crate::primary::timeline_of(&ask_other(other, crate::primary::CURRENT_WAL)?)
+}
+
+/// Asks the other database machine `sql` over the network as the copying
+/// role, and gives its one-line answer; `None` when it does not answer.
+fn ask_other(other: &str, sql: &str) -> Option<String> {
     let root = rustix::process::geteuid().is_root();
     let conninfo = format!(
         "host={other} port=5432 user={REPLICATOR} dbname=postgres sslmode=require connect_timeout=3"
@@ -465,17 +480,76 @@ fn other_is_standby(other: &str) -> Option<bool> {
         Command::new("psql")
     };
     let output = command
-        .args([conninfo.as_str(), "-tAXc", "SELECT pg_is_in_recovery()"])
+        .args([conninfo.as_str(), "-tAXc", sql])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "t" => Some(true),
-        "f" => Some(false),
-        _ => None,
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// This machine's timeline: from PostgreSQL if it is a primary that
+/// answers, else from its control file (a stopped machine).
+fn my_timeline(system: &System) -> Option<u32> {
+    match psql(crate::primary::CURRENT_WAL) {
+        Ok(wal) => crate::primary::timeline_of(&wal),
+        Err(_) => control_timeline(&controldata(system).ok()?),
     }
+}
+
+/// Whether this machine may be rejoined to `other`: only when `other` is a
+/// primary on a newer timeline than this one's (`mine`, `None` for a
+/// standby). Rejoining the newest machine would throw away what was written
+/// to it since the failover.
+fn may_rejoin(mine: Option<u32>, theirs: Option<u32>, other: &str) -> Result<(), String> {
+    let Some(theirs) = theirs else {
+        return Err(format!(
+            "{other} must be the primary first: `sudo scannerpulse db promote` there"
+        ));
+    };
+    match mine {
+        Some(mine) if mine >= theirs => Err(format!(
+            "this machine is the newest primary (timeline {mine}; {other} is on {theirs}): run `sudo scannerpulse db rejoin` on {other} instead"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// pg_controldata's report of this machine's data directory.
+fn controldata(system: &System) -> Result<String, String> {
+    let output = Command::new("runuser")
+        .args([
+            "-u",
+            "postgres",
+            "--",
+            &format!("{}/pg_controldata", system.postgres_bin()),
+            "-D",
+            system.postgres_data(),
+        ])
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| format!("cannot run pg_controldata: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!("pg_controldata: {}", super::apply::said(&output)))
+    }
+}
+
+/// A field of pg_controldata's report.
+fn report_field(report: &str, name: &str) -> Option<String> {
+    report.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == name).then(|| value.trim().to_string())
+    })
+}
+
+/// The timeline of the last checkpoint, from pg_controldata's report.
+fn control_timeline(report: &str) -> Option<u32> {
+    report_field(report, "Latest checkpoint's TimeLineID")?
+        .parse()
+        .ok()
 }
 
 /// What a database machine says of itself.
@@ -549,33 +623,13 @@ fn systemctl(verb: &str, unit: &str) -> Result<(), String> {
 pub fn stop() -> Result<String, String> {
     let system = system()?;
     systemctl("stop", system.postgres_cluster())?;
-    let output = Command::new("runuser")
-        .args([
-            "-u",
-            "postgres",
-            "--",
-            &format!("{}/pg_controldata", system.postgres_bin()),
-            "-D",
-            system.postgres_data(),
-        ])
-        .env("LC_ALL", "C")
-        .output()
-        .map_err(|error| format!("cannot run pg_controldata: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("pg_controldata: {}", super::apply::said(&output)));
-    }
-    shut_down_at(&String::from_utf8_lossy(&output.stdout))
+    shut_down_at(&controldata(&system)?)
 }
 
 /// The location of the last checkpoint, from pg_controldata's report of a
 /// primary that stopped cleanly.
 fn shut_down_at(report: &str) -> Result<String, String> {
-    let field = |name: &str| {
-        report.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            (key.trim() == name).then(|| value.trim().to_string())
-        })
-    };
+    let field = |name: &str| report_field(report, name);
     match field("Database cluster state").as_deref() {
         Some("shut down") => {}
         state => {
@@ -758,12 +812,8 @@ pub fn db_promote() -> Result<String, String> {
 pub fn db_rejoin(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     let node = NodeFile::read()?;
     let other = node.other().to_string();
-    if other_is_standby(&other) != Some(false) {
-        return Err(format!(
-            "{other} must be the primary first: `sudo scannerpulse db promote` there"
-        ));
-    }
     let system = system()?;
+    may_rejoin(my_timeline(&system), other_timeline(&other), &other)?;
     // A standby that receives from the other has nothing to rejoin; one
     // that does not (it fell behind, or their histories split) has.
     if psql("SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming'").as_deref()
@@ -1078,6 +1128,38 @@ mod tests {
         assert!(
             sql.contains("pg_read_binary_file(text, bigint, bigint, boolean)"),
             "{sql}"
+        );
+    }
+
+    #[test]
+    fn rejoin_is_refused_on_the_machine_with_the_newest_timeline() {
+        let other = "db2.example.org";
+        // The other is the primary and this one is behind: rejoin.
+        assert_eq!(may_rejoin(Some(3), Some(4), other), Ok(()));
+        assert_eq!(may_rejoin(None, Some(4), other), Ok(()));
+        // The other is not the primary (a standby, or no answer).
+        assert!(
+            may_rejoin(Some(3), None, other)
+                .unwrap_err()
+                .contains("must be the primary first")
+        );
+        // Both answer as primaries and this one is the newest: rewinding it
+        // would throw away everything written since the failover.
+        for mine in [4, 5] {
+            let error = may_rejoin(Some(mine), Some(4), other).unwrap_err();
+            assert!(error.contains("newest primary"), "{error}");
+            assert!(error.contains("db rejoin` on db2.example.org"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_machines_timeline_is_read_from_its_report_when_it_is_stopped() {
+        let report = "Database cluster state:               shut down\n\
+                      Latest checkpoint's TimeLineID:       7\n";
+        assert_eq!(control_timeline(report), Some(7));
+        assert_eq!(
+            control_timeline("Database cluster state: shut down\n"),
+            None
         );
     }
 
