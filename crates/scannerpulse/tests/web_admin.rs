@@ -257,9 +257,10 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
         scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
     state.host = "radio-a".into();
     state.machine = scannerpulse::web::Machine {
-        cert: Some(cert),
+        cert: Some(cert.clone()),
         backups: Some("/srv/backups".into()),
         pushes: vec!["dump"],
+        acme: None,
     };
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
@@ -313,4 +314,48 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     .await;
     assert_eq!(got.body["database"], "theirs");
     assert!(got.body["backups"].is_null());
+    assert!(got.body["acme"].is_null());
+
+    // With Let's Encrypt: the certificate served, how it is proved and its
+    // last renewal; never the token.
+    let served = dir.path().join("served");
+    std::fs::create_dir(&served).unwrap();
+    let (c, k) = (served.join("cert.pem"), served.join("key.pem"));
+    scannerpulse::cert::make(&["radio.example.org".into()], &c, &k).unwrap();
+    let mut state =
+        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    state.certs = Some(std::sync::Arc::new(scannerpulse::acme::Certs::new(
+        std::sync::Arc::new(scannerpulse::cert::certified(&c, &k).unwrap()),
+    )));
+    state.machine = scannerpulse::web::Machine {
+        cert: Some(cert),
+        acme: Some(scannerpulse::acme::Settings {
+            proof: scannerpulse::acme::Proof::Cloudflare {
+                token: "cf-token-1".into(),
+            },
+            names: vec!["radio.example.org".into()],
+            directory: scannerpulse::acme::LETS_ENCRYPT.into(),
+        }),
+        ..Default::default()
+    };
+    state.renewal.lock().unwrap().error = Some("radio.example.org: no TXT record".into());
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let (cookie, _) = sign_in(&app, "ann", PASSWORD).await;
+    let got = send(
+        &app,
+        "GET",
+        "/api/admin/machine",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    let body = got.body;
+    assert_eq!(body["certificate"]["names"], json!(["radio.example.org"]));
+    assert_eq!(body["acme"]["proof"], "dns-cloudflare");
+    assert_eq!(body["acme"]["names"], json!(["radio.example.org"]));
+    assert_eq!(body["acme"]["error"], "radio.example.org: no TXT record");
+    assert!(body["acme"]["renewed"].is_null());
+    assert!(!body.to_string().contains("cf-token-1"), "{body}");
 }

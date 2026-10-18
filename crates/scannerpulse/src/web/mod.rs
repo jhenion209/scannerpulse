@@ -63,6 +63,8 @@ pub struct Config {
     pub tls: Option<Tls>,
     /// What the settings file says of this machine, for the admin page.
     pub machine: Machine,
+    /// Where Let's Encrypt's account and certificate are kept.
+    pub acme_dir: PathBuf,
 }
 
 /// What this machine's settings file says of it, for the admin page's
@@ -76,6 +78,8 @@ pub struct Machine {
     pub backups: Option<PathBuf>,
     /// The backup kinds with a push address.
     pub pushes: Vec<&'static str>,
+    /// Let's Encrypt, when it gives the certificate.
+    pub acme: Option<crate::acme::Settings>,
 }
 
 /// A certificate and its private key, as PEM files.
@@ -155,7 +159,12 @@ impl Config {
                 );
             }
         };
+        let acme = crate::acme::Settings::from_env()?;
+        if acme.is_some() && tls.is_none() {
+            return Err("SCANNERPULSE_ACME needs SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY: the certificate served until Let's Encrypt's arrives".into());
+        }
         let machine = Machine {
+            acme,
             cert: tls.as_ref().map(|t| t.cert.clone()),
             backups: path("SCANNERPULSE_BACKUPS"),
             pushes: crate::backup::KINDS
@@ -175,6 +184,7 @@ impl Config {
             oidc_secret,
             tls,
             machine,
+            acme_dir: PathBuf::from(crate::acme::STATE),
         })
     }
 }
@@ -216,6 +226,10 @@ pub struct AppState {
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
     /// What the settings file says of this machine.
     pub machine: Machine,
+    /// The certificate served, over HTTPS.
+    pub certs: Option<Arc<crate::acme::Certs>>,
+    /// Let's Encrypt's last renewal, when it gives the certificate.
+    pub renewal: Arc<std::sync::Mutex<crate::acme::Renewal>>,
 }
 
 impl AppState {
@@ -241,6 +255,8 @@ impl AppState {
             shutdown: tokio::sync::watch::channel(false).0,
             static_dir: None,
             machine: Machine::default(),
+            certs: None,
+            renewal: Arc::default(),
         }
     }
 }
@@ -392,12 +408,27 @@ pub async fn run(
     state.static_dir = config.static_dir;
     state.host = config.host;
     state.oidc_secret = config.oidc_secret;
+    // The certificate setup made or the one installed; Let's Encrypt's,
+    // when kept, from the start, and renewed in the background.
+    if let Some(tls) = &config.tls {
+        let own = crate::cert::certified(&tls.cert, &tls.key)
+            .map_err(|error| format!("cannot serve HTTPS: {error}"))?;
+        let certs = Arc::new(crate::acme::Certs::new(Arc::new(own)));
+        if let Some(acme) = config.machine.acme.clone() {
+            if let Some(kept) = crate::acme::stored(&config.acme_dir, &acme.names) {
+                certs.serve(Arc::new(kept));
+            }
+            crate::acme::spawn(acme, config.acme_dir, certs.clone(), state.renewal.clone());
+        }
+        state.certs = Some(certs);
+    }
     state.machine = config.machine;
     live::spawn(state.pool.clone(), state.live.clone());
     viewers::spawn(state.clone());
     let stop_live = state.shutdown.clone();
+    let certs = state.certs.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
-    let Some(tls) = config.tls else {
+    let Some(certs) = certs else {
         let listener = tokio::net::TcpListener::bind(config.listen)
             .await
             .map_err(|error| format!("cannot listen on {}: {error}", config.listen))?;
@@ -412,15 +443,9 @@ pub async fn run(
             .await
             .map_err(|error| error.to_string());
     };
-    let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
-        .await
-        .map_err(|error| {
-            format!(
-                "cannot read the certificate {} and its key {}: {error}",
-                tls.cert.display(),
-                tls.key.display()
-            )
-        })?;
+    let rustls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
+        crate::acme::server_config(certs),
+    ));
     let handle = axum_server::Handle::new();
     let stopper = handle.clone();
     tokio::spawn(async move {

@@ -126,22 +126,37 @@ pub async fn status(_: Admin, State(state): State<AppState>) -> Result<Json<Valu
 /// How long a traffic report is kept before it is made again.
 pub const TRAFFIC_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// `GET /api/admin/machine`: this machine's certificate, its backups'
-/// folder, the age of each kind's newest backup, and which kinds push; the
-/// admin page shows how to change each with a command run here as root.
+/// `GET /api/admin/machine`: this machine's certificate (the one served,
+/// and Let's Encrypt's renewals when it gives it), its backups' folder, the
+/// age of each kind's newest backup, and which kinds push; the admin page
+/// shows how to change each with a command run here as root.
 pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let certificate = state
-        .machine
-        .cert
-        .as_ref()
-        .map(|path| match crate::cert::read(path) {
-            Ok(found) => serde_json::json!({
-                "names": found.names,
-                "not_after": found.not_after,
-                "self_signed": found.self_signed,
-            }),
-            Err(why) => serde_json::json!({ "error": why }),
-        });
+    let found = match &state.certs {
+        Some(certs) => Some(crate::cert::found(&certs.current())),
+        None => state.machine.cert.as_deref().map(crate::cert::read),
+    };
+    let certificate = found.map(|found| match found {
+        Ok(found) => serde_json::json!({
+            "names": found.names,
+            "not_after": found.not_after,
+            "self_signed": found.self_signed,
+        }),
+        Err(why) => serde_json::json!({ "error": why }),
+    });
+    let acme = state.machine.acme.as_ref().map(|acme| {
+        let renewal = state
+            .renewal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        serde_json::json!({
+            "proof": acme.proof.name(),
+            "names": acme.names,
+            "tried": renewal.tried,
+            "renewed": renewal.renewed,
+            "error": renewal.error,
+        })
+    });
     let backups = match &state.machine.backups {
         None => Value::Null,
         Some(folder) => {
@@ -165,6 +180,7 @@ pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Val
         // Setup writes the backups' folder only for a database it installed.
         "database": if state.machine.backups.is_some() { "here" } else { "theirs" },
         "certificate": certificate,
+        "acme": acme,
         "backups": backups,
     })))
 }

@@ -37,6 +37,7 @@ async fn web_serves_https_with_a_made_certificate_and_nothing_in_plain_text() {
         host: "tls-test".into(),
         oidc_secret: None,
         machine: Default::default(),
+        acme_dir: Default::default(),
         tls: Some(Tls {
             cert: cert_path.clone(),
             key: key_path,
@@ -104,8 +105,82 @@ async fn run_refuses_plain_http_off_loopback_for_any_caller() {
         host: "tls-test".into(),
         oidc_secret: None,
         machine: Default::default(),
+        acme_dir: Default::default(),
         tls: None,
     };
     let error = web::run(config, std::future::pending()).await.unwrap_err();
     assert!(error.contains("SCANNERPULSE_TLS_CERT"), "{error}");
+}
+
+#[tokio::test]
+async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
+    use scannerpulse::acme::{Proof, Settings};
+    let dir = tempfile::tempdir().unwrap();
+    let (own, own_key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    cert::make(&["localhost".into(), "127.0.0.1".into()], &own, &own_key).unwrap();
+    let kept = dir.path().join("acme");
+    std::fs::create_dir(&kept).unwrap();
+    cert::make(
+        &["radio.example.org".into()],
+        &kept.join("cert.pem"),
+        &kept.join("key.pem"),
+    )
+    .unwrap();
+    let port = free_port();
+    let config = Config {
+        database: "postgres://nobody@127.0.0.1:1/none".parse().unwrap(),
+        listen: format!("127.0.0.1:{port}").parse().unwrap(),
+        static_dir: None,
+        host: "tls-test".into(),
+        oidc_secret: None,
+        machine: web::Machine {
+            acme: Some(Settings {
+                proof: Proof::Web,
+                names: vec!["radio.example.org".into()],
+                // Nothing answers there: the renewal fails, and the kept
+                // certificate stays.
+                directory: "https://127.0.0.1:1/directory".into(),
+            }),
+            ..Default::default()
+        },
+        acme_dir: kept.clone(),
+        tls: Some(Tls {
+            cert: own,
+            key: own_key,
+        }),
+    };
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(web::run(config, async {
+        let _ = stopped.await;
+    }));
+    let ca =
+        reqwest::Certificate::from_pem(&std::fs::read(kept.join("cert.pem")).unwrap()).unwrap();
+    let client = reqwest::Client::builder()
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(ca)
+        .resolve(
+            "radio.example.org",
+            format!("127.0.0.1:{port}").parse().unwrap(),
+        )
+        .build()
+        .unwrap();
+    let mut answer = None;
+    for _ in 0..50 {
+        if let Ok(response) = client
+            .get(format!("https://radio.example.org:{port}/health"))
+            .send()
+            .await
+        {
+            answer = Some(response.text().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        answer.as_deref(),
+        Some("ok"),
+        "the kept certificate is served"
+    );
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
 }
