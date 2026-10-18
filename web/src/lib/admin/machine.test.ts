@@ -25,6 +25,17 @@ describe("the certificate's end", () => {
     expect(certificateEnd('2026-11-01T12:00:00Z', now)).toEqual({ text: 'ends in 14 d', ok: false });
     expect(certificateEnd('2026-10-17T12:00:00Z', now)).toEqual({ text: 'ended 1 d ago', ok: false });
   });
+
+  it('is flagged for a short certificate only when a quarter of its life is left', () => {
+    // 90 days long, renewed with 30 left: fine at 25, flagged at 20.
+    expect(certificateEnd('2026-11-12T12:00:00Z', now, '2026-08-14T12:00:00Z').ok).toBe(true);
+    expect(certificateEnd('2026-11-07T12:00:00Z', now, '2026-08-09T12:00:00Z').ok).toBe(false);
+    // 45 days long: fine at 14, flagged at 10.
+    expect(certificateEnd('2026-11-01T12:00:00Z', now, '2026-09-17T12:00:00Z').ok).toBe(true);
+    expect(certificateEnd('2026-10-28T12:00:00Z', now, '2026-09-13T12:00:00Z').ok).toBe(false);
+    // A long one is still flagged at 30 days.
+    expect(certificateEnd('2026-11-12T12:00:00Z', now, '2021-11-12T12:00:00Z').ok).toBe(false);
+  });
 });
 
 describe("Let's Encrypt's renewals", () => {

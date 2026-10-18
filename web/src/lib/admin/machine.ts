@@ -6,6 +6,7 @@ import { durationText } from '../status';
 
 export interface MachineCertificate {
   names?: string[];
+  not_before?: string;
   not_after?: string;
   self_signed?: boolean;
   /** Why the certificate could not be read. */
@@ -50,11 +51,15 @@ export function backupAge(newest: string | null, now: Date): { text: string; ok:
   return { text: `${durationText(Math.max(0, ms))} ago`, ok: ms <= BACKUP_DUE_MS };
 }
 
-/** A certificate's end: how far off it is, and whether it is near. */
-export function certificateEnd(notAfter: string, now: Date): { text: string; ok: boolean } {
-  const ms = new Date(notAfter).getTime() - now.getTime();
+/** A certificate's end: how far off it is, and whether it is near: within
+ * 30 days, or for a short certificate (renewed with a third of its life
+ * left) within a quarter of its life. */
+export function certificateEnd(notAfter: string, now: Date, notBefore?: string): { text: string; ok: boolean } {
+  const end = new Date(notAfter).getTime();
+  const ms = end - now.getTime();
   if (ms <= 0) return { text: `ended ${durationText(-ms)} ago`, ok: false };
-  return { text: `ends in ${durationText(ms)}`, ok: ms > 30 * 86_400_000 };
+  const life = notBefore === undefined ? Infinity : end - new Date(notBefore).getTime();
+  return { text: `ends in ${durationText(ms)}`, ok: ms > Math.min(30 * 86_400_000, life / 4) };
 }
 
 /** How Let's Encrypt is shown the names, in words. */

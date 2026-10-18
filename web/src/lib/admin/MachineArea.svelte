@@ -47,7 +47,7 @@
     {:else if data.certificate.error}
       <p class="problem">{data.certificate.error}</p>
     {:else if data.certificate.names && data.certificate.not_after}
-      {@const end = certificateEnd(data.certificate.not_after, now())}
+      {@const end = certificateEnd(data.certificate.not_after, now(), data.certificate.not_before)}
       <dl class="facts">
         <dt>For</dt>
         <dd>{data.certificate.names.join(', ')}</dd>

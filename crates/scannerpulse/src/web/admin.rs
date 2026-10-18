@@ -138,6 +138,7 @@ pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Val
     let certificate = found.map(|found| match found {
         Ok(found) => serde_json::json!({
             "names": found.names,
+            "not_before": found.not_before,
             "not_after": found.not_after,
             "self_signed": found.self_signed,
         }),

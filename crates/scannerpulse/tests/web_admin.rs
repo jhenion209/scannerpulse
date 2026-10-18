@@ -287,6 +287,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     assert_eq!(body["database"], "here");
     assert_eq!(body["certificate"]["names"], json!(["radio-a.example.org"]));
     assert_eq!(body["certificate"]["self_signed"], true);
+    assert!(body["certificate"]["not_before"].is_string());
     assert_eq!(body["backups"]["folder"], "/srv/backups");
     assert!(body["backups"]["kinds"]["dump"]["newest"].is_string());
     assert_eq!(body["backups"]["kinds"]["dump"]["push"], true);
