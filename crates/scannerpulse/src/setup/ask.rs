@@ -1,6 +1,6 @@
-//! The Simple questions: asked one at a time, each explained first, or read
-//! from an answers file for an unattended install. Every answer is checked
-//! before it is taken.
+//! Setup's questions, Simple's and Advanced's: asked one at a time, each
+//! explained first, or read from an answers file for an unattended install.
+//! Every answer is checked before it is taken.
 
 use std::path::{Path, PathBuf};
 
@@ -8,7 +8,7 @@ use inquire::validator::Validation;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
 
 use super::folders::{self, size};
-use super::steps::{Answers, Transcription};
+use super::steps::{Answers, Certificate, Database, Remote, Transcription};
 
 /// What setup proposes before asking.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +42,158 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
     if answers.names.is_empty() {
         return Err("the certificate needs this machine's name or address".into());
     }
+    if let Database::Theirs(remote) = &answers.database {
+        check_remote_form(remote)?;
+    }
+    if let Certificate::Installed { cert, key } = &answers.certificate {
+        crate::cert::check(cert, key)?;
+    }
+    for proxy in &answers.proxies {
+        check_proxy(proxy)?;
+    }
+    if let Some(server) = &answers.syslog {
+        check_syslog(server)?;
+    }
+    if let Some(backups) = &answers.backups {
+        if answers.database != Database::Here {
+            return Err(
+                "a database you run keeps its own backups: leave the backup folder out".into(),
+            );
+        }
+        check_backups(Path::new(backups), &answers.recordings, &answers.archive)?;
+    }
+    for (kind, url) in &answers.pushes {
+        if crate::backup::push_var(kind).is_none() {
+            return Err(format!("{kind:?} is not a kind of backup"));
+        }
+        check_push(url)?;
+    }
     Ok(answers)
+}
+
+fn check_remote_form(remote: &Remote) -> Result<(), String> {
+    if remote.host.trim().is_empty() || remote.host.contains(char::is_whitespace) {
+        return Err("the database's host is a name or an address".into());
+    }
+    if remote.port == 0 {
+        return Err("the database's port is 1 to 65535".into());
+    }
+    if remote.name.trim().is_empty() || remote.role.trim().is_empty() {
+        return Err("the database and its role each need a name".into());
+    }
+    if remote.password.is_empty() {
+        return Err("the role's password is needed".into());
+    }
+    Ok(())
+}
+
+fn check_proxy(proxy: &str) -> Result<(), String> {
+    proxy
+        .parse::<std::net::IpAddr>()
+        .map(drop)
+        .map_err(|_| format!("{proxy:?} is not an address such as 192.0.2.10"))
+}
+
+fn check_syslog(server: &str) -> Result<(), String> {
+    crate::log::target(server)
+        .map(drop)
+        .ok_or_else(|| format!("{server:?} is not udp://host:port or tcp://host:port"))
+}
+
+/// A separate backup folder: a folder as the others are checked, inside
+/// neither the recordings folder nor the archive (whose own backup folder is
+/// the default), nor holding them.
+fn check_backups(
+    path: &Path,
+    recordings: &Path,
+    archive: &Path,
+) -> Result<folders::Folder, String> {
+    let found = folders::check(path)?;
+    for (other, what) in [
+        (recordings, "the recordings folder"),
+        (archive, "the archive"),
+    ] {
+        if found.path.starts_with(other) || other.starts_with(&found.path) {
+            return Err(format!(
+                "{} and {what} ({}) may not be inside each other; for backups inside the archive, keep the default",
+                found.path.display(),
+                other.display()
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// A push (heartbeat) address: http or https, such as an Uptime Kuma push
+/// monitor's, whose token may be in its path or its query.
+fn check_push(url: &str) -> Result<(), String> {
+    let ok = reqwest::Url::parse(url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{url:?} is not a full http:// or https:// address"))
+    }
+}
+
+/// The checks a database the person runs must pass, once connected with
+/// `options`: PostgreSQL 17, and its role may make tables in the public
+/// schema. Gives the server's version.
+pub async fn check_database(options: sqlx::postgres::PgConnectOptions) -> Result<String, String> {
+    use sqlx::ConnectOptions;
+    let place = format!(
+        "the database {} on {}:{} as {}",
+        options.get_database().unwrap_or("?"),
+        options.get_host(),
+        options.get_port(),
+        options.get_username()
+    );
+    let mut conn = tokio::time::timeout(std::time::Duration::from_secs(10), options.connect())
+        .await
+        .map_err(|_| format!("{place} did not answer in 10 s"))?
+        .map_err(|error| format!("cannot sign in to {place}: {error}"))?;
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&mut conn)
+        .await
+        .map_err(|error| format!("{place}: {error}"))?;
+    if !(170_000..180_000).contains(&version) {
+        return Err(format!(
+            "{place} is PostgreSQL {}; ScannerPulse needs PostgreSQL 17",
+            version / 10_000
+        ));
+    }
+    let may: bool = sqlx::query_scalar("SELECT has_schema_privilege('public', 'CREATE')")
+        .fetch_one(&mut conn)
+        .await
+        .map_err(|error| format!("{place}: {error}"))?;
+    if !may {
+        return Err(format!(
+            "the role {role} may not make tables in {place}'s public schema: make it the database's owner, or GRANT CREATE ON SCHEMA public TO {role}",
+            role = options.get_username()
+        ));
+    }
+    Ok(format!(
+        "PostgreSQL {}.{}",
+        version / 10_000,
+        version % 10_000
+    ))
+}
+
+/// `check_database` for a database the person names.
+pub async fn check_remote(remote: &Remote) -> Result<String, String> {
+    check_database(
+        sqlx::postgres::PgConnectOptions::new()
+            .host(&remote.host)
+            .port(remote.port)
+            .database(&remote.name)
+            .username(&remote.role)
+            .password(&remote.password),
+    )
+    .await
 }
 
 fn check_zone(zone: &str) -> Result<(), String> {
@@ -115,6 +266,57 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
     if !names.iter().any(|n| n == "127.0.0.1") {
         names.push("127.0.0.1".into());
     }
+    let database = match get("DATABASE").as_deref() {
+        None | Some("here") => Database::Here,
+        Some("theirs") => Database::Theirs(Remote {
+            host: need("DB_HOST")?,
+            port: match get("DB_PORT") {
+                Some(port) => port
+                    .parse()
+                    .map_err(|_| format!("DB_PORT is {port:?}: a number"))?,
+                None => 5432,
+            },
+            name: need("DB_NAME")?,
+            role: need("DB_ROLE")?,
+            password: need("DB_PASSWORD")?,
+        }),
+        Some(other) => return Err(format!("DATABASE is {other:?}: here or theirs")),
+    };
+    let certificate = match (get("CERT_FILE"), get("KEY_FILE")) {
+        (Some(cert), Some(key)) => Certificate::Installed {
+            cert: PathBuf::from(cert),
+            key: PathBuf::from(key),
+        },
+        (None, None) => Certificate::Own,
+        _ => {
+            return Err(format!(
+                "{}: give both CERT_FILE and KEY_FILE, or neither",
+                path.display()
+            ));
+        }
+    };
+    let pushes = crate::backup::KINDS
+        .iter()
+        .filter_map(|kind| {
+            Some((
+                kind.to_string(),
+                get(&format!("PUSH_{}", kind.to_ascii_uppercase()))?,
+            ))
+        })
+        .collect();
+    let advanced = pairs.iter().any(|(n, _)| {
+        matches!(
+            n.as_str(),
+            "DATABASE"
+                | "CERT_FILE"
+                | "KEY_FILE"
+                | "PROXIES"
+                | "SYSLOG"
+                | "BACKUPS"
+                | "PUSH_PGBACKREST"
+                | "PUSH_DUMP"
+        )
+    });
     let answers = Answers {
         recordings: PathBuf::from(need("RECORDINGS")?),
         archive: PathBuf::from(need("ARCHIVE")?),
@@ -125,6 +327,15 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
         port,
         host: get("HOST").unwrap_or_else(|| defaults.host.clone()),
         names,
+        advanced,
+        database,
+        certificate,
+        proxies: get("PROXIES")
+            .map(|p| p.split_whitespace().map(String::from).collect())
+            .unwrap_or_default(),
+        syslog: get("SYSLOG"),
+        backups: get("BACKUPS").map(PathBuf::from),
+        pushes,
     };
     checked(answers)
 }
@@ -194,14 +405,35 @@ pub fn holder(port: u16) -> String {
         .unwrap_or_else(|| "another program".into())
 }
 
-/// Asks the Simple questions, each answer of `previous` offered again;
-/// None when the person leaves.
+/// Asks the Simple questions, and with `advanced` Advanced's too, each
+/// answer of `previous` offered again; None when the person leaves.
 pub fn interactive(
     defaults: &Defaults,
     previous: Option<&Answers>,
+    advanced: bool,
 ) -> Result<Option<Answers>, String> {
     let result = (|| -> Result<Option<Answers>, inquire::InquireError> {
+        let mut database = Database::Here;
+        let mut certificate = Certificate::Own;
+        let mut proxies = Vec::new();
+        let mut syslog = None;
         let port = match previous {
+            _ if advanced => {
+                say(
+                    "Advanced 1 of 4. Where the database runs: PostgreSQL 17 on this machine, installed and backed up by setup; or a PostgreSQL 17 database you run elsewhere, whose failover and backups stay yours. ScannerPulse needs a database and a role that may make tables in it.",
+                );
+                database = ask_database(previous.map(|a| &a.database))?;
+                say(
+                    "Advanced 2 of 4. Web access. ScannerPulse serves HTTPS only. Its certificate is one setup makes for this machine (the browser warns once), or one you have (a PEM certificate and its key). Let's Encrypt comes in a later version; the admin page will offer it. If a reverse proxy sits in front of the site, give its addresses, so the visitors' own addresses are read from it.",
+                );
+                certificate = ask_certificate(previous.map(|a| &a.certificate))?;
+                proxies = ask_proxies(previous.map(|a| a.proxies.as_slice()))?;
+                say(
+                    "Advanced 3 of 4. Logs go to the journal (journalctl -u scannerpulse-web). They can also go to a syslog server, as RFC 5424 over UDP or TCP.",
+                );
+                syslog = ask_syslog(previous.and_then(|a| a.syslog.as_deref()))?;
+                ask_port(previous.map_or(defaults.port, |a| a.port))?
+            }
             Some(answers) => answers.port,
             None if defaults.port != 443 => {
                 let take = Confirm::new(&format!(
@@ -304,6 +536,18 @@ pub fn interactive(
         } else {
             None
         };
+        let (mut backups, mut pushes) = (None, Vec::new());
+        if advanced && database == Database::Here {
+            say(
+                "Advanced 4 of 4. The backups: every night a pgBackRest backup (with the database's changes kept between them, for recovery to any moment) and a dump. They go in the archive's .scannerpulse-backups folder, or a folder you name; a disk other than the database's is safer. A monitor such as Uptime Kuma can be told of each backup that succeeds: give a push monitor's address for each kind, or none.",
+            );
+            backups = ask_backups(
+                previous.and_then(|a| a.backups.as_deref()),
+                &recordings.path,
+                &archive.path,
+            )?;
+            pushes = ask_pushes(previous.map(|a| a.pushes.as_slice()))?;
+        }
         Ok(Some(Answers {
             recordings: recordings.path,
             archive: archive.path,
@@ -314,6 +558,13 @@ pub fn interactive(
             port,
             host: defaults.host.clone(),
             names: defaults.names.clone(),
+            advanced,
+            database,
+            certificate,
+            proxies,
+            syslog,
+            backups,
+            pushes,
         }))
     })();
     match result {
@@ -323,6 +574,238 @@ pub fn interactive(
         ) => Ok(None),
         Err(other) => Err(other.to_string()),
     }
+}
+
+/// A text answer checked by `check`, offering `previous`.
+fn text(
+    question: &str,
+    previous: Option<&str>,
+    check: impl Fn(&str) -> Result<(), String> + Clone + 'static,
+) -> Result<String, inquire::InquireError> {
+    let mut prompt = Text::new(question).with_validator(valid(check));
+    if let Some(previous) = previous {
+        prompt = prompt.with_default(previous);
+    }
+    Ok(prompt.prompt()?.trim().to_string())
+}
+
+fn ask_database(previous: Option<&Database>) -> Result<Database, inquire::InquireError> {
+    const HERE: &str = "On this machine";
+    const THEIRS: &str = "One I run";
+    let had = match previous {
+        Some(Database::Theirs(remote)) => Some(remote),
+        _ => None,
+    };
+    let choices = if had.is_some() {
+        vec![THEIRS, HERE]
+    } else {
+        vec![HERE, THEIRS]
+    };
+    if Select::new("Database:", choices).prompt()? == HERE {
+        return Ok(Database::Here);
+    }
+    let host = text(
+        "Its host (name or address):",
+        had.map(|r| r.host.as_str()),
+        |h| {
+            if h.is_empty() || h.contains(char::is_whitespace) {
+                Err("a name or an address".into())
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+    let port = text(
+        "Its port:",
+        Some(&had.map_or(5432, |r| r.port).to_string()),
+        |p| {
+            p.parse::<u16>()
+                .ok()
+                .filter(|p| *p > 0)
+                .map(drop)
+                .ok_or_else(|| "a port, 1 to 65535".into())
+        },
+    )?
+    .parse()
+    .expect("checked");
+    let named = |what: &'static str| {
+        move |n: &str| {
+            if n.is_empty() {
+                Err(format!("{what} needs a name"))
+            } else {
+                Ok(())
+            }
+        }
+    };
+    let name = text(
+        "The database's name:",
+        Some(had.map_or("scannerpulse", |r| r.name.as_str())),
+        named("the database"),
+    )?;
+    let role = text(
+        "The role ScannerPulse signs in as:",
+        Some(had.map_or("scannerpulse", |r| r.role.as_str())),
+        named("the role"),
+    )?;
+    let password = match had {
+        Some(r)
+            if Confirm::new("Keep the role's password you typed?")
+                .with_default(true)
+                .prompt()? =>
+        {
+            r.password.clone()
+        }
+        _ => Password::new("The role's password:")
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .without_confirmation()
+            .prompt()?,
+    };
+    Ok(Database::Theirs(Remote {
+        host,
+        port,
+        name,
+        role,
+        password,
+    }))
+}
+
+fn ask_certificate(previous: Option<&Certificate>) -> Result<Certificate, inquire::InquireError> {
+    const OWN: &str = "Made by setup";
+    const MINE: &str = "One I have";
+    let had = match previous {
+        Some(Certificate::Installed { cert, key }) => {
+            Some((cert.display().to_string(), key.display().to_string()))
+        }
+        _ => None,
+    };
+    let choices = if had.is_some() {
+        vec![MINE, OWN]
+    } else {
+        vec![OWN, MINE]
+    };
+    if Select::new("Certificate:", choices).prompt()? == OWN {
+        return Ok(Certificate::Own);
+    }
+    let exists = |f: &str| {
+        if Path::new(f).is_file() {
+            Ok(())
+        } else {
+            Err(format!("{f} is not a file"))
+        }
+    };
+    let cert = text(
+        "The certificate (PEM, with its chain):",
+        had.as_ref().map(|h| h.0.as_str()),
+        exists,
+    )?;
+    let cert_for_key = cert.clone();
+    let key = text(
+        "Its private key (PEM):",
+        had.as_ref().map(|h| h.1.as_str()),
+        move |k| crate::cert::check(Path::new(&cert_for_key), Path::new(k)).map(drop),
+    )?;
+    let found = crate::cert::check(Path::new(&cert), Path::new(&key))
+        .map_err(|why| inquire::InquireError::Custom(why.into()))?;
+    println!(
+        "    for {}, good until {}",
+        found.names.join(", "),
+        found.not_after.format("%Y-%m-%d")
+    );
+    Ok(Certificate::Installed {
+        cert: PathBuf::from(cert),
+        key: PathBuf::from(key),
+    })
+}
+
+fn ask_proxies(previous: Option<&[String]>) -> Result<Vec<String>, inquire::InquireError> {
+    let had = previous.map(|p| p.join(" "));
+    let answer = text(
+        "Reverse proxies' addresses (spaces between; none: leave empty):",
+        had.as_deref(),
+        |list| list.split_whitespace().try_for_each(check_proxy),
+    )?;
+    Ok(answer.split_whitespace().map(String::from).collect())
+}
+
+fn ask_syslog(previous: Option<&str>) -> Result<Option<String>, inquire::InquireError> {
+    let answer = text(
+        "Syslog server (udp://host:port or tcp://host:port; none: leave empty):",
+        previous,
+        |s| {
+            if s.is_empty() {
+                Ok(())
+            } else {
+                check_syslog(s)
+            }
+        },
+    )?;
+    Ok(Some(answer).filter(|a| !a.is_empty()))
+}
+
+fn ask_port(previous: u16) -> Result<u16, inquire::InquireError> {
+    let answer = text("HTTPS port:", Some(&previous.to_string()), move |p| {
+        let port: u16 = p
+            .parse()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or("a port, 1 to 65535")?;
+        if port == previous || free(port) {
+            Ok(())
+        } else {
+            Err(format!("port {port} is in use by {}", holder(port)))
+        }
+    })?;
+    Ok(answer.parse().expect("checked"))
+}
+
+fn ask_backups(
+    previous: Option<&Path>,
+    recordings: &Path,
+    archive: &Path,
+) -> Result<Option<PathBuf>, inquire::InquireError> {
+    const INSIDE: &str = "In the archive";
+    const ELSEWHERE: &str = "In a folder I name";
+    let choices = if previous.is_some() {
+        vec![ELSEWHERE, INSIDE]
+    } else {
+        vec![INSIDE, ELSEWHERE]
+    };
+    if Select::new("Backups:", choices).prompt()? == INSIDE {
+        return Ok(None);
+    }
+    let (recordings, archive) = (recordings.to_path_buf(), archive.to_path_buf());
+    let answer = text(
+        "Backup folder:",
+        previous.map(|p| p.to_str().unwrap_or_default()),
+        move |b| check_backups(Path::new(b), &recordings, &archive).map(drop),
+    )?;
+    Ok(Some(
+        folders::check(Path::new(&answer))
+            .map_err(|why| inquire::InquireError::Custom(why.into()))?
+            .path,
+    ))
+}
+
+fn ask_pushes(
+    previous: Option<&[(String, String)]>,
+) -> Result<Vec<(String, String)>, inquire::InquireError> {
+    let mut pushes = Vec::new();
+    for (kind, what) in [("pgbackrest", "pgBackRest backup"), ("dump", "dump")] {
+        let had = previous
+            .and_then(|p| p.iter().find(|(k, _)| k == kind))
+            .map(|(_, url)| url.as_str());
+        let url = text(
+            &format!("Push address after each {what} (none: leave empty):"),
+            had,
+            |u| {
+                if u.is_empty() { Ok(()) } else { check_push(u) }
+            },
+        )?;
+        if !url.is_empty() {
+            pushes.push((kind.to_string(), url));
+        }
+    }
+    Ok(pushes)
 }
 
 /// What the person does after the summary.
@@ -512,5 +995,98 @@ mod tests {
         let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let port = taken.local_addr().unwrap().port();
         assert!(free_port(port) > port);
+    }
+
+    #[test]
+    fn an_answers_file_gives_advanced_answers_each_checked() {
+        use crate::setup::steps::{Certificate, Database, Remote};
+        let dir = tempfile::tempdir().unwrap();
+        let [rec, arc, bak] = ["rec", "arc", "bak"].map(|n| dir.path().join(n));
+        for d in [&rec, &arc, &bak] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let (cert, key) = (dir.path().join("site.pem"), dir.path().join("site.key"));
+        crate::cert::make(&["radio-a.example.org".into()], &cert, &key).unwrap();
+        let base = format!(
+            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"long enough secret\"\nPORT=1\n",
+            rec.display(),
+            arc.display()
+        );
+        let theirs = format!(
+            "{base}DATABASE=theirs\nDB_HOST=db.example.org\nDB_PORT=5433\nDB_NAME=calls\nDB_ROLE=sp\nDB_PASSWORD=\"se:cret\"\n\
+             CERT_FILE={}\nKEY_FILE={}\nPROXIES=\"192.0.2.5 2001:db8::5\"\nSYSLOG=udp://192.0.2.30:514\n",
+            cert.display(),
+            key.display()
+        );
+        let answers = from_file(&answers_file(dir.path(), &theirs, 0o600), &defaults()).unwrap();
+        assert!(answers.advanced);
+        assert_eq!(
+            answers.database,
+            Database::Theirs(Remote {
+                host: "db.example.org".into(),
+                port: 5433,
+                name: "calls".into(),
+                role: "sp".into(),
+                password: "se:cret".into(),
+            })
+        );
+        assert_eq!(
+            answers.certificate,
+            Certificate::Installed {
+                cert: cert.clone(),
+                key: key.clone()
+            }
+        );
+        assert_eq!(answers.proxies, ["192.0.2.5", "2001:db8::5"]);
+        assert_eq!(answers.syslog.as_deref(), Some("udp://192.0.2.30:514"));
+        let refused = |extra: &str, why: &str| {
+            let error = from_file(
+                &answers_file(dir.path(), &format!("{base}{extra}"), 0o600),
+                &defaults(),
+            )
+            .unwrap_err();
+            assert!(error.contains(why), "{extra}: {error}");
+        };
+        refused(
+            &format!(
+                "DATABASE=theirs\nDB_HOST=h\nDB_NAME=n\nDB_ROLE=r\nDB_PASSWORD=p\nBACKUPS={}\n",
+                bak.display()
+            ),
+            "keeps its own backups",
+        );
+        refused(
+            &format!("BACKUPS={}\n", arc.join("inner").display()),
+            "does not exist",
+        );
+        std::fs::create_dir(arc.join("inner")).unwrap();
+        refused(
+            &format!("BACKUPS={}\n", arc.join("inner").display()),
+            "may not be inside each other",
+        );
+        refused("PROXIES=proxy.lan\n", "is not an address");
+        refused("SYSLOG=192.0.2.30\n", "udp://host:port");
+        refused("PUSH_DUMP=kuma\n", "http:// or https://");
+        refused(
+            &format!(
+                "CERT_FILE={}\nKEY_FILE={}\n",
+                cert.display(),
+                dir.path().join("none.key").display()
+            ),
+            "private key",
+        );
+        let here = format!(
+            "{base}BACKUPS={}\nPUSH_DUMP=\"https://kuma.example.org/api/push/abc?status=up&msg=OK\"\n",
+            bak.display()
+        );
+        let answers = from_file(&answers_file(dir.path(), &here, 0o600), &defaults()).unwrap();
+        assert_eq!(answers.database, Database::Here);
+        assert_eq!(answers.backups, Some(bak.clone()));
+        assert_eq!(
+            answers.pushes,
+            [(
+                "dump".to_string(),
+                "https://kuma.example.org/api/push/abc?status=up&msg=OK".to_string()
+            )]
+        );
     }
 }

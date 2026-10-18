@@ -61,11 +61,11 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             if !std::io::stdin().is_terminal() {
                 return Err("setup asks its questions on a terminal: run it in one (ssh -t for a remote machine), or give the answers with --answers FILE".into());
             }
-            if screen::choose()?.is_none() {
+            let Some(kind) = screen::choose()? else {
                 println!("Setup left; nothing was changed.");
                 return Ok(());
-            }
-            match ask::interactive(&defaults, None)? {
+            };
+            match ask::interactive(&defaults, None, kind == screen::Kind::Advanced)? {
                 Some(answers) => answers,
                 None => {
                     println!("Setup left; nothing was changed.");
@@ -74,8 +74,31 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             }
         }
     };
-    let db_password = crate::sessions::random_hex(24);
+    let made_password = crate::sessions::random_hex(24);
     let steps = loop {
+        // A database the person runs must answer, be PostgreSQL 17 and let
+        // its role make tables, before anything is planned on it.
+        if let steps::Database::Theirs(remote) = &answers.database {
+            match ask::check_remote(remote).await {
+                Ok(version) => println!("\nThe database answers: {version}."),
+                Err(why) if answers_file.is_some() || dry_run => return Err(why),
+                Err(why) => {
+                    println!("\n{why}\nChange the database's answers, or quit.");
+                    match ask::interactive(&defaults, Some(&answers), true)? {
+                        Some(changed) => answers = changed,
+                        None => {
+                            println!("Setup left; nothing was changed.");
+                            return Ok(());
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        let db_password = match &answers.database {
+            steps::Database::Here => made_password.clone(),
+            steps::Database::Theirs(remote) => remote.password.clone(),
+        };
         let steps = steps::steps(&answers, &system, Path::new(BINARY), &db_password);
         print!("{}", summary(&answers, &system, &steps));
         if defaults.port != 443 && answers.port == defaults.port {
@@ -101,13 +124,15 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                 println!("Nothing was changed.");
                 return Ok(());
             }
-            ask::Next::Change => match ask::interactive(&defaults, Some(&answers))? {
-                Some(changed) => answers = changed,
-                None => {
-                    println!("Setup left; nothing was changed.");
-                    return Ok(());
+            ask::Next::Change => {
+                match ask::interactive(&defaults, Some(&answers), answers.advanced)? {
+                    Some(changed) => answers = changed,
+                    None => {
+                        println!("Setup left; nothing was changed.");
+                        return Ok(());
+                    }
                 }
-            },
+            }
         }
     };
     let context = apply::Context {
@@ -116,7 +141,10 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             .find(|(name, _)| *name == "DATABASE_URL")
             .map(|(_, url)| url)
             .unwrap_or_default(),
-        db_password,
+        db_password: match &answers.database {
+            steps::Database::Here => made_password,
+            steps::Database::Theirs(remote) => remote.password.clone(),
+        },
         cert: steps::cert_path(),
     };
     apply::apply(&steps, &context, true).await?;
@@ -135,9 +163,11 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
          \n  First admin       {}\
          \n  Transcription     {}\
          \n  Address           {}\
-         \n  Database          PostgreSQL 17 on this machine, its data in {}\
-         \n  Backups           {} (every night at 03:17: pgBackRest, full on Sundays;\
-         \n                    and a dump, the newest {} kept)\
+         \n  Certificate       {}\
+         \n  Database          {}\
+         \n  Backups           {}\
+         \n  Reverse proxies   {}\
+         \n  Logs              {}\
          \n  Settings file     {}\
          \n\nThe steps:\n",
         system.id,
@@ -152,9 +182,51 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
             None => "later, in the admin page".into(),
         },
         addresses(answers).join(", "),
-        system.postgres_data(),
-        steps::backups_path(&answers.archive).display(),
-        crate::backup::KEEP_DUMPS,
+        match &answers.certificate {
+            steps::Certificate::Own =>
+                "made by setup for this machine (the browser warns once)".to_string(),
+            steps::Certificate::Installed { cert, key } => format!(
+                "yours, copied from {} and {}",
+                cert.display(),
+                key.display()
+            ),
+        },
+        match &answers.database {
+            steps::Database::Here => format!(
+                "PostgreSQL 17 on this machine, its data in {}",
+                system.postgres_data()
+            ),
+            steps::Database::Theirs(remote) => format!(
+                "yours: {} on {}:{}, as {}",
+                remote.name, remote.host, remote.port, remote.role
+            ),
+        },
+        match steps::backups_folder(answers) {
+            Some(folder) => format!(
+                "{} (every night at 03:17: pgBackRest, full on Sundays;\n                    and a dump, the newest {} kept){}",
+                folder.display(),
+                crate::backup::KEEP_DUMPS,
+                if answers.pushes.is_empty() {
+                    String::new()
+                } else {
+                    let kinds: Vec<&str> = answers.pushes.iter().map(|(k, _)| k.as_str()).collect();
+                    format!(
+                        "\n                    a push address after each: {}",
+                        kinds.join(", ")
+                    )
+                }
+            ),
+            None => "yours, with the database".into(),
+        },
+        if answers.proxies.is_empty() {
+            "none".to_string()
+        } else {
+            answers.proxies.join(", ")
+        },
+        match &answers.syslog {
+            Some(server) => format!("the journal, and {server}"),
+            None => "the journal".into(),
+        },
         steps::env_path().display(),
     );
     for (n, step) in steps.iter().enumerate() {
@@ -214,11 +286,15 @@ fn detail(step: &Step) -> String {
 /// Said when setup is done.
 fn finished(answers: &Answers) -> String {
     format!(
-        "\nScannerPulse is running. Open {}\n\
-         The browser warns once about the certificate, which this machine made for itself:\n\
-         accept it, or later give the site a Let's Encrypt or your own certificate.\n\
+        "\nScannerPulse is running. Open {}\n{}\
          The admin page is admin.html at the same address; sign in as {}.\n",
         addresses(answers).join(" or "),
+        match answers.certificate {
+            steps::Certificate::Own =>
+                "The browser warns once about the certificate, which this machine made for itself:\n\
+                 accept it, or later give the site a Let's Encrypt or your own certificate.\n",
+            steps::Certificate::Installed { .. } => "",
+        },
         answers.admin,
     )
 }
@@ -239,6 +315,13 @@ mod tests {
             port: 443,
             host: "radio-a".into(),
             names: vec!["radio-a".into(), "192.0.2.10".into(), "127.0.0.1".into()],
+            advanced: false,
+            database: steps::Database::Here,
+            certificate: steps::Certificate::Own,
+            proxies: Vec::new(),
+            syslog: None,
+            backups: None,
+            pushes: Vec::new(),
         }
     }
 

@@ -55,8 +55,12 @@ pub const KINDS: [&str; 2] = ["pgbackrest", "dump"];
 
 /// The settings-file variable holding `kind`'s push (heartbeat) address:
 /// it carries a token, so it is not kept in the database.
-pub fn push_var(kind: &str) -> String {
-    format!("SCANNERPULSE_BACKUP_PUSH_{}", kind.to_ascii_uppercase())
+pub fn push_var(kind: &str) -> Option<&'static str> {
+    match kind {
+        "pgbackrest" => Some("SCANNERPULSE_BACKUP_PUSH_PGBACKREST"),
+        "dump" => Some("SCANNERPULSE_BACKUP_PUSH_DUMP"),
+        _ => None,
+    }
 }
 
 /// Notes that a backup of `kind` has just succeeded.

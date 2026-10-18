@@ -47,6 +47,20 @@ pub struct Found {
     /// The folders above that are not there (an unmounted share, a deleted
     /// folder): their access entries cannot be taken off.
     pub gone: Vec<PathBuf>,
+    /// The database is this machine's, not one the person runs elsewhere.
+    pub local_db: bool,
+}
+
+/// Whether `DATABASE_URL` (unset: setup's own) names this machine.
+pub fn local_database(url: Option<&str>) -> bool {
+    url.is_none_or(|url| {
+        reqwest::Url::parse(url).is_ok_and(|u| {
+            matches!(
+                u.host_str(),
+                None | Some("localhost" | "127.0.0.1" | "[::1]" | "")
+            )
+        })
+    })
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -74,6 +88,9 @@ fn postgres(title: &str, sql: &str) -> Step {
 
 /// The steps that undo setup on `system`, keeping what `remove` does not name.
 pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>, String> {
+    if remove.database && !found.local_db {
+        return Err("the database is one you run on another machine: uninstall leaves it; drop it there if it should go".into());
+    }
     if remove.archive && found.archive.is_none() {
         return Err("the archive's folder is recorded in the database, which does not answer: it cannot be removed this way".into());
     }
@@ -336,6 +353,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             .and_then(|listen| listen.parse::<std::net::SocketAddr>().ok())
             .map(|listen| listen.port()),
         gone,
+        local_db: local_database(std::env::var("DATABASE_URL").ok().as_deref()),
     };
     let steps = steps(&found, remove, &system)?;
     println!("\nUninstall will:");
@@ -356,7 +374,13 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
                 format!("the archive {}", a.display())
             })
         }),
-        (!remove.database).then(|| format!("the database {DATABASE}")),
+        (!remove.database).then(|| {
+            if found.local_db {
+                format!("the database {DATABASE}")
+            } else {
+                "the database you run".into()
+            }
+        }),
         (!remove.backups).then(|| {
             found.backups.as_ref().map_or("the backups".into(), |b| {
                 format!("the backups {}", b.display())
@@ -426,6 +450,7 @@ mod tests {
             backups: Some(PathBuf::from("/srv/archive/.scannerpulse-backups")),
             port: Some(443),
             gone: vec![],
+            local_db: true,
         }
     }
 
@@ -616,5 +641,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("does not answer"), "{error}");
+    }
+
+    #[test]
+    fn a_database_you_run_is_never_dropped_by_uninstall() {
+        use super::local_database;
+        assert!(local_database(None));
+        assert!(local_database(Some(
+            "postgres://scannerpulse@localhost:5432/scannerpulse"
+        )));
+        assert!(!local_database(Some(
+            "postgres://sp@db.example.org:5433/calls"
+        )));
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let theirs = Found {
+            local_db: false,
+            pgbackrest: false,
+            ..found()
+        };
+        let error = steps(
+            &theirs,
+            Remove {
+                database: true,
+                ..Remove::default()
+            },
+            &system,
+        )
+        .unwrap_err();
+        assert!(error.contains("one you run on another machine"), "{error}");
+        assert!(steps(&theirs, Remove::default(), &system).is_ok());
     }
 }

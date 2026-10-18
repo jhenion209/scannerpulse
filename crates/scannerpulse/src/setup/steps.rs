@@ -18,7 +18,8 @@ pub const PORT_PG: u16 = 5432;
 /// machine set up.
 pub const WEB_UNIT: &str = "/etc/systemd/system/scannerpulse-web.service";
 
-/// The Simple questions' answers.
+/// The answers to setup's questions: Simple's, and Advanced's, which
+/// Simple leaves at their defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answers {
     /// Where the recorder saves new recordings (ingest reads, then moves them).
@@ -35,6 +36,79 @@ pub struct Answers {
     pub host: String,
     /// The names and addresses the certificate covers.
     pub names: Vec<String>,
+    /// Advanced was chosen, so changing an answer asks its questions again.
+    pub advanced: bool,
+    /// Where the database runs.
+    pub database: Database,
+    /// The certificate the site serves.
+    pub certificate: Certificate,
+    /// The reverse proxies in front of the site (`web.trusted_proxies`).
+    pub proxies: Vec<String>,
+    /// The syslog server lines also go to (`logs.syslog`), if any.
+    pub syslog: Option<String>,
+    /// Where the backups go; `None` is the archive's `.scannerpulse-backups`.
+    pub backups: Option<PathBuf>,
+    /// Each backup kind's push (heartbeat) address, by `backup::KINDS` name.
+    pub pushes: Vec<(String, String)>,
+}
+
+/// Where the database runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Database {
+    /// PostgreSQL 17 on this machine, installed and backed up by setup.
+    Here,
+    /// One the person runs; its failover and backups stay theirs.
+    Theirs(Remote),
+}
+
+/// A database the person runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    pub host: String,
+    pub port: u16,
+    pub name: String,
+    pub role: String,
+    pub password: String,
+}
+
+impl Remote {
+    /// Its address, without the password (which goes in the password file).
+    pub fn url(&self) -> String {
+        let mut url = reqwest::Url::parse("postgres://localhost/").expect("a URL");
+        // A host that is an IPv6 address goes in brackets.
+        let host = if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        let _ = url.set_host(Some(&host));
+        let _ = url.set_port(Some(self.port));
+        let _ = url.set_username(&self.role);
+        url.set_path(&self.name);
+        url.to_string()
+    }
+
+    /// Its line in the password file; `:` and `\` are escaped there.
+    pub fn pgpass_line(&self) -> String {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace(':', "\\:");
+        format!(
+            "{}:{}:{}:{}:{}\n",
+            esc(&self.host),
+            self.port,
+            esc(&self.name),
+            esc(&self.role),
+            esc(&self.password)
+        )
+    }
+}
+
+/// The certificate the site serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Certificate {
+    /// Made by setup for this machine's names; the browser warns once.
+    Own,
+    /// Files the person gives (PEM), copied into the settings folder.
+    Installed { cert: PathBuf, key: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,9 +207,22 @@ pub fn backups_path(archive: &Path) -> PathBuf {
     archive.join(".scannerpulse-backups")
 }
 
+/// Where these answers' backups go: none with a database the person runs.
+pub fn backups_folder(answers: &Answers) -> Option<PathBuf> {
+    match answers.database {
+        Database::Here => Some(
+            answers
+                .backups
+                .clone()
+                .unwrap_or_else(|| backups_path(&answers.archive)),
+        ),
+        Database::Theirs(_) => None,
+    }
+}
+
 /// pgBackRest's settings: its repository in the backups folder, two full
 /// backups kept (with the differentials and the WAL between them).
-pub fn pgbackrest_conf(archive: &Path, system: &System) -> String {
+pub fn pgbackrest_conf(backups: &Path, system: &System) -> String {
     format!(
         "# Written by `scannerpulse setup`.\n\
          [global]\n\
@@ -147,7 +234,7 @@ pub fn pgbackrest_conf(archive: &Path, system: &System) -> String {
          [{STANZA}]\n\
          pg1-path={data}\n\
          pg1-port={PORT_PG}\n",
-        repo = backups_path(archive).join("pgbackrest").display(),
+        repo = backups.join("pgbackrest").display(),
         data = system.postgres_data(),
     )
 }
@@ -170,8 +257,8 @@ fn requires_mounts(folders: &[&Path]) -> String {
 }
 
 /// The nightly backup's service and timer, in that order; the backups are
-/// in `archive`.
-pub fn backup_units(binary: &Path, system: &System, archive: &Path) -> (String, String) {
+/// in `backups`.
+pub fn backup_units(binary: &Path, system: &System, backups: &Path) -> (String, String) {
     (
         format!(
             "# Written by `scannerpulse setup`.\n\
@@ -185,7 +272,7 @@ pub fn backup_units(binary: &Path, system: &System, archive: &Path) -> (String, 
              EnvironmentFile={env}\n\
              ExecStart={binary} backup\n",
             pg = system.postgres_service(),
-            mounts = requires_mounts(&[archive]),
+            mounts = requires_mounts(&[backups]),
             env = env_path().display(),
             binary = binary.display(),
         ),
@@ -205,11 +292,12 @@ pub fn backup_units(binary: &Path, system: &System, archive: &Path) -> (String, 
 
 /// The settings file's variables for these answers.
 pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
-    vec![
-        (
-            "DATABASE_URL",
-            format!("postgres://{ACCOUNT}@localhost:{PORT_PG}/{DATABASE}"),
-        ),
+    let url = match &answers.database {
+        Database::Here => format!("postgres://{ACCOUNT}@localhost:{PORT_PG}/{DATABASE}"),
+        Database::Theirs(remote) => remote.url(),
+    };
+    let mut pairs = vec![
+        ("DATABASE_URL", url),
         ("PGPASSFILE", pgpass_path().display().to_string()),
         ("SCANNERPULSE_HOST", answers.host.clone()),
         ("SCANNERPULSE_PREFERRED", "true".into()),
@@ -219,15 +307,25 @@ pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
         ),
         ("SCANNERPULSE_TLS_CERT", cert_path().display().to_string()),
         ("SCANNERPULSE_TLS_KEY", key_path().display().to_string()),
-        (
-            "SCANNERPULSE_BACKUPS",
-            backups_path(&answers.archive).display().to_string(),
-        ),
-    ]
+    ];
+    if let Some(backups) = backups_folder(answers) {
+        pairs.push(("SCANNERPULSE_BACKUPS", backups.display().to_string()));
+        for (kind, url) in &answers.pushes {
+            pairs.extend(crate::backup::push_var(kind).map(|var| (var, url.clone())));
+        }
+    }
+    pairs
 }
 
 /// The systemd unit of `command` (`web` or `ingest`), which uses `folders`.
-pub fn unit(command: &str, binary: &Path, system: &System, folders: &[&Path]) -> String {
+/// With `local_db`, it starts after this machine's PostgreSQL.
+pub fn unit(
+    command: &str,
+    binary: &Path,
+    system: &System,
+    folders: &[&Path],
+    local_db: bool,
+) -> String {
     let (what, extra) = match command {
         "web" => (
             "the web interface",
@@ -237,13 +335,17 @@ pub fn unit(command: &str, binary: &Path, system: &System, folders: &[&Path]) ->
         // Ingest releases the processing lease before it stops.
         _ => ("ingest: filing and transcription", "TimeoutStopSec=150\n"),
     };
-    let pg = system.postgres_service();
+    let after = if local_db {
+        format!(" {}.service", system.postgres_service())
+    } else {
+        String::new()
+    };
     format!(
         "# Written by `scannerpulse setup`.\n\
          [Unit]\n\
          Description=ScannerPulse {what}\n\
          Wants=network-online.target\n\
-         After=network-online.target {pg}.service\n\
+         After=network-online.target{after}\n\
          {mounts}\
          \n\
          [Service]\n\
@@ -304,7 +406,26 @@ fn database_sql(password: &str) -> String {
 /// program; `db_password` is the database role's new password.
 pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &str) -> Vec<Step> {
     let mut steps = Vec::new();
+    let here = answers.database == Database::Here;
     match system.family {
+        // A database the person runs: only the tool for folders' access lists.
+        Family::Apt if !here => {
+            steps.push(run(
+                "Read the package lists",
+                "apt-get",
+                &["-o", "DPkg::Lock::Timeout=300", "update"],
+            ));
+            steps.push(run(
+                "Install the tool for folders' access lists",
+                "apt-get",
+                &["-o", "DPkg::Lock::Timeout=300", "install", "-y", "acl"],
+            ));
+        }
+        Family::Dnf if !here => steps.push(run(
+            "Install the tool for folders' access lists",
+            "dnf",
+            &["install", "-y", "acl"],
+        )),
         Family::Apt => {
             // A fresh machine's unattended upgrades may hold apt's lock a while.
             let wait = "DPkg::Lock::Timeout=300";
@@ -383,11 +504,13 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             });
         }
     }
-    steps.push(run(
-        "Start PostgreSQL 17, now and at boot",
-        "systemctl",
-        &["enable", "--now", system.postgres_service()],
-    ));
+    if here {
+        steps.push(run(
+            "Start PostgreSQL 17, now and at boot",
+            "systemctl",
+            &["enable", "--now", system.postgres_service()],
+        ));
+    }
     steps.push(run(
         "Make the scannerpulse account",
         "/bin/sh",
@@ -397,26 +520,28 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
              --home-dir /var/lib/scannerpulse --create-home --shell /usr/sbin/nologin scannerpulse",
         ],
     ));
-    steps.push(Step {
-        title: "Make the database and its role".into(),
-        action: Action::Run {
-            program: "runuser".into(),
-            args: [
-                "-u",
-                "postgres",
-                "--",
-                "psql",
-                "-q",
-                "-v",
-                "ON_ERROR_STOP=1",
-            ]
-            .map(String::from)
-            .to_vec(),
-            input: Some(database_sql(db_password)),
-            env: Vec::new(),
-            unless: None,
-        },
-    });
+    if here {
+        steps.push(Step {
+            title: "Make the database and its role".into(),
+            action: Action::Run {
+                program: "runuser".into(),
+                args: [
+                    "-u",
+                    "postgres",
+                    "--",
+                    "psql",
+                    "-q",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                ]
+                .map(String::from)
+                .to_vec(),
+                input: Some(database_sql(db_password)),
+                env: Vec::new(),
+                unless: None,
+            },
+        });
+    }
     for (folder, role) in [
         (&answers.recordings, "recordings"),
         (&answers.archive, "archive"),
@@ -473,7 +598,12 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         title: "Write the database's password file".into(),
         action: Action::Write {
             path: pgpass_path(),
-            contents: format!("localhost:{PORT_PG}:{DATABASE}:{ACCOUNT}:{db_password}\n"),
+            contents: match &answers.database {
+                Database::Here => {
+                    format!("localhost:{PORT_PG}:{DATABASE}:{ACCOUNT}:{db_password}\n")
+                }
+                Database::Theirs(remote) => remote.pgpass_line(),
+            },
             mode: 0o600,
             owner: format!("{ACCOUNT}:{ACCOUNT}"),
         },
@@ -490,34 +620,59 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             owner: format!("root:{ACCOUNT}"),
         },
     });
-    let mut cert_args = vec![
-        "make".to_string(),
-        "--cert".into(),
-        cert_path().display().to_string(),
-        "--key".into(),
-        key_path().display().to_string(),
-    ];
-    cert_args.extend(answers.names.iter().cloned());
     let me = binary.display().to_string();
-    steps.push(Step {
-        title: "Make this machine's certificate".into(),
-        action: Action::Run {
-            program: me.clone(),
-            args: std::iter::once("cert".to_string())
-                .chain(cert_args)
-                .collect(),
-            input: None,
-            env: Vec::new(),
-            // Kept on a second run: a new one would make browsers warn again.
-            unless: Some(key_path()),
-        },
-    });
-    let key = key_path().display().to_string();
-    steps.push(run(
-        "Give the certificate's key to the scannerpulse account",
-        "chown",
-        &[&format!("{ACCOUNT}:{ACCOUNT}"), &key],
-    ));
+    match &answers.certificate {
+        Certificate::Own => {
+            let mut cert_args = vec![
+                "make".to_string(),
+                "--cert".into(),
+                cert_path().display().to_string(),
+                "--key".into(),
+                key_path().display().to_string(),
+            ];
+            cert_args.extend(answers.names.iter().cloned());
+            steps.push(Step {
+                title: "Make this machine's certificate".into(),
+                action: Action::Run {
+                    program: me.clone(),
+                    args: std::iter::once("cert".to_string())
+                        .chain(cert_args)
+                        .collect(),
+                    input: None,
+                    env: Vec::new(),
+                    // Kept on a second run: a new one would make browsers warn again.
+                    unless: Some(key_path()),
+                },
+            });
+            let key = key_path().display().to_string();
+            steps.push(run(
+                "Give the certificate's key to the scannerpulse account",
+                "chown",
+                &[&format!("{ACCOUNT}:{ACCOUNT}"), &key],
+            ));
+        }
+        Certificate::Installed { cert, key } => {
+            let (from_cert, from_key) = (cert.display().to_string(), key.display().to_string());
+            let (to_cert, to_key) = (
+                cert_path().display().to_string(),
+                key_path().display().to_string(),
+            );
+            steps.push(run(
+                "Copy the site's certificate",
+                "install",
+                &[
+                    "-m", "0644", "-o", ACCOUNT, "-g", ACCOUNT, &from_cert, &to_cert,
+                ],
+            ));
+            steps.push(run(
+                "Copy its key, for the scannerpulse account alone",
+                "install",
+                &[
+                    "-m", "0600", "-o", ACCOUNT, "-g", ACCOUNT, &from_key, &to_key,
+                ],
+            ));
+        }
+    }
     let with_db: Vec<(String, String)> = pairs
         .iter()
         .map(|(n, v)| (n.to_string(), v.clone()))
@@ -545,6 +700,30 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             None,
         ),
     ];
+    if !answers.proxies.is_empty() {
+        more.push(bin(
+            "Set the reverse proxies' addresses",
+            &[
+                "settings",
+                "set",
+                "web.trusted_proxies",
+                &serde_json::json!(answers.proxies).to_string(),
+            ],
+            None,
+        ));
+    }
+    if let Some(server) = &answers.syslog {
+        more.push(bin(
+            "Send the logs to the syslog server too",
+            &[
+                "settings",
+                "set",
+                "logs.syslog",
+                &serde_json::json!(server).to_string(),
+            ],
+            None,
+        ));
+    }
     if let Some(t) = &answers.transcription {
         let servers = serde_json::json!([{ "url": t.url, "weight": 1 }]).to_string();
         let model = serde_json::json!(t.model).to_string();
@@ -579,7 +758,63 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             archive: answers.archive.clone(),
         },
     });
-    let backups = backups_path(&answers.archive);
+    let backups = backups_folder(answers);
+    if let Some(backups) = &backups {
+        backup_steps(&mut steps, backups, binary, system);
+    }
+    for command in ["web", "ingest"] {
+        steps.push(Step {
+            title: format!("Write the {command} service"),
+            action: Action::Write {
+                path: PathBuf::from(format!(
+                    "/etc/systemd/system/scannerpulse-{command}.service"
+                )),
+                contents: unit(
+                    command,
+                    binary,
+                    system,
+                    &[&answers.recordings, &answers.archive],
+                    answers.database == Database::Here,
+                ),
+                mode: 0o644,
+                owner: "root:root".into(),
+            },
+        });
+    }
+    steps.push(run(
+        "Read the new services",
+        "systemctl",
+        &["daemon-reload"],
+    ));
+    let mut units = vec!["scannerpulse-web", "scannerpulse-ingest"];
+    if backups.is_some() {
+        units.push("scannerpulse-backup.timer");
+    }
+    steps.push(run(
+        "Start ScannerPulse at boot",
+        "systemctl",
+        &[&["enable"], &units[..]].concat(),
+    ));
+    // A rerun gives the database role a new password: a service still
+    // running from before would keep the old one and fail.
+    steps.push(run(
+        "Start or restart ScannerPulse, to read the new settings",
+        "systemctl",
+        &[&["restart"], &units[..]].concat(),
+    ));
+    // Rocky, Alma and Fedora run firewalld, which would shut the site out.
+    steps.push(firewall(true, answers.port));
+    steps.push(Step {
+        title: "Wait for the web interface".into(),
+        action: Action::WaitForWeb { port: answers.port },
+    });
+    steps
+}
+
+/// The backups' steps, into `backups`: its folders kept to PostgreSQL and
+/// root, pgBackRest's settings, the WAL sent to it, the first full backup,
+/// and the nightly timer.
+fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path, system: &System) {
     steps.push(run(
         "Make the folder of pgBackRest's backups",
         "install",
@@ -634,7 +869,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         title: "Write pgBackRest's settings".into(),
         action: Action::Write {
             path: PathBuf::from(PGBACKREST_CONF),
-            contents: pgbackrest_conf(&answers.archive, system),
+            contents: pgbackrest_conf(backups, system),
             mode: 0o640,
             owner: "root:postgres".into(),
         },
@@ -678,7 +913,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         &["pgbackrest", &config, &stanza, "backup", "--type=full"],
         None,
     ));
-    let (service, timer) = backup_units(binary, system, &answers.archive);
+    let (service, timer) = backup_units(binary, system, backups);
     for (name, contents) in [
         ("scannerpulse-backup.service", service),
         ("scannerpulse-backup.timer", timer),
@@ -693,60 +928,13 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             },
         });
     }
-    for command in ["web", "ingest"] {
-        steps.push(Step {
-            title: format!("Write the {command} service"),
-            action: Action::Write {
-                path: PathBuf::from(format!(
-                    "/etc/systemd/system/scannerpulse-{command}.service"
-                )),
-                contents: unit(
-                    command,
-                    binary,
-                    system,
-                    &[&answers.recordings, &answers.archive],
-                ),
-                mode: 0o644,
-                owner: "root:root".into(),
-            },
-        });
-    }
-    steps.push(run(
-        "Read the new services",
-        "systemctl",
-        &["daemon-reload"],
-    ));
-    let units = [
-        "scannerpulse-web",
-        "scannerpulse-ingest",
-        "scannerpulse-backup.timer",
-    ];
-    steps.push(run(
-        "Start ScannerPulse at boot",
-        "systemctl",
-        &[&["enable"], &units[..]].concat(),
-    ));
-    // A rerun gives the database role a new password: a service still
-    // running from before would keep the old one and fail.
-    steps.push(run(
-        "Start or restart ScannerPulse, to read the new settings",
-        "systemctl",
-        &[&["restart"], &units[..]].concat(),
-    ));
-    // Rocky, Alma and Fedora run firewalld, which would shut the site out.
-    steps.push(firewall(true, answers.port));
-    steps.push(Step {
-        title: "Wait for the web interface".into(),
-        action: Action::WaitForWeb { port: answers.port },
-    });
-    steps
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Answers, Transcription, backup_units, env_pairs, pgbackrest_conf, reach, steps,
-        unit,
+        Action, Answers, Certificate, Database, Transcription, backup_units, env_pairs,
+        pgbackrest_conf, reach, steps, unit,
     };
     use crate::setup::system::detect;
     use std::path::{Path, PathBuf};
@@ -765,6 +953,13 @@ mod tests {
             port: 443,
             host: "radio-a".into(),
             names: vec!["radio-a".into(), "192.0.2.10".into()],
+            advanced: false,
+            database: Database::Here,
+            certificate: Certificate::Own,
+            proxies: Vec::new(),
+            syslog: None,
+            backups: None,
+            pushes: Vec::new(),
         }
     }
 
@@ -944,6 +1139,7 @@ mod tests {
             Path::new("/usr/local/bin/scannerpulse"),
             &system,
             &folders,
+            true,
         );
         assert!(web.contains("User=scannerpulse\n"));
         assert!(web.contains("ExecStart=/usr/local/bin/scannerpulse web\n"));
@@ -955,6 +1151,7 @@ mod tests {
             Path::new("/usr/local/bin/scannerpulse"),
             &system,
             &folders,
+            true,
         );
         assert!(
             ingest.contains("TimeoutStopSec=150\n") && !ingest.contains("CAP_NET_BIND_SERVICE")
@@ -971,6 +1168,7 @@ mod tests {
             Path::new("/usr/local/bin/scannerpulse"),
             &system,
             &[Path::new("/srv/my calls"), Path::new("/srv/100%/a\"b\\c")],
+            true,
         );
         assert!(
             odd.contains("RequiresMountsFor=\"/srv/my calls\" \"/srv/100%%/a\\\"b\\\\c\"\n"),
@@ -1135,12 +1333,12 @@ mod tests {
             "/srv/archive/.scannerpulse-backups".to_string()
         )));
         let debian = detect(DEBIAN, "aarch64").unwrap();
-        let conf = pgbackrest_conf(Path::new("/srv/archive"), &debian);
+        let conf = pgbackrest_conf(Path::new("/srv/archive/.scannerpulse-backups"), &debian);
         assert!(conf.contains("repo1-path=/srv/archive/.scannerpulse-backups/pgbackrest\n"));
         assert!(conf.contains("[scannerpulse]\npg1-path=/var/lib/postgresql/17/main\n"));
         let rocky = detect(ROCKY, "x86_64").unwrap();
         assert!(
-            pgbackrest_conf(Path::new("/srv/archive"), &rocky)
+            pgbackrest_conf(Path::new("/srv/archive/.scannerpulse-backups"), &rocky)
                 .contains("pg1-path=/var/lib/pgsql/17/data\n")
         );
         let (service, timer) = backup_units(
@@ -1227,6 +1425,191 @@ mod tests {
         assert_eq!(
             at("Start or restart ScannerPulse, to read the new settings"),
             at("Start ScannerPulse at boot") + 1
+        );
+    }
+
+    fn theirs() -> Answers {
+        Answers {
+            advanced: true,
+            database: Database::Theirs(super::Remote {
+                host: "db.example.org".into(),
+                port: 5433,
+                name: "calls".into(),
+                role: "sp".into(),
+                password: "se:cret".into(),
+            }),
+            ..answers()
+        }
+    }
+
+    #[test]
+    fn a_database_you_run_gets_no_postgresql_here_and_no_backups() {
+        let all = steps(
+            &theirs(),
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "unused",
+        );
+        let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
+        for gone in [
+            "Install PostgreSQL 17 and pgBackRest",
+            "Start PostgreSQL 17, now and at boot",
+            "Make the database and its role",
+            "Take the first full backup",
+            "Write scannerpulse-backup.timer",
+        ] {
+            assert!(!titles.contains(&gone), "{gone}");
+        }
+        assert!(titles.contains(&"Install the tool for folders' access lists"));
+        let pairs = env_pairs(&theirs());
+        assert!(pairs.contains(&(
+            "DATABASE_URL",
+            "postgres://sp@db.example.org:5433/calls".to_string()
+        )));
+        assert!(!pairs.iter().any(|(n, _)| *n == "SCANNERPULSE_BACKUPS"));
+        let Some(Action::Write { contents, .. }) = all
+            .iter()
+            .find(|s| s.title == "Write the database's password file")
+            .map(|s| &s.action)
+        else {
+            panic!()
+        };
+        assert_eq!(contents, "db.example.org:5433:calls:sp:se\\:cret\n");
+        let Some(Action::Write { contents: web, .. }) = all
+            .iter()
+            .find(|s| s.title == "Write the web service")
+            .map(|s| &s.action)
+        else {
+            panic!()
+        };
+        assert!(web.contains("After=network-online.target\n"), "{web}");
+        let Action::Run { args, .. } = &all
+            .iter()
+            .find(|s| s.title == "Start ScannerPulse at boot")
+            .unwrap()
+            .action
+        else {
+            panic!()
+        };
+        assert_eq!(args, &["enable", "scannerpulse-web", "scannerpulse-ingest"]);
+        let rocky = steps(
+            &theirs(),
+            &detect(ROCKY, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "unused",
+        );
+        assert!(
+            !rocky
+                .iter()
+                .any(|s| s.title.contains("PostgreSQL") || s.title.contains("EPEL"))
+        );
+    }
+
+    #[test]
+    fn an_address_with_odd_characters_stays_one_address() {
+        let remote = super::Remote {
+            host: "2001:db8::40".into(),
+            port: 5432,
+            name: "radio calls".into(),
+            role: "sp@site".into(),
+            password: "a\\b:c".into(),
+        };
+        assert_eq!(
+            remote.url(),
+            "postgres://sp%40site@[2001:db8::40]:5432/radio%20calls"
+        );
+        assert_eq!(
+            remote.pgpass_line(),
+            "2001\\:db8\\:\\:40:5432:radio calls:sp@site:a\\\\b\\:c\n"
+        );
+    }
+
+    #[test]
+    fn your_certificate_is_copied_and_the_advanced_settings_written() {
+        let answers = Answers {
+            advanced: true,
+            certificate: Certificate::Installed {
+                cert: "/root/site.pem".into(),
+                key: "/root/site.key".into(),
+            },
+            proxies: vec!["192.0.2.5".into()],
+            syslog: Some("tcp://192.0.2.30:6514".into()),
+            backups: Some("/srv/backups".into()),
+            pushes: vec![(
+                "pgbackrest".into(),
+                "https://kuma.example.org/api/push/x".into(),
+            )],
+            ..answers()
+        };
+        let all = steps(
+            &answers,
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        let run = |title: &str| match &all
+            .iter()
+            .find(|s| s.title == title)
+            .unwrap_or_else(|| panic!("{title}"))
+            .action
+        {
+            Action::Run { args, .. } => args.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            !all.iter()
+                .any(|s| s.title == "Make this machine's certificate")
+        );
+        assert_eq!(
+            run("Copy the site's certificate"),
+            [
+                "-m",
+                "0644",
+                "-o",
+                "scannerpulse",
+                "-g",
+                "scannerpulse",
+                "/root/site.pem",
+                "/etc/scannerpulse/tls/cert.pem"
+            ]
+        );
+        assert_eq!(
+            run("Copy its key, for the scannerpulse account alone"),
+            [
+                "-m",
+                "0600",
+                "-o",
+                "scannerpulse",
+                "-g",
+                "scannerpulse",
+                "/root/site.key",
+                "/etc/scannerpulse/tls/key.pem"
+            ]
+        );
+        assert_eq!(
+            run("Set the reverse proxies' addresses")[3],
+            "[\"192.0.2.5\"]"
+        );
+        assert_eq!(
+            run("Send the logs to the syslog server too")[3],
+            "\"tcp://192.0.2.30:6514\""
+        );
+        let pairs = env_pairs(&answers);
+        assert!(pairs.contains(&("SCANNERPULSE_BACKUPS", "/srv/backups".to_string())));
+        assert!(pairs.contains(&(
+            "SCANNERPULSE_BACKUP_PUSH_PGBACKREST",
+            "https://kuma.example.org/api/push/x".to_string()
+        )));
+        let Some(Action::Write { contents, .. }) = all
+            .iter()
+            .find(|s| s.title == "Write pgBackRest's settings")
+            .map(|s| &s.action)
+        else {
+            panic!()
+        };
+        assert!(
+            contents.contains("repo1-path=/srv/backups/pgbackrest\n"),
+            "{contents}"
         );
     }
 }

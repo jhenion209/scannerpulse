@@ -17,11 +17,10 @@ Setup asks for the folder SDRTrunk saves its recordings in, the archive, the tim
 the first admin account and, if you like, a transcription server. \
 Every advanced option can be set later in the admin page.";
 
-pub const ADVANCED_NOTE: &str = "Also lets you choose: high availability (joining another \
-ScannerPulse install, or adding a second machine for failover), where the database runs, \
-the certificate (Let's Encrypt or your own), sending logs to a syslog server, and where \
-the backups go. Advanced arrives in a later version of setup: choose Simple for now, \
-and set these later in the admin page.";
+pub const ADVANCED_NOTE: &str = "Also asks where the database runs (this machine, or a \
+PostgreSQL 17 database you run), the certificate (setup's own, or yours), the port, a reverse \
+proxy in front, sending logs to a syslog server, where the backups go, and a monitor's push \
+address for each backup. High availability and Let's Encrypt come in later versions.";
 
 const CHOICES: [(&str, Kind, &str); 2] = [
     ("Simple", Kind::Simple, SIMPLE_NOTE),
@@ -115,10 +114,7 @@ pub fn choose() -> Result<Option<Kind>, String> {
                 match key.code {
                     KeyCode::Up => selected = selected.saturating_sub(1),
                     KeyCode::Down => selected = (selected + 1).min(CHOICES.len() - 1),
-                    KeyCode::Enter if CHOICES[selected].1 == Kind::Simple => {
-                        return Ok(Some(Kind::Simple));
-                    }
-                    KeyCode::Enter => {} // Advanced arrives later; its note says so.
+                    KeyCode::Enter => return Ok(Some(CHOICES[selected].1)),
                     KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
                     _ => {}
                 }
@@ -144,15 +140,13 @@ mod tests {
         assert!(wide.iter().any(|l| l.starts_with("  Advanced")));
         assert!(wide.iter().all(|l| l.len() <= 100));
         let advanced = lines(1, 100);
-        assert!(
-            advanced
-                .iter()
-                .any(|l| l.starts_with("> Advanced") && l.contains("Also lets you choose"))
-        );
+        assert!(advanced.iter().any(
+            |l| l.starts_with("> Advanced") && l.contains("Also asks where the database runs")
+        ));
         assert!(
             advanced
                 .join(" ")
-                .contains("Advanced arrives in a later version")
+                .contains("High availability and Let's Encrypt come in later versions")
         );
     }
 
@@ -160,7 +154,7 @@ mod tests {
     fn on_a_narrow_terminal_the_note_goes_below() {
         let narrow = lines(1, 40);
         let at = narrow.iter().position(|l| l == "> Advanced").unwrap();
-        assert!(narrow[at + 2].starts_with("Also lets you choose"));
+        assert!(narrow[at + 2].starts_with("Also asks where the"));
         assert!(narrow.iter().all(|l| l.len() <= 40));
         assert_eq!(
             wrap(ADVANCED_NOTE, 40).join(" "),

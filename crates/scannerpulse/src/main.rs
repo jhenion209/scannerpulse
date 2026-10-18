@@ -1815,7 +1815,8 @@ async fn backup_succeeded(kind: &str, database_url: &str) {
             eprintln!("backup: the {kind} backup's time was not kept: the database did not answer")
         }
     }
-    if let Ok(url) = std::env::var(scannerpulse::backup::push_var(kind))
+    if let Some(var) = scannerpulse::backup::push_var(kind)
+        && let Ok(url) = std::env::var(var)
         && let Err(error) = scannerpulse::backup::push(&url).await
     {
         eprintln!("backup: the {kind} push was not made: {error}");
