@@ -51,8 +51,19 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
             crate::cert::read(ca)?;
         }
     }
-    if let Certificate::Installed { cert, key } = &answers.certificate {
-        crate::cert::check(cert, key)?;
+    match &answers.certificate {
+        Certificate::Installed { cert, key } => {
+            crate::cert::check(cert, key)?;
+        }
+        Certificate::LetsEncrypt { names, .. } => {
+            if names.is_empty() {
+                return Err("Let's Encrypt needs the site's names".into());
+            }
+            for name in names {
+                crate::acme::check_name(name)?;
+            }
+        }
+        Certificate::Own => {}
     }
     for proxy in &answers.proxies {
         check_proxy(proxy)?;
@@ -204,6 +215,15 @@ pub async fn check_database(options: sqlx::postgres::PgConnectOptions) -> Result
 }
 
 /// `check_database` for a database the person names.
+/// The Cloudflare token reaches the zone of each name.
+pub async fn check_cloudflare(token: &str, names: &[String]) -> Result<(), String> {
+    let cloudflare = crate::cloudflare::Cloudflare::new(token);
+    for name in names {
+        cloudflare.zone(name).await?;
+    }
+    Ok(())
+}
+
 pub async fn check_remote(remote: &Remote) -> Result<String, String> {
     use sqlx::postgres::PgSslMode;
     let mut options = sqlx::postgres::PgConnectOptions::new()
@@ -316,12 +336,31 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
         }),
         Some(other) => return Err(format!("DATABASE is {other:?}: here or theirs")),
     };
-    let certificate = match (get("CERT_FILE"), get("KEY_FILE")) {
-        (Some(cert), Some(key)) => Certificate::Installed {
+    let certificate = match (get("CERT_FILE"), get("KEY_FILE"), get("LETSENCRYPT")) {
+        (Some(cert), Some(key), None) => Certificate::Installed {
             cert: PathBuf::from(cert),
             key: PathBuf::from(key),
         },
-        (None, None) => Certificate::Own,
+        (None, None, None) => Certificate::Own,
+        (None, None, Some(proof)) => Certificate::LetsEncrypt {
+            proof: match proof.as_str() {
+                "web" => crate::acme::Proof::Web,
+                "dns-cloudflare" => crate::acme::Proof::Cloudflare {
+                    token: need("CLOUDFLARE_TOKEN")?,
+                },
+                other => return Err(format!("LETSENCRYPT is {other:?}: web or dns-cloudflare")),
+            },
+            names: need("LETSENCRYPT_NAMES")?
+                .split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect(),
+        },
+        (_, _, Some(_)) => {
+            return Err(format!(
+                "{}: LETSENCRYPT or CERT_FILE and KEY_FILE: one or the other",
+                path.display()
+            ));
+        }
         _ => {
             return Err(format!(
                 "{}: give both CERT_FILE and KEY_FILE, or neither",
@@ -458,7 +497,7 @@ pub fn interactive(
                 );
                 database = ask_database(previous.map(|a| &a.database))?;
                 say(
-                    "Advanced 2 of 4. Web access. ScannerPulse serves HTTPS only. Its certificate is one setup makes for this machine (the browser warns once), or one you have (a PEM certificate and its key). Let's Encrypt comes in a later version; the admin page will offer it. If a reverse proxy sits in front of the site, give its addresses, so the visitors' own addresses are read from it.",
+                    "Advanced 2 of 4. Web access. ScannerPulse serves HTTPS only. Its certificate is one setup makes for this machine (the browser warns once), one you have (a PEM certificate and its key), or Let's Encrypt's, which the site gets and renews itself: proved over the web when port 443 reaches this machine from the internet under the site's name, or through DNS when the name's zone is at Cloudflare (an API token with Zone, DNS, Edit on it). If a reverse proxy sits in front of the site, give its addresses, so the visitors' own addresses are read from it.",
                 );
                 certificate = ask_certificate(previous.map(|a| &a.certificate))?;
                 proxies = ask_proxies(previous.map(|a| a.proxies.as_slice()))?;
@@ -750,19 +789,78 @@ fn ask_database(previous: Option<&Database>) -> Result<Database, inquire::Inquir
 fn ask_certificate(previous: Option<&Certificate>) -> Result<Certificate, inquire::InquireError> {
     const OWN: &str = "Made by setup";
     const MINE: &str = "One I have";
+    const WEB: &str =
+        "Let's Encrypt, proved over the web (port 443 reaches this machine from the internet)";
+    const DNS: &str = "Let's Encrypt, proved through DNS at Cloudflare (for a machine the internet does not reach)";
     let had = match previous {
         Some(Certificate::Installed { cert, key }) => {
             Some((cert.display().to_string(), key.display().to_string()))
         }
         _ => None,
     };
-    let choices = if had.is_some() {
-        vec![MINE, OWN]
-    } else {
-        vec![OWN, MINE]
+    let choices = vec![OWN, MINE, WEB, DNS];
+    let start = match previous {
+        Some(Certificate::Installed { .. }) => 1,
+        Some(Certificate::LetsEncrypt {
+            proof: crate::acme::Proof::Web,
+            ..
+        }) => 2,
+        Some(Certificate::LetsEncrypt { .. }) => 3,
+        _ => 0,
     };
-    if Select::new("Certificate:", choices).prompt()? == OWN {
+    let chosen = Select::new("Certificate:", choices)
+        .with_starting_cursor(start)
+        .prompt()?;
+    if chosen == OWN {
         return Ok(Certificate::Own);
+    }
+    if chosen == WEB || chosen == DNS {
+        let (had_names, had_token) = match previous {
+            Some(Certificate::LetsEncrypt { proof, names }) => (
+                Some(names.join(" ")),
+                match proof {
+                    crate::acme::Proof::Cloudflare { token } => Some(token.clone()),
+                    crate::acme::Proof::Web => None,
+                },
+            ),
+            _ => (None, None),
+        };
+        let names: Vec<String> = text(
+            "The site's names, as visitors type them (one or more, with spaces between):",
+            had_names.as_deref(),
+            |names| {
+                if names.split_whitespace().next().is_none() {
+                    return Err("one name at least".into());
+                }
+                names
+                    .split_whitespace()
+                    .try_for_each(crate::acme::check_name)
+            },
+        )?
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+        let proof = if chosen == WEB {
+            crate::acme::Proof::Web
+        } else {
+            let token = match had_token {
+                Some(token)
+                    if Confirm::new("Keep the Cloudflare token you gave?")
+                        .with_default(true)
+                        .prompt()? =>
+                {
+                    token
+                }
+                _ => Password::new("Cloudflare API token (Zone, DNS, Edit on the site's zone):")
+                    .with_display_mode(PasswordDisplayMode::Masked)
+                    .without_confirmation()
+                    .prompt()?
+                    .trim()
+                    .to_string(),
+            };
+            crate::acme::Proof::Cloudflare { token }
+        };
+        return Ok(Certificate::LetsEncrypt { proof, names });
     }
     let exists = |f: &str| {
         if Path::new(f).is_file() {
@@ -1131,6 +1229,20 @@ mod tests {
         };
         assert_eq!(remote.sslmode, crate::setup::steps::SslMode::VerifyFull);
         assert_eq!(remote.root_cert, Some(cert.clone()));
+        let lets_encrypt = format!(
+            "{base}LETSENCRYPT=dns-cloudflare\nLETSENCRYPT_NAMES=\"Radio.example.org www.example.org\"\nCLOUDFLARE_TOKEN=cf-token-1\n"
+        );
+        let answers =
+            from_file(&answers_file(dir.path(), &lets_encrypt, 0o600), &defaults()).unwrap();
+        assert_eq!(
+            answers.certificate,
+            Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Cloudflare {
+                    token: "cf-token-1".into()
+                },
+                names: vec!["radio.example.org".into(), "www.example.org".into()],
+            }
+        );
         let refused = |extra: &str, why: &str| {
             let error = from_file(
                 &answers_file(dir.path(), &format!("{base}{extra}"), 0o600),
@@ -1177,6 +1289,27 @@ mod tests {
         refused(
             &format!("BACKUPS={}\n", arc.join("inner").display()),
             "may not be inside each other",
+        );
+        refused(
+            "LETSENCRYPT=http\nLETSENCRYPT_NAMES=radio.example.org\n",
+            "web or dns-cloudflare",
+        );
+        refused("LETSENCRYPT=web\n", "LETSENCRYPT_NAMES");
+        refused(
+            "LETSENCRYPT=web\nLETSENCRYPT_NAMES=radio\n",
+            "radio.example.org",
+        );
+        refused(
+            "LETSENCRYPT=dns-cloudflare\nLETSENCRYPT_NAMES=radio.example.org\n",
+            "CLOUDFLARE_TOKEN",
+        );
+        refused(
+            &format!(
+                "LETSENCRYPT=web\nLETSENCRYPT_NAMES=radio.example.org\nCERT_FILE={}\nKEY_FILE={}\n",
+                cert.display(),
+                key.display()
+            ),
+            "one or the other",
         );
         refused("PROXIES=proxy.lan\n", "is not an address");
         refused("SYSLOG=192.0.2.30\n", "udp://host:port");

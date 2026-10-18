@@ -156,6 +156,12 @@ pub enum Certificate {
     Own,
     /// Files the person gives (PEM), copied into the settings folder.
     Installed { cert: PathBuf, key: PathBuf },
+    /// Let's Encrypt's for `names`, proved as `proof` says; the site serves
+    /// the one setup makes until it arrives.
+    LetsEncrypt {
+        proof: crate::acme::Proof,
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +364,13 @@ pub fn env_pairs(answers: &Answers) -> Vec<(&'static str, String)> {
         ("SCANNERPULSE_TLS_CERT", cert_path().display().to_string()),
         ("SCANNERPULSE_TLS_KEY", key_path().display().to_string()),
     ];
+    if let Certificate::LetsEncrypt { proof, names } = &answers.certificate {
+        pairs.push(("SCANNERPULSE_ACME", proof.name().to_string()));
+        pairs.push(("SCANNERPULSE_ACME_NAMES", names.join(" ")));
+        if let crate::acme::Proof::Cloudflare { token } = proof {
+            pairs.push(("SCANNERPULSE_CLOUDFLARE_TOKEN", token.clone()));
+        }
+    }
     if let Some(backups) = backups_folder(answers) {
         pairs.push(("SCANNERPULSE_BACKUPS", backups.display().to_string()));
         for (kind, url) in &answers.pushes {
@@ -692,7 +705,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
     });
     let me = binary.display().to_string();
     match &answers.certificate {
-        Certificate::Own => {
+        Certificate::Own | Certificate::LetsEncrypt { .. } => {
             let mut cert_args = vec![
                 "make".to_string(),
                 "--cert".into(),
@@ -1676,6 +1689,61 @@ mod tests {
             "postgres://sp%40site@[2001:db8::40]:5432/radio%20calls"
         );
         assert_eq!(remote.pgpass_line(), "*:5432:radio calls:sp@site:a\\b:c\n");
+    }
+
+    #[test]
+    fn with_lets_encrypt_setup_makes_the_certificate_served_until_it_arrives() {
+        let dns = Answers {
+            advanced: true,
+            certificate: Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Cloudflare {
+                    token: "cf-token-1".into(),
+                },
+                names: vec!["radio.example.org".into(), "www.example.org".into()],
+            },
+            ..answers()
+        };
+        let all = steps(
+            &dns,
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/usr/local/bin/scannerpulse"),
+            "db secret",
+        );
+        assert!(
+            all.iter()
+                .any(|s| s.title == "Make this machine's certificate")
+        );
+        let pairs = env_pairs(&dns);
+        for want in [
+            ("SCANNERPULSE_ACME", "dns-cloudflare"),
+            (
+                "SCANNERPULSE_ACME_NAMES",
+                "radio.example.org www.example.org",
+            ),
+            ("SCANNERPULSE_CLOUDFLARE_TOKEN", "cf-token-1"),
+        ] {
+            assert!(
+                pairs.contains(&(want.0, want.1.to_string())),
+                "{want:?}: {pairs:?}"
+            );
+        }
+        let web = env_pairs(&Answers {
+            certificate: Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Web,
+                names: vec!["radio.example.org".into()],
+            },
+            ..answers()
+        });
+        assert!(web.contains(&("SCANNERPULSE_ACME", "web".to_string())));
+        assert!(
+            !web.iter()
+                .any(|(n, _)| *n == "SCANNERPULSE_CLOUDFLARE_TOKEN")
+        );
+        assert!(
+            !env_pairs(&answers())
+                .iter()
+                .any(|(n, _)| n.contains("ACME"))
+        );
     }
 
     #[test]

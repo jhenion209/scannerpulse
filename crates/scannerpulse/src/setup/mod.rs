@@ -85,22 +85,39 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             system::other_postgres(&seen)?;
         }
         // A database the person runs must answer, be PostgreSQL 17 and let
-        // its role make tables, before anything is planned on it.
-        if let steps::Database::Theirs(remote) = &answers.database {
-            match ask::check_remote(remote).await {
-                Ok(version) => println!("\nThe database answers: {version}."),
-                Err(why) if answers_file.is_some() || dry_run => return Err(why),
-                Err(why) => {
-                    println!("\n{why}\nChange the database's answers, or quit.");
-                    match ask::interactive(&defaults, Some(&answers), true)? {
-                        Some(changed) => answers = changed,
-                        None => {
-                            println!("Setup left; nothing was changed.");
-                            return Ok(());
-                        }
+        // its role make tables, and a Cloudflare token must reach the site's
+        // zone, before anything is planned on them.
+        let online = async {
+            if let steps::Database::Theirs(remote) = &answers.database {
+                let version = ask::check_remote(remote).await?;
+                println!("\nThe database answers: {version}.");
+            }
+            if let steps::Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Cloudflare { token },
+                names,
+            } = &answers.certificate
+            {
+                ask::check_cloudflare(token, names).await?;
+                println!(
+                    "\nCloudflare's token reaches the zone of {}.",
+                    names.join(", ")
+                );
+            }
+            Ok::<(), String>(())
+        };
+        match online.await {
+            Ok(()) => {}
+            Err(why) if answers_file.is_some() || dry_run => return Err(why),
+            Err(why) => {
+                println!("\n{why}\nChange the answers, or quit.");
+                match ask::interactive(&defaults, Some(&answers), true)? {
+                    Some(changed) => answers = changed,
+                    None => {
+                        println!("Setup left; nothing was changed.");
+                        return Ok(());
                     }
-                    continue;
                 }
+                continue;
             }
         }
         let db_password = match &answers.database {
@@ -197,6 +214,15 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
                 cert.display(),
                 key.display()
             ),
+            steps::Certificate::LetsEncrypt { proof, names } => format!(
+                "Let's Encrypt's for {}, proved {}; until it arrives, one setup makes",
+                names.join(", "),
+                match proof {
+                    crate::acme::Proof::Web =>
+                        "over the web (port 443 must reach this machine from the internet)",
+                    crate::acme::Proof::Cloudflare { .. } => "through DNS at Cloudflare",
+                }
+            ),
         },
         match &answers.database {
             steps::Database::Here => format!(
@@ -253,6 +279,7 @@ fn addresses(answers: &Answers) -> Vec<String> {
         steps::Certificate::Installed { cert, .. } => crate::cert::read(cert)
             .map(|found| found.names)
             .unwrap_or_else(|_| answers.names.clone()),
+        steps::Certificate::LetsEncrypt { names, .. } => names.clone(),
         steps::Certificate::Own => answers.names.clone(),
     };
     names
@@ -311,6 +338,9 @@ fn finished(answers: &Answers) -> String {
                 "The browser warns once about the certificate, which this machine made for itself:\n\
                  accept it, or later give the site a Let's Encrypt or your own certificate.\n",
             steps::Certificate::Installed { .. } => "",
+            steps::Certificate::LetsEncrypt { .. } =>
+                "Let's Encrypt's certificate comes within minutes; until then the browser warns.\n\
+                 The admin page's This machine shows how its request went.\n",
         },
         answers.admin,
     )
@@ -337,6 +367,18 @@ mod tests {
         });
         assert!(said.contains("Open https://radio.example.org/\n"), "{said}");
         assert!(!said.contains("radio-a"), "{said}");
+        let lets_encrypt = finished(&steps::Answers {
+            certificate: steps::Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Web,
+                names: vec!["radio.example.org".into()],
+            },
+            ..answers()
+        });
+        assert!(
+            lets_encrypt.contains("Open https://radio.example.org/\n"),
+            "{lets_encrypt}"
+        );
+        assert!(lets_encrypt.contains("Let's Encrypt"), "{lets_encrypt}");
         let own = finished(&answers());
         assert!(
             own.contains("Open https://radio-a/ or https://192.0.2.10/\n"),
