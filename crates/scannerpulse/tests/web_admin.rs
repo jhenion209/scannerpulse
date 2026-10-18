@@ -301,7 +301,8 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
     ));
-    let (cookie, _) = signed(&pool, &app).await;
+    // The admin made above signs in again, on this second app.
+    let (cookie, _) = sign_in(&app, "ann", PASSWORD).await;
     let got = send(
         &app,
         "GET",
