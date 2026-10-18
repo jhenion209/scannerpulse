@@ -1842,22 +1842,26 @@ fn confirm(question: &str) -> std::io::Result<bool> {
 /// push address, if the settings file has one. Neither fails the backup;
 /// each says when it could not be done.
 async fn backup_succeeded(kind: &str, database_url: &str) {
+    use scannerpulse::log::warn;
+    let not_kept = |why: String| {
+        warn(format!(
+            "backup: the {kind} backup's time was not kept: {why}"
+        ))
+    };
     match tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(database_url)).await {
         Ok(Ok(mut conn)) => {
             if let Err(error) = scannerpulse::backup::record(&mut conn, kind).await {
-                eprintln!("backup: the {kind} backup's time was not kept: {error}");
+                not_kept(error.to_string());
             }
         }
-        Ok(Err(error)) => eprintln!("backup: the {kind} backup's time was not kept: {error}"),
-        Err(_) => {
-            eprintln!("backup: the {kind} backup's time was not kept: the database did not answer")
-        }
+        Ok(Err(error)) => not_kept(error.to_string()),
+        Err(_) => not_kept("the database did not answer".into()),
     }
     if let Some(var) = scannerpulse::backup::push_var(kind)
         && let Ok(url) = std::env::var(var)
         && let Err(error) = scannerpulse::backup::push(&url).await
     {
-        eprintln!("backup: the {kind} push was not made: {error}");
+        warn(format!("backup: the {kind} push was not made: {error}"));
     }
 }
 
