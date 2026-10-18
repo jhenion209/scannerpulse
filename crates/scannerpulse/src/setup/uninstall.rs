@@ -77,13 +77,13 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
     if remove.archive && found.archive.is_none() {
         return Err("the archive's folder is recorded in the database, which does not answer: it cannot be removed this way".into());
     }
-    if let (true, Some(archive)) = (remove.archive, &found.archive) {
-        if found.gone.contains(archive) {
-            return Err(format!(
-                "the archive {} is not there (not mounted?): mount it, or leave out --remove-archive",
-                archive.display()
-            ));
-        }
+    if let (true, Some(archive)) = (remove.archive, &found.archive)
+        && found.gone.contains(archive)
+    {
+        return Err(format!(
+            "the archive {} is not there (not mounted?): mount it, or leave out --remove-archive",
+            archive.display()
+        ));
     }
     if remove.backups && found.backups.is_none() {
         return Err("the settings file does not say where the backups are".into());

@@ -248,13 +248,14 @@ fn list(
             }
             if kind.is_dir() {
                 folders.push(path);
-            } else if kind.is_file() && is_audio(&path) {
-                if let (Ok(meta), Some(rel)) = (
+            } else if kind.is_file()
+                && is_audio(&path)
+                && let (Ok(meta), Some(rel)) = (
                     entry.metadata(),
                     path.strip_prefix(root).ok().and_then(|rel| rel.to_str()),
-                ) {
-                    found.push((rel.to_string(), meta));
-                }
+                )
+            {
+                found.push((rel.to_string(), meta));
             }
         }
     }

@@ -198,10 +198,10 @@ async fn wait_for_web(cert: &Path, port: u16) -> Result<(), String> {
     let url = format!("https://127.0.0.1:{port}/health");
     let started = std::time::Instant::now();
     loop {
-        if let Ok(response) = client.get(&url).send().await {
-            if response.status().is_success() {
-                return Ok(());
-            }
+        if let Ok(response) = client.get(&url).send().await
+            && response.status().is_success()
+        {
+            return Ok(());
         }
         if started.elapsed() > WEB_WAIT {
             return Err(format!(

@@ -443,18 +443,18 @@ pub async fn record(
     .fetch_one(&mut *tx)
     .await?;
     mark_done(&mut *tx, row_id, (id, call.started_at)).await?;
-    if let (Some(from_ms), Some(talkgroup)) = (new.transcribe_from_ms, talkgroup_id) {
-        if call.duration_ms >= from_ms {
-            sqlx::query(
-                "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
-                 SELECT $1, $2, now(), now(), 'queued' FROM talkgroups WHERE id = $3 AND transcribe",
-            )
-            .bind(id)
-            .bind(call.started_at)
-            .bind(talkgroup)
-            .execute(&mut *tx)
-            .await?;
-        }
+    if let (Some(from_ms), Some(talkgroup)) = (new.transcribe_from_ms, talkgroup_id)
+        && call.duration_ms >= from_ms
+    {
+        sqlx::query(
+            "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+             SELECT $1, $2, now(), now(), 'queued' FROM talkgroups WHERE id = $3 AND transcribe",
+        )
+        .bind(id)
+        .bind(call.started_at)
+        .bind(talkgroup)
+        .execute(&mut *tx)
+        .await?;
     }
     sqlx::query("SELECT pg_notify('scannerpulse_calls', $1)")
         .bind(id.to_string())

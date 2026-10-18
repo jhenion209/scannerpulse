@@ -1029,41 +1029,44 @@ async fn transcribe_loop(
             unsaved = Some(transcriber.server_states());
         }
         was_held = held;
-        if held && save_failed_at.is_none_or(|at| at.elapsed() >= RETRY) {
-            if let Some(states) = &unsaved {
-                for state in states {
-                    if let Some(cooling) = state.cooling_for {
-                        log::warn(format!(
-                            "transcription server {} cools down for {} s: {}",
-                            state.url,
-                            cooling.as_secs(),
-                            state.last_error.as_deref().unwrap_or("")
-                        ));
-                    }
+        if held
+            && save_failed_at.is_none_or(|at| at.elapsed() >= RETRY)
+            && let Some(states) = &unsaved
+        {
+            for state in states {
+                if let Some(cooling) = state.cooling_for {
+                    log::warn(format!(
+                        "transcription server {} cools down for {} s: {}",
+                        state.url,
+                        cooling.as_secs(),
+                        state.last_error.as_deref().unwrap_or("")
+                    ));
                 }
-                match limited(db_limit, queue::save_servers(&pool, states)).await {
-                    Ok(()) => {
-                        unsaved = None;
-                        save_failed_at = None;
-                    }
-                    Err(error) => {
-                        save_failed_at = Some(Instant::now());
-                        log::warn(format!("the servers' state cannot be saved: {error}"));
-                    }
+            }
+            match limited(db_limit, queue::save_servers(&pool, states)).await {
+                Ok(()) => {
+                    unsaved = None;
+                    save_failed_at = None;
+                }
+                Err(error) => {
+                    save_failed_at = Some(Instant::now());
+                    log::warn(format!("the servers' state cannot be saved: {error}"));
                 }
             }
         }
         // Requests under way finish; no new one starts during maintenance.
-        if lease.should_work() && healthy.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
-            if let Err(error) = transcriber.fill().await {
-                log::warn(format!(
-                    "transcription paused: the database failed ({error}); trying again in 5 s"
-                ));
-                if wait(&mut stop, RETRY).await {
-                    break;
-                }
-                continue;
+        if lease.should_work()
+            && healthy.load(Ordering::SeqCst)
+            && !paused.load(Ordering::SeqCst)
+            && let Err(error) = transcriber.fill().await
+        {
+            log::warn(format!(
+                "transcription paused: the database failed ({error}); trying again in 5 s"
+            ));
+            if wait(&mut stop, RETRY).await {
+                break;
             }
+            continue;
         }
         if transcriber.busy() == 0 {
             if wait(&mut stop, Duration::from_secs(1)).await {

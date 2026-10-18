@@ -63,10 +63,10 @@ fn walk(data: &[u8]) -> Option<Walked> {
         }
     }
     let mut pos = first_frame(data, start)?;
-    if let Some(first) = header(&data[pos..]) {
-        if is_info_frame(&data[pos..], &first) {
-            pos += first.len;
-        }
+    if let Some(first) = header(&data[pos..])
+        && is_info_frame(&data[pos..], &first)
+    {
+        pos += first.len;
     }
     let first = pos;
     let mut frames = 0u64;

@@ -184,13 +184,13 @@ pub fn transcription_from_values(
     let model = text(values, "transcription.model")?
         .ok_or(SettingsError::Missing("transcription.model"))?;
     let language = text(values, "transcription.language")?;
-    if let Some(code) = &language {
-        if !(2..=3).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_lowercase()) {
-            return Err(invalid(
-                "transcription.language",
-                format!("{code} is not a code of 2 or 3 lowercase letters"),
-            ));
-        }
+    if let Some(code) = &language
+        && (!(2..=3).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_lowercase()))
+    {
+        return Err(invalid(
+            "transcription.language",
+            format!("{code} is not a code of 2 or 3 lowercase letters"),
+        ));
     }
     let min_duration_ms = match values.get("transcription.min_duration_ms") {
         None => return Err(SettingsError::Missing("transcription.min_duration_ms")),

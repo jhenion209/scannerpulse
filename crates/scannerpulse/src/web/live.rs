@@ -223,10 +223,10 @@ async fn follow(state: &AppState, params: LiveParams, ws: &mut WebSocket) {
                     Err(broadcast::error::RecvError::Lagged(_)) => Arc::new(Event::Resync),
                     Err(broadcast::error::RecvError::Closed) => return,
                 };
-                if let Event::Call { call } = &*event {
-                    if sent.remove(&call.id) {
-                        continue;
-                    }
+                if let Event::Call { call } = &*event
+                    && sent.remove(&call.id)
+                {
+                    continue;
                 }
                 if wanted(&event) && send(ws, &event).await.is_err() {
                     return;

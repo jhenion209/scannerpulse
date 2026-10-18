@@ -261,10 +261,10 @@ async fn remove_gone(
             continue;
         }
         let path = root.join(&file.rel_path);
-        if let Err(error) = std::fs::remove_file(&path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                crate::log::warn(format!("cannot remove {}: {error}", path.display()));
-            }
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            crate::log::warn(format!("cannot remove {}: {error}", path.display()));
         }
         if let Some(dir) = path.parent() {
             // Only an empty folder goes.

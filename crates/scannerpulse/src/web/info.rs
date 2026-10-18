@@ -73,10 +73,10 @@ pub async fn call(
 /// The talkgroups grouped by system, the systems and the sites. Systems come
 /// in the order of the `web.system_order` setting, then by name.
 pub async fn filters(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    if let Some((when, value)) = state.filters.lock().await.clone() {
-        if when.elapsed() < FILTERS_FOR {
-            return Ok(Json(value));
-        }
+    if let Some((when, value)) = state.filters.lock().await.clone()
+        && when.elapsed() < FILTERS_FOR
+    {
+        return Ok(Json(value));
     }
     let value = read_filters(&state).await?;
     *state.filters.lock().await = Some((Instant::now(), value.clone()));

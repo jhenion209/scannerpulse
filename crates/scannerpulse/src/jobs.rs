@@ -283,10 +283,10 @@ pub async fn queue_plan(
         .await
         .map_err(from_settings)?
         .ok_or_else(|| JobError::Refused("transcription is off: turn it on first".into()))?;
-    if let (Some(from), Some(to)) = (from, to) {
-        if to < from {
-            return Err(JobError::Refused(format!("{to} is before {from}")));
-        }
+    if let (Some(from), Some(to)) = (from, to)
+        && to < from
+    {
+        return Err(JobError::Refused(format!("{to} is before {from}")));
     }
     let start =
         |day: chrono::NaiveDate| crate::backfill::start_of(day, zone).map_err(JobError::Refused);
