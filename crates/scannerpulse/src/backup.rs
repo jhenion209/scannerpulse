@@ -49,16 +49,71 @@ fn run(program: &str, args: &[&str]) -> Result<(), String> {
     ))
 }
 
+/// The kinds of backup, as the `backups` table and the push variables name
+/// them.
+pub const KINDS: [&str; 2] = ["pgbackrest", "dump"];
+
+/// The settings-file variable holding `kind`'s push (heartbeat) address:
+/// it carries a token, so it is not kept in the database.
+pub fn push_var(kind: &str) -> String {
+    format!("SCANNERPULSE_BACKUP_PUSH_{}", kind.to_ascii_uppercase())
+}
+
+/// Notes that a backup of `kind` has just succeeded.
+pub async fn record(db: impl sqlx::PgExecutor<'_>, kind: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO backups (kind, finished_at) VALUES ($1, now()) \
+         ON CONFLICT (kind) DO UPDATE SET finished_at = EXCLUDED.finished_at",
+    )
+    .bind(kind)
+    .execute(db)
+    .await
+    .map(drop)
+}
+
+/// Each kind's newest success, by kind.
+pub async fn newest(
+    db: impl sqlx::PgExecutor<'_>,
+) -> sqlx::Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+    sqlx::query_as("SELECT kind, finished_at FROM backups ORDER BY kind")
+        .fetch_all(db)
+        .await
+}
+
+/// Calls a push (heartbeat) address, such as an Uptime Kuma push monitor's.
+pub async fn push(url: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    // The address carries a token: only its host goes in a message.
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)))
+        .unwrap_or_else(|| "the push address".into());
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| format!("{host} did not answer"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("{host} answered {}", response.status()))
+    }
+}
+
 /// Takes tonight's backups into `backups` (its `pgbackrest` and `dump`
-/// folders) from the database at `database_url`.
-pub fn nightly(backups: &Path, database_url: &str) -> Result<(), String> {
+/// folders) from the database at `database_url`: each kind, as `KINDS`
+/// names it, with what it did or why it failed. Both run even when the
+/// other fails.
+pub fn nightly(backups: &Path, database_url: &str) -> Vec<(&'static str, Result<String, String>)> {
     let now = chrono::Local::now();
     let kind = kind(now.weekday());
-    let mut failed = Vec::new();
     let config = format!("--config={PGBACKREST_CONF}");
     let stanza = format!("--stanza={STANZA}");
     let kind_arg = format!("--type={kind}");
-    match run(
+    let pgbackrest = run(
         "runuser",
         &[
             "-u",
@@ -70,23 +125,17 @@ pub fn nightly(backups: &Path, database_url: &str) -> Result<(), String> {
             "backup",
             &kind_arg,
         ],
-    ) {
-        Ok(()) => println!("pgBackRest: {kind} backup taken"),
-        Err(why) => failed.push(format!("pgBackRest ({kind}): {why}")),
-    }
-    match dump(
+    )
+    .map(|()| format!("pgBackRest: {kind} backup taken"))
+    .map_err(|why| format!("pgBackRest ({kind}): {why}"));
+    let dump = dump(
         &backups.join("dump"),
         database_url,
         &now.format("%Y%m%d-%H%M%S").to_string(),
-    ) {
-        Ok(name) => println!("dump: {name} written"),
-        Err(why) => failed.push(format!("dump: {why}")),
-    }
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(failed.join("; "))
-    }
+    )
+    .map(|name| format!("dump: {name} written"))
+    .map_err(|why| format!("dump: {why}"));
+    vec![(KINDS[0], pgbackrest), (KINDS[1], dump)]
 }
 
 /// Writes `scannerpulse-<stamp>.dump` in `folder`, checks that pg_restore

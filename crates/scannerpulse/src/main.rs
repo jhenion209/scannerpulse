@@ -771,12 +771,21 @@ async fn run() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             };
-            match scannerpulse::backup::nightly(Path::new(&backups), &url) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    eprintln!("backup: {error}");
-                    ExitCode::FAILURE
+            let mut failed = Vec::new();
+            for (kind, outcome) in scannerpulse::backup::nightly(Path::new(&backups), &url) {
+                match outcome {
+                    Ok(done) => {
+                        println!("{done}");
+                        backup_succeeded(kind, &url).await;
+                    }
+                    Err(why) => failed.push(why),
                 }
+            }
+            if failed.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("backup: {}", failed.join("; "));
+                ExitCode::FAILURE
             }
         }
         Some(Command::Uninstall(remove)) => {
@@ -1791,6 +1800,28 @@ fn confirm(question: &str) -> std::io::Result<bool> {
 }
 
 /// Prints one JSON line per file. Exits 0 when every file was read.
+/// After a backup of `kind` succeeds: its time for the admin page, and its
+/// push address, if the settings file has one. Neither fails the backup;
+/// each says when it could not be done.
+async fn backup_succeeded(kind: &str, database_url: &str) {
+    match tokio::time::timeout(CONNECT_TIMEOUT, PgConnection::connect(database_url)).await {
+        Ok(Ok(mut conn)) => {
+            if let Err(error) = scannerpulse::backup::record(&mut conn, kind).await {
+                eprintln!("backup: the {kind} backup's time was not kept: {error}");
+            }
+        }
+        Ok(Err(error)) => eprintln!("backup: the {kind} backup's time was not kept: {error}"),
+        Err(_) => {
+            eprintln!("backup: the {kind} backup's time was not kept: the database did not answer")
+        }
+    }
+    if let Ok(url) = std::env::var(scannerpulse::backup::push_var(kind))
+        && let Err(error) = scannerpulse::backup::push(&url).await
+    {
+        eprintln!("backup: the {kind} push was not made: {error}");
+    }
+}
+
 fn read(zone: &str, files: &[String]) -> ExitCode {
     let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
         eprintln!("read: {zone:?} is not a known time zone");
