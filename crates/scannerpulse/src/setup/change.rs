@@ -122,19 +122,21 @@ pub fn push_steps(text: &str, kind: &str, url: Option<&str>) -> Result<Vec<Step>
 
 /// The backups moved to `folder`: pgBackRest's place made there (its first
 /// full backup taken at once, since the old ones stay where they were), the
-/// nightly units rewritten, and the settings file pointed at it.
+/// nightly units rewritten, and then, once that backup is there, the
+/// settings file pointed at it.
 pub fn location_steps(
     text: &str,
     folder: &Path,
     binary: &Path,
     system: &System,
 ) -> Result<Vec<Step>, String> {
-    let mut steps = vec![settings_file(
+    let mut steps = Vec::new();
+    backup_steps(&mut steps, folder, binary, system);
+    steps.push(settings_file(
         text,
         "SCANNERPULSE_BACKUPS",
         Some(&folder.display().to_string()),
-    )?];
-    backup_steps(&mut steps, folder, binary, system);
+    )?);
     steps.push(run("Read the new units", "systemctl", &["daemon-reload"]));
     steps.push(restart_web("to show it on the admin page"));
     Ok(steps)
@@ -341,10 +343,14 @@ mod tests {
                 .contains("RequiresMountsFor=\"/srv/backups\"\n")
         );
         let titles: Vec<&str> = steps.iter().map(|s| s.title.as_str()).collect();
-        assert!(titles.contains(&"Take the first full backup"));
+        // The settings file (and so the admin page) names the new folder only
+        // once its first full backup is there.
+        let at = |title: &str| titles.iter().position(|t| *t == title).unwrap();
+        assert!(at("Write this machine's settings file") > at("Take the first full backup"));
         assert_eq!(
-            &titles[titles.len() - 2..],
+            &titles[titles.len() - 3..],
             [
+                "Write this machine's settings file",
                 "Read the new units",
                 "Restart the web service, to show it on the admin page"
             ]
