@@ -11,7 +11,7 @@ BIN_DIR=${SCANNERPULSE_BIN_DIR:-/usr/local/bin}
 SUPPORTED="Debian 12 and 13, Ubuntu 22.04 and 24.04, Fedora, Rocky Linux and AlmaLinux 8 to 10, on x86_64 or aarch64 (64-bit ARM, such as a Raspberry Pi 4 or 5)"
 
 # The public part of the key that signs every release (OpenPGP, base64).
-RELEASE_KEY=''
+RELEASE_KEY='mDMEatQdvRYJKwYBBAHaRw8BAQdAaYVa8XXFXD4NjC2Ve7CkPCFUtCpcA8rQ4p4GXaLcyRC0FVNjYW5uZXJQdWxzZSByZWxlYXNlc4ivBBMWCgBXFiEEYgnuX6Yn6jCMUXHncTPgnGJ0tJcFAmrUHb0bFIAAAAAABAAObWFudTIsMi41KzEuMTIsMCwzAhsDBQsJCAcCAiICBhUKCQgLAgQWAgMBAh4HAheAAAoJEHEz4JxidLSX2T4BAOntbOe8jxWmshpzECyxormync6XfD6OlFP1uG+qnkIXAP4hEfomKAwG79uHRc5LPmABTCbQPQpcmpwWkCBj8F1IAQ=='
 
 fail() {
     echo "install: $*" >&2
