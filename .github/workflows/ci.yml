@@ -21,7 +21,7 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The frontend first: the binary embeds web/dist when it is built.
       - uses: actions/setup-node@v4
         with:
