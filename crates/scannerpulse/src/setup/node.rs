@@ -925,8 +925,9 @@ fn on_node(node: &str, command: &str) -> Result<String, String> {
     }
 }
 
-fn node_status(node: &str) -> Status {
-    on_node(node, "status")
+/// A status's text as a status; a machine that gives none does not answer.
+fn as_status(answer: Result<String, String>) -> Status {
+    answer
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or(Status {
@@ -943,20 +944,52 @@ fn node_status(node: &str) -> Status {
 /// the primary stops cleanly and its standby has everything first.
 pub fn db_switchover(say: impl Fn(&str)) -> Result<String, String> {
     let plan = Plan::read(Path::new(super::plan::PLAN))?;
-    let statuses = [node_status(&plan.nodes[0]), node_status(&plan.nodes[1])];
-    let (p, s) = ready_to_switch(&statuses[0], &statuses[1])?;
-    let (primary, standby) = (&plan.nodes[p], &plan.nodes[s]);
+    switchover(&plan.nodes, on_node, say)
+}
+
+/// The switchover between `nodes`, each asked its node commands through
+/// `run`. When a step fails, the install is left with one primary and the
+/// person is told what to run next.
+fn switchover(
+    nodes: &[String],
+    run: impl Fn(&str, &str) -> Result<String, String>,
+    say: impl Fn(&str),
+) -> Result<String, String> {
+    let status = |node: &str| as_status(run(node, "status"));
+    let (p, s) = ready_to_switch(&status(&nodes[0]), &status(&nodes[1]))?;
+    let (primary, standby) = (nodes[p].as_str(), nodes[s].as_str());
+    // The primary, which may be stopped, is started again unchanged.
+    let start_again = |why: String| match run(primary, "start") {
+        Ok(_) => format!("{why}; {primary} was started again and is still the primary"),
+        Err(error) => format!(
+            "{why}; and {primary} did not start again ({error}): start its PostgreSQL there"
+        ),
+    };
     say(&format!("Stopping {primary}, the primary"));
-    let last = on_node(primary, "stop")?;
+    let last = match run(primary, "stop") {
+        Ok(last) => last,
+        Err(error) => return Err(start_again(format!("{primary} did not stop: {error}"))),
+    };
     say(&format!("Making {standby} the primary"));
-    if let Err(error) = on_node(standby, &format!("promote after {last}")) {
-        return Err(match on_node(primary, "start") {
-            Ok(_) => format!("{error}; {primary} is the primary again"),
-            Err(again) => format!("{error}; and {primary} did not start again: {again}"),
-        });
+    if let Err(error) = run(standby, &format!("promote after {last}")) {
+        // Started again only while the other is still a standby: one whose
+        // promotion went ahead would make two primaries.
+        let now = status(standby);
+        if now.answers && now.standby {
+            return Err(start_again(format!(
+                "{standby} was not made the primary: {error}"
+            )));
+        }
+        return Err(format!(
+            "{standby} may be the primary now ({error}), so {primary} was left stopped: once {standby} answers as the primary, run `sudo scannerpulse db rejoin` on {primary}"
+        ));
     }
     say(&format!("Making {primary} its standby"));
-    on_node(primary, &format!("follow {standby}"))?;
+    run(primary, &format!("follow {standby}")).map_err(|error| {
+        format!(
+            "{standby} is the primary now, but {primary} did not follow it ({error}): run `sudo scannerpulse db rejoin` on {primary}"
+        )
+    })?;
     Ok(format!(
         "{standby} is the primary now and {primary} its standby; the services moved to {standby} within seconds."
     ))
@@ -1129,6 +1162,114 @@ mod tests {
             sql.contains("pg_read_binary_file(text, bigint, bigint, boolean)"),
             "{sql}"
         );
+    }
+
+    /// A switchover against two pretend machines: `answer` gives each
+    /// command's answer (the standby's status changes once it is asked to
+    /// become the primary); every command asked is recorded.
+    fn switch(
+        answer: impl Fn(&str, &str, bool) -> Result<String, String>,
+    ) -> (Result<String, String>, Vec<String>) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let promoted = std::cell::Cell::new(false);
+        let nodes = ["db1.example.org".to_string(), "db2.example.org".to_string()];
+        let result = switchover(
+            &nodes,
+            |node, command| {
+                asked.borrow_mut().push(format!("{node} {command}"));
+                if command.starts_with("promote") {
+                    promoted.set(true);
+                }
+                answer(node, command, promoted.get())
+            },
+            |_| {},
+        );
+        (result, asked.into_inner())
+    }
+
+    const PRIMARY: &str = r#"{"answers":true,"standby":false,"streaming":1,"behind":0}"#;
+    const STANDBY: &str = r#"{"answers":true,"standby":true,"streaming":0,"behind":0}"#;
+    const PROMOTED: &str = r#"{"answers":true,"standby":false,"streaming":0,"behind":0}"#;
+
+    fn healthy(node: &str, command: &str, promoted: bool) -> Result<String, String> {
+        match (node, command) {
+            ("db1.example.org", "status") => Ok(PRIMARY.into()),
+            ("db2.example.org", "status") if promoted => Ok(PROMOTED.into()),
+            ("db2.example.org", "status") => Ok(STANDBY.into()),
+            (_, "stop") => Ok("0/313CE18".into()),
+            _ => Ok("done".into()),
+        }
+    }
+
+    #[test]
+    fn a_switchover_stops_promotes_and_follows() {
+        let (result, asked) = switch(healthy);
+        assert!(
+            result
+                .unwrap()
+                .contains("db2.example.org is the primary now")
+        );
+        assert_eq!(
+            asked,
+            [
+                "db1.example.org status",
+                "db2.example.org status",
+                "db1.example.org stop",
+                "db2.example.org promote after 0/313CE18",
+                "db1.example.org follow db2.example.org",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_primary_that_did_not_stop_cleanly_is_started_again() {
+        let (result, asked) = switch(|node, command, promoted| match command {
+            "stop" => Err("PostgreSQL did not stop cleanly".into()),
+            _ => healthy(node, command, promoted),
+        });
+        let error = result.unwrap_err();
+        assert!(error.contains("started again"), "{error}");
+        assert!(asked.contains(&"db1.example.org start".to_string()));
+        assert!(!asked.iter().any(|a| a.contains("promote")));
+    }
+
+    #[test]
+    fn a_standby_not_promoted_leaves_the_primary_as_it_was() {
+        // The standby refused, and still answers as a standby.
+        let (result, asked) = switch(|node, command, _| match command {
+            c if c.starts_with("promote") => Err("not everything received".into()),
+            _ => healthy(node, command, false),
+        });
+        let error = result.unwrap_err();
+        assert!(error.contains("still the primary"), "{error}");
+        assert_eq!(asked.last().unwrap(), "db1.example.org start");
+    }
+
+    #[test]
+    fn a_standby_that_may_be_promoting_is_never_joined_by_a_second_primary() {
+        // The answer was lost, but the promotion went ahead.
+        let (result, asked) = switch(|node, command, promoted| match command {
+            c if c.starts_with("promote") => Err("the connection was lost".into()),
+            _ => healthy(node, command, promoted),
+        });
+        let error = result.unwrap_err();
+        assert!(!asked.contains(&"db1.example.org start".to_string()));
+        assert!(error.contains("left stopped"), "{error}");
+        assert!(error.contains("db rejoin` on db1.example.org"), "{error}");
+    }
+
+    #[test]
+    fn a_former_primary_that_cannot_follow_is_told_to_rejoin() {
+        let (result, _) = switch(|node, command, promoted| match command {
+            c if c.starts_with("follow") => Err("cannot start".into()),
+            _ => healthy(node, command, promoted),
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("db2.example.org is the primary now"),
+            "{error}"
+        );
+        assert!(error.contains("db rejoin` on db1.example.org"), "{error}");
     }
 
     #[test]
