@@ -95,8 +95,20 @@ pub fn tls_self_steps(binary: &Path, names: &[String]) -> Vec<Step> {
     ]
 }
 
+/// Setup keeps backups only of a database it installed, and then the
+/// settings file (`text`) names their folder.
+fn keeps_backups(text: &str) -> Result<(), String> {
+    let pairs = crate::hostfile::parse(text)?;
+    if pairs.iter().any(|(name, _)| name == "SCANNERPULSE_BACKUPS") {
+        Ok(())
+    } else {
+        Err("this machine keeps no backups: its database is one you run elsewhere".into())
+    }
+}
+
 /// The settings file `text` with `kind`'s push address set or removed.
 pub fn push_steps(text: &str, kind: &str, url: Option<&str>) -> Result<Vec<Step>, String> {
+    keeps_backups(text)?;
     let var = crate::backup::push_var(kind)
         .ok_or_else(|| format!("{kind:?} is not a kind of backup: pgbackrest or dump"))?;
     if let Some(url) = url {
@@ -215,11 +227,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
             )
         }
         Change::Location(folder) => {
-            if !Path::new(crate::backup::PGBACKREST_CONF).exists() {
-                return Err(
-                    "this machine keeps no backups: its database is one you run elsewhere".into(),
-                );
-            }
+            keeps_backups(&text)?;
             let found = super::folders::check(folder)?;
             location_apart(&found.path, super::uninstall::folders().await)?;
             let os_release = std::fs::read_to_string("/etc/os-release")
@@ -296,6 +304,11 @@ mod tests {
                 .contains("not a kind of backup")
         );
         assert!(push_steps(SETTINGS, "dump", Some("kuma")).is_err());
+        let theirs = "SCANNERPULSE_HOST=\"radio-a\"\n";
+        for url in [Some("https://kuma.example.org/api/push/x"), None] {
+            let error = push_steps(theirs, "dump", url).unwrap_err();
+            assert!(error.contains("keeps no backups"), "{error}");
+        }
         let refused = push_steps(SETTINGS, "dump", Some("kuma-token-4f2a")).unwrap_err();
         assert!(
             !refused.contains("kuma-token-4f2a"),

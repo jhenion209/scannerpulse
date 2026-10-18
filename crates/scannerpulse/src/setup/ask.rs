@@ -54,13 +54,16 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
     if let Some(server) = &answers.syslog {
         check_syslog(server)?;
     }
+    if answers.database != Database::Here
+        && (answers.backups.is_some() || !answers.pushes.is_empty())
+    {
+        return Err(
+            "a database you run keeps its own backups: leave the backup folder and push addresses out"
+                .into(),
+        );
+    }
     if let Some(backups) = &answers.backups {
-        if answers.database != Database::Here {
-            return Err(
-                "a database you run keeps its own backups: leave the backup folder out".into(),
-            );
-        }
-        check_backups(Path::new(backups), &answers.recordings, &answers.archive)?;
+        answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
     }
     for (kind, url) in &answers.pushes {
         if crate::backup::push_var(kind).is_none() {
@@ -1068,6 +1071,10 @@ mod tests {
             "keeps its own backups",
         );
         refused(
+            "DATABASE=theirs\nDB_HOST=h\nDB_NAME=n\nDB_ROLE=r\nDB_PASSWORD=p\nPUSH_DUMP=https://kuma.example.org/api/push/x\n",
+            "keeps its own backups",
+        );
+        refused(
             &format!("BACKUPS={}\n", arc.join("inner").display()),
             "does not exist",
         );
@@ -1087,13 +1094,17 @@ mod tests {
             ),
             "private key",
         );
+        // Named through a link, the folder is kept as its real path, as the
+        // question keeps it (pgBackRest's file and the units name it).
+        let link = dir.path().join("bak-link");
+        std::os::unix::fs::symlink(&bak, &link).unwrap();
         let here = format!(
             "{base}BACKUPS={}\nPUSH_DUMP=\"https://kuma.example.org/api/push/abc?status=up&msg=OK\"\n",
-            bak.display()
+            link.display()
         );
         let answers = from_file(&answers_file(dir.path(), &here, 0o600), &defaults()).unwrap();
         assert_eq!(answers.database, Database::Here);
-        assert_eq!(answers.backups, Some(bak.clone()));
+        assert_eq!(answers.backups, Some(bak.canonicalize().unwrap()));
         assert_eq!(
             answers.pushes,
             [(
