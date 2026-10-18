@@ -350,6 +350,25 @@ async fn tried(renewal: &Mutex<acme::Renewal>) -> bool {
     false
 }
 
+#[test]
+fn a_new_certificate_is_served_even_when_it_cannot_be_kept() {
+    let settings = web(&["radio.example.org"], acme::LETS_ENCRYPT);
+    let (chain, key) = issued(&["radio.example.org"]);
+    let (_own, own) = made(&["radio-a"]);
+    let certs = Certs::new(own);
+    // A folder that cannot be made: a file stands in its way.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("taken"), "").unwrap();
+    let kept = dir.path().join("taken").join("acme");
+    acme::adopt(&kept, &settings, &certs, &chain, &key).unwrap();
+    assert_eq!(cert::found(&certs.current()).unwrap().names, settings.names);
+    assert!(!kept.exists());
+    // A certificate that cannot be read is refused, and nothing changes.
+    let error = acme::adopt(&kept, &settings, &certs, "not a certificate", &key).unwrap_err();
+    assert!(error.contains("new certificate"), "{error}");
+    assert_eq!(cert::found(&certs.current()).unwrap().names, settings.names);
+}
+
 #[tokio::test]
 async fn a_certificate_the_site_did_not_get_from_the_authority_is_replaced_at_once() {
     // An installed certificate for the same names, signed by another

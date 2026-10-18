@@ -293,15 +293,39 @@ pub fn stored(dir: &Path, settings: &Settings) -> Option<CertifiedKey> {
     (same_names(&found.names, &settings.names) && found.not_after > Utc::now()).then_some(key)
 }
 
+/// Serves the certificate the authority gave (`chain` and `key`, PEM), then
+/// keeps it for a restart. One that cannot be kept is still served: asking
+/// again would only spend the authority's limit on new certificates.
+pub fn adopt(
+    dir: &Path,
+    settings: &Settings,
+    certs: &Certs,
+    chain: &str,
+    key: &str,
+) -> Result<(), String> {
+    let served = crate::cert::certified_from(
+        chain.as_bytes(),
+        key.as_bytes(),
+        "the new certificate",
+        "its key",
+    )?;
+    certs.serve(Arc::new(served));
+    if let Err(why) = keep_certificate(dir, settings, chain, key) {
+        crate::log::warn(format!(
+            "acme: the new certificate is served, but cannot be kept for a restart: {why}"
+        ));
+    }
+    Ok(())
+}
+
 /// Keeps the certificate the authority gave (`chain` and `key`, PEM) in
-/// `dir`, with the authority's directory beside it, and gives it ready to
-/// serve.
+/// `dir`, with the authority's directory beside it.
 pub fn keep_certificate(
     dir: &Path,
     settings: &Settings,
     chain: &str,
     key: &str,
-) -> Result<CertifiedKey, String> {
+) -> Result<(), String> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -309,8 +333,7 @@ pub fn keep_certificate(
         .map_err(|error| format!("{}: {error}", dir.display()))?;
     keep(&dir.join("key.pem"), key.as_bytes(), 0o600)?;
     keep(&dir.join("cert.pem"), chain.as_bytes(), 0o644)?;
-    keep(&dir.join("authority"), settings.directory.as_bytes(), 0o644)?;
-    crate::cert::certified(&dir.join("cert.pem"), &dir.join("key.pem"))
+    keep(&dir.join("authority"), settings.directory.as_bytes(), 0o644)
 }
 
 /// What the admin page shows of the renewals.
@@ -488,9 +511,7 @@ pub async fn obtain(
         }
     }
     let (chain, key) = proved?;
-    let served = keep_certificate(dir, settings, &chain, &key)?;
-    certs.serve(Arc::new(served));
-    Ok(())
+    adopt(dir, settings, certs, &chain, &key)
 }
 
 /// What the authority said of each name it could not prove.

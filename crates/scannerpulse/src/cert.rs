@@ -134,22 +134,40 @@ pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
 /// private key in `key` (PEM), ready to serve: both read, and the key the
 /// certificate's.
 pub fn certified(cert: &Path, key: &Path) -> Result<rustls::sign::CertifiedKey, String> {
+    let read =
+        |path: &Path| std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()));
+    certified_from(
+        &read(cert)?,
+        &read(key)?,
+        &cert.display().to_string(),
+        &key.display().to_string(),
+    )
+}
+
+/// The same from PEM text in memory; `cert_name` and `key_name` name them
+/// in an error.
+pub fn certified_from(
+    cert: &[u8],
+    key: &[u8],
+    cert_name: &str,
+    key_name: &str,
+) -> Result<rustls::sign::CertifiedKey, String> {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .and_then(|found| found.collect())
-        .map_err(|error| format!("{}: not a PEM certificate ({error})", cert.display()))?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert)
+        .collect::<Result<_, _>>()
+        .map_err(|error| format!("{cert_name}: not a PEM certificate ({error})"))?;
     if certs.is_empty() {
-        return Err(format!("{} holds no certificate", cert.display()));
+        return Err(format!("{cert_name} holds no certificate"));
     }
-    let private = PrivateKeyDer::from_pem_file(key)
-        .map_err(|error| format!("{}: not a PEM private key ({error})", key.display()))?;
+    let private = PrivateKeyDer::from_pem_slice(key)
+        .map_err(|error| format!("{key_name}: not a PEM private key ({error})"))?;
     let signing = rustls::crypto::ring::sign::any_supported_type(&private)
-        .map_err(|_| format!("{}: a kind of key this program cannot use", key.display()))?;
+        .map_err(|_| format!("{key_name}: a kind of key this program cannot use"))?;
     let certified = rustls::sign::CertifiedKey::new(certs, signing);
     certified
         .keys_match()
-        .map_err(|_| format!("{} is not the key of {}", key.display(), cert.display()))?;
+        .map_err(|_| format!("{key_name} is not the key of {cert_name}"))?;
     Ok(certified)
 }
 
