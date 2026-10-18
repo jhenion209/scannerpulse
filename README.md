@@ -77,12 +77,24 @@ The site is then at `https://<this machine>/`, and the admin page at
 **Advanced** asks Simple's questions and, before them:
 
 1. where the database runs: on this machine, as Simple does, or a PostgreSQL
-   17 database you run (its host, port, database, role and password). Setup
-   checks that it answers, is version 17, and that the role may make tables
-   there; it then installs no PostgreSQL here and takes no backups, which
-   stay yours, and `uninstall` never drops that database;
-2. the certificate: setup's own, or yours (a PEM certificate with its chain
-   and its key, checked to belong together and to be within their dates);
+   17 database you run (its host, port, database, role and password, and
+   how the connection is protected: encrypted when the server offers it,
+   always encrypted, or always encrypted with the server's certificate
+   checked against its name and, if no public authority signed it, a CA
+   certificate you give). Setup checks that it answers, is version 17, and
+   that the role may make tables there; it then installs no PostgreSQL here
+   and takes no backups, which stay yours, and `uninstall` never drops that
+   database;
+2. the certificate: setup's own; yours (a PEM certificate with its chain and
+   its key, checked to belong together and to be within their dates); or
+   Let's Encrypt's, which the site gets and renews by itself, a third of the
+   way before its end, for the names you give. Let's Encrypt is shown each
+   name either over the web, when port 443 reaches this machine from the
+   internet under that name (a router may forward 443 to the site's port;
+   nothing listens on port 80), or through DNS, when the name's zone is at
+   Cloudflare: give an API token with "Zone, DNS, Edit" on that zone, and the
+   site writes and then removes a TXT record for each request. Until the
+   first certificate arrives the site serves one setup makes;
 3. the reverse proxies in front of the site, if any (`web.trusted_proxies`),
    so the visitors' own addresses are read from them;
 4. a syslog server the logs also go to (`udp://host:port` or
@@ -94,8 +106,8 @@ the backups go (the archive's `.scannerpulse-backups`, or a folder you name
 outside the recordings folder and the archive) and, for each kind, a push
 address to call after each backup that succeeds: an Uptime Kuma push
 monitor's, say, with an interval of a day and a little more. Push addresses
-carry a token, so they are kept in the settings file, not the database.
-Let's Encrypt and high availability come in later versions.
+carry a token, so they are kept in the settings file, not the database, as
+is the Cloudflare token. High availability comes in a later version.
 
 For an unattended install, `setup --answers FILE` reads the answers from a
 file of `NAME="value"` lines, readable by its owner only:
@@ -120,12 +132,17 @@ DB_PORT="5432"
 DB_NAME="scannerpulse"
 DB_ROLE="scannerpulse"
 DB_PASSWORD="its password"
+DB_SSLMODE="require"       # prefer (the default), require or verify-full
+DB_SSLROOTCERT="/root/db-ca.pem" # with verify-full, when no public CA signed it
 CERT_FILE="/root/site.pem" # with KEY_FILE, or neither
 KEY_FILE="/root/site.key"
+LETSENCRYPT="web"          # or "dns-cloudflare", in place of CERT_FILE
+LETSENCRYPT_NAMES="radio.example.org"
+CLOUDFLARE_TOKEN="its token" # with dns-cloudflare
 PROXIES="192.0.2.5 192.0.2.6"
 SYSLOG="udp://192.0.2.30:514"
 BACKUPS="/srv/backups"     # with the database here only
-PUSH_PGBACKREST="https://uptime.example.org/api/push/abc123?status=up"
+PUSH_PGBACKREST="https://uptime.example.org/api/push/abc123?status=up" # here only
 PUSH_DUMP="https://uptime.example.org/api/push/def456?status=up"
 ```
 
@@ -147,15 +164,23 @@ folders, and the backups' folder only when nothing else is left in it.
 archive and how many calls it holds, and only a Yes leads to typing its name.
 
 **Later changes.** The admin page's **This machine** shows the certificate
-(its names and end), the backups' folder and how old each kind's newest
+(its names and end, and with Let's Encrypt, how its names are proved and
+its last request), the backups' folder and how old each kind's newest
 backup is. Logs and reverse proxies are in its Settings. The rest needs root,
 so the page shows the command, run on the machine:
 
 - `sudo /usr/local/bin/scannerpulse tls install CERT KEY` serves your
   certificate from now on (checked first); `tls self` goes back to one the
-  machine makes;
+  machine makes; `tls letsencrypt web NAME...` has the site get Let's
+  Encrypt's certificate for each NAME, proved over the web, and `tls
+  letsencrypt dns-cloudflare NAME...` the same proved through Cloudflare's
+  DNS (it asks for the API token, or reads the first line of standard input,
+  and checks that it reaches each name's zone). The site keeps serving its
+  certificate until the new one arrives; This machine shows the request's
+  outcome and each renewal. `tls install` and `tls self` turn Let's Encrypt
+  off;
 - `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump` asks for a
-  push address and sets it (with no terminal it reads the first line of
+  push address and sets it, with the database on this machine (with no terminal it reads the first line of
   standard input; the address holds a token, so it is never an argument,
   which sudo would log); `... backups push dump off` removes it;
 - `sudo /usr/local/bin/scannerpulse backups location FOLDER` keeps the
@@ -255,7 +280,13 @@ already set in the environment wins. So far:
   host's name) and `SCANNERPULSE_OIDC_CLIENT_SECRET`. It serves HTTPS with
   the certificate and key named by `SCANNERPULSE_TLS_CERT` and
   `SCANNERPULSE_TLS_KEY` (PEM files; `scannerpulse cert make` writes a pair
-  for this machine's names and addresses). Without them it serves plain HTTP,
+  for this machine's names and addresses). With `SCANNERPULSE_ACME` (`web`
+  or `dns-cloudflare`) and `SCANNERPULSE_ACME_NAMES` it gets Let's Encrypt's
+  certificate for those names and renews it, keeping it in
+  `/var/lib/scannerpulse/acme` and serving that pair until it arrives;
+  `dns-cloudflare` needs `SCANNERPULSE_CLOUDFLARE_TOKEN`, and
+  `SCANNERPULSE_ACME_DIRECTORY` names another ACME authority (Let's
+  Encrypt's staging one, say, or a private one). Without them it serves plain HTTP,
   and only on a loopback address such as `127.0.0.1`, where a browser treats
   the page as secure: an address other machines reach is refused without a
   certificate, since the admin page's session needs HTTPS. It never writes to
@@ -328,9 +359,11 @@ already set in the environment wins. So far:
   - `/api/admin/viewers`: every open page of every host (its address,
     whether that address is local, its browser and whether an admin opened
     it), refreshed every 30 seconds; a page's row goes when it closes;
-  - `/api/admin/machine`: this host's certificate (names, end, whether it
-    signed itself), where its database runs, its backups' folder, and each
-    kind's newest backup and whether it pushes;
+  - `/api/admin/machine`: this host's certificate as served (names, end,
+    whether it signed itself), Let's Encrypt's names, proof and last request
+    when it gives the certificate (never the token), where its database
+    runs, its backups' folder, and each kind's newest backup and whether it
+    pushes;
   - `/api/admin/jobs` lists the jobs, `/api/admin/jobs/<id>` shows one and
     `POST /api/admin/jobs/<id>/stop` stops it; `GET /api/admin/jobs/queue`
     (`talkgroup_id`, `from`, `to`) counts the calls a queue job would take
