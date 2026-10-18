@@ -63,6 +63,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse setup [--answers FILE] [--dry-run]
        scannerpulse backup
        scannerpulse tls install CERT KEY | tls self
+       scannerpulse tls letsencrypt web|dns-cloudflare NAME...
        scannerpulse backups push pgbackrest|dump [off]
        scannerpulse backups location FOLDER
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
@@ -161,7 +162,11 @@ backup      take the nightly backups, as root (the backup timer runs it):
             the newest 14 kept, into SCANNERPULSE_BACKUPS; then each kind's
             time for the admin page, and its push address if one is set
 tls         as root: install serves CERT and KEY (PEM, checked first) from
-            now on; self goes back to a certificate this machine makes
+            now on; self goes back to a certificate this machine makes;
+            letsencrypt has the site get Let's Encrypt's certificate for
+            each NAME and renew it, proved over the web (port 443 from the
+            internet) or through DNS at Cloudflare (asks for an API token,
+            or reads it from standard input; never an argument)
 backups     as root: push asks for an address (or reads it from standard
             input; never an argument, since it holds a token) to call after
             each backup of that kind that succeeds, and off removes it;
@@ -518,6 +523,15 @@ fn parse(args: &[&str]) -> Option<Command> {
             key: PathBuf::from(key),
         })),
         ["tls", "self"] => Some(Command::Change(Change::TlsSelf)),
+        [
+            "tls",
+            "letsencrypt",
+            proof @ ("web" | "dns-cloudflare"),
+            names @ ..,
+        ] if !names.is_empty() => Some(Command::Change(Change::LetsEncrypt {
+            dns: *proof == "dns-cloudflare",
+            names: names.iter().map(|n| n.to_string()).collect(),
+        })),
         ["backups", "push", kind] => Some(Command::Change(Change::Push {
             kind: kind.to_string(),
             off: false,
@@ -1995,6 +2009,32 @@ mod tests {
             Some(Command::Change(Change::Location("/srv/backups".into())))
         );
         assert_eq!(parse(&["tls", "install", "/root/site.pem"]), None);
+        assert_eq!(
+            parse(&[
+                "tls",
+                "letsencrypt",
+                "web",
+                "radio.example.org",
+                "www.example.org"
+            ]),
+            Some(Command::Change(Change::LetsEncrypt {
+                dns: false,
+                names: vec!["radio.example.org".into(), "www.example.org".into()],
+            }))
+        );
+        // The Cloudflare token is read like a push address, never an argument.
+        assert_eq!(
+            parse(&["tls", "letsencrypt", "dns-cloudflare", "radio.example.org"]),
+            Some(Command::Change(Change::LetsEncrypt {
+                dns: true,
+                names: vec!["radio.example.org".into()],
+            }))
+        );
+        assert_eq!(parse(&["tls", "letsencrypt", "web"]), None);
+        assert_eq!(
+            parse(&["tls", "letsencrypt", "http", "radio.example.org"]),
+            None
+        );
     }
 
     #[test]
