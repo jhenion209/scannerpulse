@@ -458,13 +458,9 @@ pub async fn obtain(
                 None => certs.answer(&name, proof.digest().as_ref())?,
                 Some(cf) => {
                     let zone = cf.zone(&name).await?;
-                    let id = cf
-                        .add_txt(
-                            &zone,
-                            &format!("_acme-challenge.{name}"),
-                            &proof.dns_value(),
-                        )
-                        .await?;
+                    let record = format!("_acme-challenge.{name}");
+                    cf.clear_leftovers(&zone, &record).await?;
+                    let id = cf.add_txt(&zone, &record, &proof.dns_value()).await?;
                     records.push((zone, id));
                     tokio::time::sleep(DNS_WAIT).await;
                 }

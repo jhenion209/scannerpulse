@@ -450,53 +450,104 @@ async fn a_request_that_gets_no_answer_ends_within_its_limit() {
     assert!(error.contains("did not answer within"), "{error}");
 }
 
-/// A stand-in for Cloudflare's API: one zone, `example.org`; it keeps every
-/// request it gets.
+/// A stand-in for Cloudflare's API: one zone, `example.org`, holding one TXT
+/// record someone else made; it keeps every request it gets. `cf-token-1`
+/// may edit; `cf-token-read` may only read.
 async fn cloudflare() -> (String, Arc<Mutex<Vec<String>>>) {
     use axum::extract::{Path, Query};
     use axum::http::HeaderMap;
     use axum::routing::{delete, get};
+    use serde_json::{Value, json};
+    type Records = Arc<Mutex<Vec<Value>>>;
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-    let auth = |headers: &HeaderMap| {
-        headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer cf-token-1")
+    let records: Records = Arc::new(Mutex::new(vec![json!({
+        "id": "theirs-1", "type": "TXT", "name": "_acme-challenge.radio.west.example.org",
+        "content": "someone else's", "comment": null
+    })]));
+    let token = |headers: &HeaderMap| {
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_string()
     };
-    let (s1, s2, s3) = (seen.clone(), seen.clone(), seen.clone());
+    let refused = |message: &str| {
+        axum::Json(
+            json!({"success": false, "errors": [{"code": 9109, "message": message}], "result": null}),
+        )
+    };
+    let ok = |result: Value| axum::Json(json!({"success": true, "errors": [], "result": result}));
+    let (s1, s2, s3, s4) = (seen.clone(), seen.clone(), seen.clone(), seen.clone());
+    let (r2, r3, r4) = (records.clone(), records.clone(), records.clone());
     let app = axum::Router::new()
         .route(
             "/zones",
             get(
-                move |headers: HeaderMap, Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                move |headers: HeaderMap,
+                      Query(q): Query<std::collections::HashMap<String, String>>| async move {
                     s1.lock().unwrap().push(format!("zones {}", q["name"]));
-                    if !auth(&headers) {
-                        return axum::Json(serde_json::json!({"success": false, "errors": [{"code": 9109, "message": "Invalid access token"}], "result": null}));
+                    if !token(&headers).starts_with("cf-token-") || token(&headers) == "cf-token-2"
+                    {
+                        return refused("Invalid access token");
                     }
-                    let result = if q["name"] == "example.org" {
-                        serde_json::json!([{"id": "zone-1", "name": "example.org"}])
+                    ok(if q["name"] == "example.org" {
+                        json!([{"id": "zone-1", "name": "example.org"}])
                     } else {
-                        serde_json::json!([])
-                    };
-                    axum::Json(serde_json::json!({"success": true, "errors": [], "result": result}))
+                        json!([])
+                    })
                 },
             ),
         )
         .route(
             "/zones/{zone}/dns_records",
-            axum::routing::post(
-                move |Path(zone): Path<String>, axum::Json(body): axum::Json<serde_json::Value>| async move {
+            get(
+                move |Path(zone): Path<String>,
+                      Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                    s4.lock()
+                        .unwrap()
+                        .push(format!("list {zone} {}", q["name"]));
+                    let found: Vec<Value> = r4
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|r| {
+                            r["name"] == q["name"].as_str() && r["type"] == q["type"].as_str()
+                        })
+                        .cloned()
+                        .collect();
+                    ok(json!(found))
+                },
+            )
+            .post(
+                move |headers: HeaderMap,
+                      Path(zone): Path<String>,
+                      axum::Json(body): axum::Json<Value>| async move {
                     s2.lock().unwrap().push(format!(
-                        "add {zone} {} {} {}",
-                        body["type"], body["name"], body["content"]
+                        "add {zone} {} {} {} {}",
+                        body["type"], body["name"], body["content"], body["comment"]
                     ));
-                    axum::Json(serde_json::json!({"success": true, "errors": [], "result": {"id": "record-9"}}))
+                    if token(&headers) == "cf-token-read" {
+                        return refused("Authentication error");
+                    }
+                    let mut all = r2.lock().unwrap();
+                    let id = format!("record-{}", all.len() + 8);
+                    let mut record = body.clone();
+                    record["id"] = json!(id);
+                    all.push(record);
+                    ok(json!({"id": id}))
                 },
             ),
         )
         .route(
             "/zones/{zone}/dns_records/{record}",
-            delete(move |Path((zone, record)): Path<(String, String)>| async move {
-                s3.lock().unwrap().push(format!("remove {zone} {record}"));
-                axum::Json(serde_json::json!({"success": true, "errors": [], "result": {"id": record}}))
-            }),
+            delete(
+                move |Path((zone, record)): Path<(String, String)>| async move {
+                    s3.lock().unwrap().push(format!("remove {zone} {record}"));
+                    r3.lock().unwrap().retain(|r| r["id"] != record.as_str());
+                    ok(json!({"id": record}))
+                },
+            ),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -522,7 +573,7 @@ async fn a_dns_record_is_made_in_the_names_zone_and_removed() {
             "zones radio.west.example.org",
             "zones west.example.org",
             "zones example.org",
-            "add zone-1 \"TXT\" \"_acme-challenge.radio.west.example.org\" \"abc-123\"",
+            "add zone-1 \"TXT\" \"_acme-challenge.radio.west.example.org\" \"abc-123\" \"scannerpulse\"",
             "remove zone-1 record-9",
         ]
     );
@@ -535,4 +586,45 @@ async fn a_dns_record_is_made_in_the_names_zone_and_removed() {
     let error = wrong.zone("radio.example.org").await.unwrap_err();
     assert!(error.contains("Invalid access token"), "{error}");
     assert!(!error.contains("cf-token-2"), "{error}");
+}
+
+#[tokio::test]
+async fn a_proof_record_left_behind_goes_before_the_next_and_others_stay() {
+    use scannerpulse::cloudflare::Cloudflare;
+    let (api, seen) = cloudflare().await;
+    let cf = Cloudflare::with_api(&api, "cf-token-1");
+    let name = "_acme-challenge.radio.west.example.org";
+    // A request cut short (a restart) left its record.
+    let left = cf.add_txt("zone-1", name, "old-proof").await.unwrap();
+    assert_eq!(cf.leftovers("zone-1", name).await.unwrap(), [left]);
+    seen.lock().unwrap().clear();
+    cf.clear_leftovers("zone-1", name).await.unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            format!("list zone-1 {name}"),
+            "remove zone-1 record-9".to_string()
+        ],
+        "only the site's own record goes; someone else's stays"
+    );
+    assert!(cf.leftovers("zone-1", name).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_token_that_may_only_read_is_refused_before_anything_is_written() {
+    use scannerpulse::cloudflare::Cloudflare;
+    let (api, seen) = cloudflare().await;
+    let reader = Cloudflare::with_api(&api, "cf-token-read");
+    let error = reader
+        .check_edit("radio.west.example.org")
+        .await
+        .unwrap_err();
+    assert!(error.contains("cannot edit"), "{error}");
+    assert!(error.contains("Authentication error"), "{error}");
+    let editor = Cloudflare::with_api(&api, "cf-token-1");
+    editor.check_edit("radio.west.example.org").await.unwrap();
+    let after = seen.lock().unwrap().clone();
+    let added = after.iter().filter(|s| s.starts_with("add ")).count();
+    let removed = after.iter().filter(|s| s.starts_with("remove ")).count();
+    assert_eq!((added, removed), (2, 1), "{after:?}");
 }

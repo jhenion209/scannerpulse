@@ -280,7 +280,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                     read_secret("Cloudflare API token (Zone, DNS, Edit on the site's zone):")?;
                 let cloudflare = crate::cloudflare::Cloudflare::from_env(&token);
                 for name in &names {
-                    cloudflare.zone(name).await?;
+                    cloudflare.check_edit(name).await?;
                 }
                 Proof::Cloudflare { token }
             } else {

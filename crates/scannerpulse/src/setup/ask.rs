@@ -214,11 +214,11 @@ pub async fn check_database(options: sqlx::postgres::PgConnectOptions) -> Result
     ))
 }
 
-/// The Cloudflare token reaches the zone of each name.
+/// The Cloudflare token may edit the DNS of each name's zone.
 pub async fn check_cloudflare(token: &str, names: &[String]) -> Result<(), String> {
     let cloudflare = crate::cloudflare::Cloudflare::from_env(token);
     for name in names {
-        cloudflare.zone(name).await?;
+        cloudflare.check_edit(name).await?;
     }
     Ok(())
 }

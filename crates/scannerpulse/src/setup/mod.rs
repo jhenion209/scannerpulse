@@ -99,7 +99,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             {
                 ask::check_cloudflare(token, names).await?;
                 println!(
-                    "\nCloudflare's token reaches the zone of {}.",
+                    "\nCloudflare's token may edit the DNS of {}.",
                     names.join(", ")
                 );
             }

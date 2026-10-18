@@ -6,6 +6,10 @@ use serde_json::Value;
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 
+/// The comment on every record the site writes, which tells its own from
+/// anyone else's.
+const MARK: &str = "scannerpulse";
+
 pub struct Cloudflare {
     http: reqwest::Client,
     api: String,
@@ -68,6 +72,7 @@ impl Cloudflare {
             "name": name,
             "content": value,
             "ttl": 60,
+            "comment": MARK,
         });
         let made = self
             .call(
@@ -81,6 +86,50 @@ impl Cloudflare {
             .as_str()
             .map(String::from)
             .ok_or_else(|| "Cloudflare gave no id for the record it made".into())
+    }
+
+    /// The ids of the site's own TXT records named `name` in `zone`.
+    pub async fn leftovers(&self, zone: &str, name: &str) -> Result<Vec<String>, String> {
+        let found = self
+            .call(
+                self.http
+                    .get(format!("{}/zones/{zone}/dns_records", self.api))
+                    .query(&[("type", "TXT"), ("name", name)]),
+            )
+            .await?;
+        Ok(found
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|record| record["comment"] == MARK)
+            .filter_map(|record| record["id"].as_str().map(String::from))
+            .collect())
+    }
+
+    /// Removes the site's own records named `name` that a request cut
+    /// short (a restart, a lost answer) left behind.
+    pub async fn clear_leftovers(&self, zone: &str, name: &str) -> Result<(), String> {
+        for id in self.leftovers(zone, name).await? {
+            self.remove(zone, &id).await?;
+        }
+        Ok(())
+    }
+
+    /// The token may edit the DNS of `name`'s zone, not only read it: a TXT
+    /// record is written there and removed at once.
+    pub async fn check_edit(&self, name: &str) -> Result<(), String> {
+        let zone = self.zone(name).await?;
+        let id = self
+            .add_txt(
+                &zone,
+                &format!("_acme-challenge.{name}"),
+                "scannerpulse-check",
+            )
+            .await
+            .map_err(|why| {
+                format!("the Cloudflare token cannot edit the DNS of {name}'s zone: {why}")
+            })?;
+        self.remove(&zone, &id).await
     }
 
     pub async fn remove(&self, zone: &str, record: &str) -> Result<(), String> {

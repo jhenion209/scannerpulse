@@ -175,7 +175,8 @@ so the page shows the command, run on the machine:
   Encrypt's certificate for each NAME, proved over the web, and `tls
   letsencrypt dns-cloudflare NAME...` the same proved through Cloudflare's
   DNS (it asks for the API token, or reads the first line of standard input,
-  and checks that it reaches each name's zone). The site keeps serving its
+  and checks that it may edit each name's zone, by writing and removing a TXT
+  record there). The site keeps serving its
   certificate until the new one arrives; This machine shows the request's
   outcome and each renewal. `tls install` and `tls self` turn Let's Encrypt
   off, another authority named for it included;
