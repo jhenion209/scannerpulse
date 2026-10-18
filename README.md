@@ -177,9 +177,10 @@ told otherwise: add `"origin=apt.postgresql.org";` to
 `Unattended-Upgrade::Origins-Pattern` in a file under `/etc/apt/apt.conf.d/`.
 On the Red Hat family, `dnf-automatic` covers every enabled repository,
 that one included. ScannerPulse itself is one program: running the install
-script again installs the latest release, and
-`sudo systemctl restart scannerpulse-web scannerpulse-ingest` puts it to
-work.
+script again installs the latest release and brings the database's tables up
+to date, and `sudo systemctl restart scannerpulse-web scannerpulse-ingest`
+puts it to work. A program copied in by hand needs
+`sudo scannerpulse db-update` before that restart.
 
 ## Commands
 

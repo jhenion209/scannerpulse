@@ -4,6 +4,7 @@
 # It finds the system and the processor, downloads the matching program and
 # the signed checksums from the project's release, checks both, and installs
 # /usr/local/bin/scannerpulse. Nothing else changes: setup is the next step.
+# On a machine set up already, it also brings the database's tables up to date.
 set -eu
 
 RELEASE=${SCANNERPULSE_RELEASE_URL:-https://github.com/jhenion209/scannerpulse/releases/latest/download}
@@ -69,6 +70,12 @@ main() {
     fi
     $as_root install -m 0755 "$tmp/$program" "$BIN_DIR/scannerpulse"
     echo "Installed $("$BIN_DIR/scannerpulse" --version) in $BIN_DIR/scannerpulse."
+    # A release may add tables: on a machine set up already, the new program
+    # brings the database up to date (it reads the settings file itself).
+    if [ -e /etc/scannerpulse/scannerpulse.env ]; then
+        $as_root "$BIN_DIR/scannerpulse" db-update --quiet ||
+            fail "the database's tables could not be brought up to date: fix the cause above, then run: sudo $BIN_DIR/scannerpulse db-update"
+    fi
     if [ -e /etc/systemd/system/scannerpulse-web.service ] &&
         systemctl is-active --quiet scannerpulse-web.service 2>/dev/null; then
         echo "This machine is set up already: restart its services to run this version:"
