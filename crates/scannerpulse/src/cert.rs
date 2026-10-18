@@ -134,11 +134,13 @@ pub fn check(cert: &Path, key: &Path) -> Result<Found, String> {
 /// private key in `key` (PEM), ready to serve: both read, and the key the
 /// certificate's.
 pub fn certified(cert: &Path, key: &Path) -> Result<rustls::sign::CertifiedKey, String> {
-    let read =
-        |path: &Path| std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()));
+    let read = |path: &Path, what: &str| {
+        std::fs::read(path)
+            .map_err(|error| format!("{}: cannot read the {what} ({error})", path.display()))
+    };
     certified_from(
-        &read(cert)?,
-        &read(key)?,
+        &read(cert, "certificate")?,
+        &read(key, "private key")?,
         &cert.display().to_string(),
         &key.display().to_string(),
     )
