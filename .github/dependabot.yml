@@ -23,6 +23,10 @@ updates:
     groups:
       npm:
         update-types: [minor, patch]
+    ignore:
+      # svelte-check accepts TypeScript 5 and 6 only (4.7.7).
+      - dependency-name: typescript
+        versions: [">=7"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
