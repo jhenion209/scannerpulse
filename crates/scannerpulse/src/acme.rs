@@ -321,6 +321,14 @@ pub struct Renewal {
     pub error: Option<String>,
 }
 
+impl Renewal {
+    /// A request starts: the last one's error is behind it.
+    pub fn begin(&mut self, now: DateTime<Utc>) {
+        self.tried = Some(now);
+        self.error = None;
+    }
+}
+
 /// Serves the certificate kept in `dir` when this authority gave it for
 /// these names, and renews in the background: at once when the one served
 /// is not that kept one, then whenever a third of its life is left.
@@ -339,7 +347,10 @@ pub fn start(settings: Settings, dir: PathBuf, certs: Arc<Certs>, renewal: Arc<M
                 || crate::cert::found(&certs.current())
                     .map_or(true, |found| due(&found, &settings.names, Utc::now()));
             let wait = if due {
-                renewal.lock().unwrap_or_else(|e| e.into_inner()).tried = Some(Utc::now());
+                renewal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .begin(Utc::now());
                 let result = obtain(&settings, &dir, &certs, ORDER_LIMIT).await;
                 let mut kept = renewal.lock().unwrap_or_else(|e| e.into_inner());
                 match result {
@@ -583,6 +594,18 @@ mod tests {
             }
             seen.push(at);
         }
+    }
+
+    #[test]
+    fn a_new_request_clears_the_last_ones_error() {
+        let mut renewal = super::Renewal {
+            error: Some("radio.example.org: refused".into()),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+        renewal.begin(now);
+        assert_eq!(renewal.tried, Some(now));
+        assert_eq!(renewal.error, None, "the page shows the request under way");
     }
 
     #[test]
