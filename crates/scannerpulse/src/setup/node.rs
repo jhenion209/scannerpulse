@@ -541,10 +541,72 @@ fn systemctl(verb: &str, unit: &str) -> Result<(), String> {
     }
 }
 
-/// Stops this machine's PostgreSQL cleanly: a standby that is streaming
-/// gets everything up to the last moment first.
-pub fn stop() -> Result<(), String> {
-    systemctl("stop", system()?.postgres_service())
+/// Stops this machine's PostgreSQL, the primary, cleanly, and gives where
+/// its last checkpoint starts: a standby that has replayed past it has
+/// everything the primary wrote.
+pub fn stop() -> Result<String, String> {
+    let system = system()?;
+    systemctl("stop", system.postgres_cluster())?;
+    let output = Command::new("runuser")
+        .args([
+            "-u",
+            "postgres",
+            "--",
+            &format!("{}/pg_controldata", system.postgres_bin()),
+            "-D",
+            system.postgres_data(),
+        ])
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| format!("cannot run pg_controldata: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("pg_controldata: {}", super::apply::said(&output)));
+    }
+    shut_down_at(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The location of the last checkpoint, from pg_controldata's report of a
+/// primary that stopped cleanly.
+fn shut_down_at(report: &str) -> Result<String, String> {
+    let field = |name: &str| {
+        report.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_string())
+        })
+    };
+    match field("Database cluster state").as_deref() {
+        Some("shut down") => {}
+        state => {
+            return Err(format!(
+                "PostgreSQL did not stop cleanly (its state: {})",
+                state.unwrap_or("unknown")
+            ));
+        }
+    }
+    field("Latest checkpoint location")
+        .ok_or_else(|| "pg_controldata did not give the last checkpoint".into())
+}
+
+/// Starts this machine's PostgreSQL.
+pub fn start() -> Result<(), String> {
+    systemctl("start", system()?.postgres_cluster())
+}
+
+/// Makes this standby the primary once it has replayed past `lsn`, the
+/// stopped primary's last checkpoint; refused if it has not within 30 s.
+pub fn promote_after(lsn: &str) -> Result<(), String> {
+    for _ in 0..30 {
+        if psql(&format!(
+            "SELECT pg_last_wal_replay_lsn() > '{lsn}'::pg_lsn"
+        ))? == "t"
+        {
+            return promote();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(format!(
+        "this machine has not received everything the primary wrote (up to {lsn}), so it was not made the primary"
+    ))
 }
 
 /// Makes this standby the primary.
@@ -575,7 +637,7 @@ pub fn follow(primary: &str) -> Result<(), String> {
     if !made.success() {
         return Err(format!("cannot make {}", signal.display()));
     }
-    systemctl("start", system.postgres_service())?;
+    systemctl("start", system.postgres_cluster())?;
     let conninfo = conninfo(primary, &system);
     psql(&format!(
         "ALTER SYSTEM SET primary_conninfo = '{}'",
@@ -596,19 +658,32 @@ fn conninfo(primary: &str, system: &System) -> String {
 pub enum Asked {
     Status,
     Stop,
+    Start,
     Promote,
+    /// Promote once replayed past this location (`hex/hex`).
+    PromoteAfter(String),
     Follow(String),
 }
 
 /// The command the hub asked for (SSH_ORIGINAL_COMMAND), if it is one of
-/// the node's own: a host for `follow` is a name or an address, nothing
-/// more.
+/// the node's own: a host for `follow` is a name or an address, and a
+/// location for `promote after` two hexadecimal numbers, nothing more.
 pub fn asked(command: &str) -> Option<Asked> {
     let words: Vec<&str> = command.split_whitespace().collect();
     match words.as_slice() {
         ["status"] => Some(Asked::Status),
         ["stop"] => Some(Asked::Stop),
+        ["start"] => Some(Asked::Start),
         ["promote"] => Some(Asked::Promote),
+        ["promote", "after", lsn]
+            if lsn.split_once('/').is_some_and(|(hi, lo)| {
+                [hi, lo]
+                    .iter()
+                    .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_hexdigit()))
+            }) =>
+        {
+            Some(Asked::PromoteAfter(lsn.to_string()))
+        }
         ["follow", host]
             if host
                 .chars()
@@ -625,11 +700,13 @@ pub fn serve() -> Result<String, String> {
     let command = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
     match asked(&command) {
         None => Err(format!(
-            "{command:?} is not a database machine's command: status, stop, promote or follow HOST"
+            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN] or follow HOST"
         )),
         Some(Asked::Status) => serde_json::to_string(&status()).map_err(|e| e.to_string()),
-        Some(Asked::Stop) => stop().map(|()| "stopped".into()),
+        Some(Asked::Stop) => stop(),
+        Some(Asked::Start) => start().map(|()| "started".into()),
         Some(Asked::Promote) => promote().map(|()| "promoted".into()),
+        Some(Asked::PromoteAfter(lsn)) => promote_after(&lsn).map(|()| "promoted".into()),
         Some(Asked::Follow(host)) => follow(&host).map(|()| format!("following {host}")),
     }
 }
@@ -673,8 +750,8 @@ pub fn db_promote() -> Result<String, String> {
     ))
 }
 
-/// `scannerpulse db rejoin`, as root on a former primary: it becomes the
-/// standby of the other machine, rewound to where their histories split,
+/// `scannerpulse db rejoin`, as root on a former primary (or a standby that
+/// no longer receives): it becomes the standby of the other machine, rewound to where their histories split,
 /// or (after the person agrees) copied whole.
 pub fn db_rejoin(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     let node = NodeFile::read()?;
@@ -685,10 +762,16 @@ pub fn db_rejoin(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
         ));
     }
     let system = system()?;
-    if psql("SELECT pg_is_in_recovery()").as_deref() == Ok("t") {
-        return Err("this machine is a standby already".into());
+    // A standby that receives from the other has nothing to rejoin; one
+    // that does not (it fell behind, or their histories split) has.
+    if psql("SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming'").as_deref()
+        == Ok("1")
+    {
+        return Err(format!(
+            "this machine is a standby already, receiving from {other}"
+        ));
     }
-    systemctl("stop", system.postgres_service())?;
+    systemctl("stop", system.postgres_cluster())?;
     let rewind = Command::new("runuser")
         .args([
             "-u",
@@ -723,7 +806,7 @@ pub fn db_rejoin(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
             return Err(format!("the copy failed: {}", super::apply::said(&copy)));
         }
     }
-    systemctl("start", system.postgres_service())?;
+    systemctl("start", system.postgres_cluster())?;
     Ok(format!("This machine follows {other} as its standby now."))
 }
 
@@ -812,9 +895,14 @@ pub fn db_switchover(say: impl Fn(&str)) -> Result<String, String> {
     let (p, s) = ready_to_switch(&statuses[0], &statuses[1])?;
     let (primary, standby) = (&plan.nodes[p], &plan.nodes[s]);
     say(&format!("Stopping {primary}, the primary"));
-    on_node(primary, "stop")?;
+    let last = on_node(primary, "stop")?;
     say(&format!("Making {standby} the primary"));
-    on_node(standby, "promote")?;
+    if let Err(error) = on_node(standby, &format!("promote after {last}")) {
+        return Err(match on_node(primary, "start") {
+            Ok(_) => format!("{error}; {primary} is the primary again"),
+            Err(again) => format!("{error}; and {primary} did not start again: {again}"),
+        });
+    }
     say(&format!("Making {primary} its standby"));
     on_node(primary, &format!("follow {standby}"))?;
     Ok(format!(
@@ -873,6 +961,11 @@ mod tests {
         );
         assert_eq!(asked("status"), Some(Asked::Status));
         assert_eq!(asked("promote"), Some(Asked::Promote));
+        assert_eq!(asked("start"), Some(Asked::Start));
+        assert_eq!(
+            asked("promote after 0/313CE18"),
+            Some(Asked::PromoteAfter("0/313CE18".into()))
+        );
         assert_eq!(
             asked("follow db2.example.org"),
             Some(Asked::Follow("db2.example.org".into()))
@@ -884,9 +977,39 @@ mod tests {
             "follow $(id)",
             "status now",
             "stop db1",
+            "promote after 0/313CE18'",
+            "promote after x/y",
+            "promote after 0/3;rm",
+            "promote after 313CE18",
         ] {
             assert_eq!(asked(refused), None, "{refused}");
         }
+    }
+
+    #[test]
+    fn a_primary_stopped_cleanly_tells_where_its_last_checkpoint_is() {
+        let said = |state: &str| {
+            format!(
+                "pg_control version number:            1700\n\
+                 Database cluster state:               {state}\n\
+                 Latest checkpoint location:           0/313CE18\n\
+                 Latest checkpoint's REDO location:    0/313CE18\n"
+            )
+        };
+        assert_eq!(shut_down_at(&said("shut down")), Ok("0/313CE18".into()));
+        for state in [
+            "in production",
+            "shut down in recovery",
+            "in crash recovery",
+        ] {
+            assert!(
+                shut_down_at(&said(state))
+                    .unwrap_err()
+                    .contains("did not stop cleanly"),
+                "{state}"
+            );
+        }
+        assert!(shut_down_at("Database cluster state: shut down\n").is_err());
     }
 
     fn titles(steps: &[Step]) -> Vec<&str> {

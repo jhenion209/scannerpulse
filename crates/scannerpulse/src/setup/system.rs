@@ -89,6 +89,15 @@ impl System {
         }
     }
 
+    /// The service of PostgreSQL 17's cluster itself: stopping it returns
+    /// once PostgreSQL has stopped (Debian's `postgresql` returns at once).
+    pub fn postgres_cluster(&self) -> &'static str {
+        match self.family {
+            Family::Apt => "postgresql@17-main",
+            Family::Dnf => "postgresql-17",
+        }
+    }
+
     /// PostgreSQL 17's data directory, as the packages make it.
     pub fn postgres_data(&self) -> &'static str {
         match self.family {
@@ -211,8 +220,10 @@ mod tests {
         );
         assert_eq!(debian.pgdg_rpm(), None);
         assert_eq!(debian.postgres_service(), "postgresql");
+        assert_eq!(debian.postgres_cluster(), "postgresql@17-main");
         let rocky = detect(ROCKY, "x86_64").unwrap();
         assert_eq!(rocky.family, Family::Dnf);
+        assert_eq!(rocky.postgres_cluster(), "postgresql-17");
         assert_eq!(
             rocky.pgdg_rpm().unwrap(),
             "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
