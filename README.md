@@ -200,7 +200,7 @@ for the first). The joining machine reads its place over SSH, installs
 PostgreSQL 17, lets in only this machine and the other database machine
 (TLS and a password), and the second copies the first and follows it. Each
 lets this machine's key run only `scannerpulse node serve` (status, stop,
-start, promote, follow). Then this machine makes the tables and starts. Its
+start, promote, follow, and on the referee switchover). Then this machine makes the tables and starts. Its
 services are given both machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on
 the one that is the primary, moving to the other within seconds after a
 change of roles; a former primary that comes back still a primary is
@@ -218,11 +218,30 @@ ignored, as the promoted machine is on a newer timeline. The primary keeps a nig
   and nothing is lost. The standby is promoted only once it has everything
   the stopped primary wrote; otherwise the primary starts again unchanged.
 
+**A referee** promotes the standby by itself. With two machines, neither can
+tell "the other died" from "the network between us broke", so a third,
+small machine decides: pg_auto_failover's monitor, which a Raspberry Pi or a
+small VM runs well. In Advanced, choose that the standby becomes the primary
+"by itself", and name the referee. It joins first, the same way (the install
+line, then setup's "join an existing install"), then the database machines,
+which register with it through `pg_autoctl`: the second copies the first and
+follows it, and a write waits until the standby has it. When the primary is
+lost, the referee promotes the standby: writes pause for about a minute
+while it makes sure the old primary has stopped, and the services move to
+the new primary. When the old primary is back, it rejoins as the standby by
+itself. `db promote` and `db rejoin` are not needed then; `db switchover`
+asks the referee. While the referee is down the primary goes on, but
+nothing is promoted until it returns; if the referee and the standby are
+down together, writes (filing calls) pause until either returns, while
+reading and playback go on. Put the referee on a different switch from the
+database machines where you can.
+
 An unattended join reads `JOIN` (the first machine's address) and, unless
 the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers
 file; SSH must not ask for a password then. The first machine's answers
-file sets `DATABASE="nodes"`, `DB_NODES="db1.example.org db2.example.org"`
-and, if its own address is not the one other machines reach, `HUB`.
+file sets `DATABASE="nodes"`, `DB_NODES="db1.example.org db2.example.org"`,
+for a referee `FAILOVER="auto"` and `REFEREE="ref.example.org"`, and, if
+its own address is not the one other machines reach, `HUB`.
 
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
 `https://<this machine>/healthz` expecting 200 (the web interface answers
@@ -260,8 +279,8 @@ already set in the environment wins. So far:
 - `db-update` creates or updates the database schema.
 - `db promote`, `db rejoin` and `db switchover`, as root, change the two
   database machines' roles (above); `node serve`, `node status` and `node
-  backup` are a database machine's own, and `join info` and `join done` the
-  first machine's side of a join.
+  backup` are a database machine's (or the referee's) own, and `join info`
+  and `join done` the first machine's side of a join.
 - `ingest` watches the source folders and files each new call into the
   archive. Two hosts can run it side by side: a lease in the database lets one
   of them work at a time, and the other takes over when it stops. It reads
