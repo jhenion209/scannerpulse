@@ -270,9 +270,11 @@ The admin page's **Layout** area shows the same from inside, every 15 seconds:
 
 - **A new release:** `sudo /usr/local/bin/scannerpulse update` on the first
   machine updates every machine in turn: the referee and the database
-  machines, then the second, then the first. The shared address stays with a
-  machine that answers throughout. Every machine must be up; one that is not
-  stops the update before anything changes.
+  machines, then the second, then the first. Both ScannerPulse machines must
+  answer first, and each restarts only while the other answers. The shared
+  address does not move for a restart, so while the machine holding it
+  restarts its web (a second or two), a request can fail. Every machine must
+  be up; one that is not stops the update before anything changes.
 - **A certificate changed on the first machine** (`tls install`, `tls self`,
   or Let's Encrypt): join the second again (`sudo /usr/local/bin/scannerpulse
   setup` there, Advanced, "join an existing install"). It takes the first

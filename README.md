@@ -332,7 +332,9 @@ ScannerPulse itself is one program, updated by
 signature with the same key as the install script. It brings the database's
 tables up to date, then updates the referee, the database machines, the
 second ScannerPulse machine and this one, one at a time, each answering
-before the next. A pair stays up throughout. `update --check` only says what
+before the next. A pair keeps serving: only while the machine holding the
+shared address restarts its web (a second or two) can a request fail.
+`update --check` only says what
 is newest and what each machine runs.
 
 From 0.7.0 or earlier, run the install line on each machine once instead,
