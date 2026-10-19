@@ -131,6 +131,16 @@ impl System {
     }
 
     /// What this machine has of PostgreSQL before setup changes anything.
+    /// The data directories of PostgreSQL 17 that setup makes: the
+    /// package's, and pg_autoctl's own on a database machine or the referee.
+    pub fn our_data(&self) -> Vec<String> {
+        vec![
+            self.postgres_data().to_string(),
+            format!("{}/17/sp", self.postgres_home()),
+            format!("{}/17/monitor", self.postgres_home()),
+        ]
+    }
+
     pub fn seen(&self) -> Seen {
         use std::net::{SocketAddr, TcpStream};
         use std::path::Path;
@@ -163,7 +173,10 @@ impl System {
                     TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
                 })
             }),
-            ours: Path::new(self.postgres_data()).join("PG_VERSION").exists(),
+            ours: self
+                .our_data()
+                .iter()
+                .any(|data| Path::new(data).join("PG_VERSION").exists()),
         }
     }
 }
@@ -210,6 +223,28 @@ mod tests {
 
     const DEBIAN: &str = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"13\"\nID=debian\n";
     const ROCKY: &str = "NAME=\"Rocky Linux\"\nVERSION=\"9.6 (Blue Onyx)\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.6\"\n";
+
+    #[test]
+    fn a_cluster_of_ours_is_not_another_postgresql() {
+        // The package's cluster, and pg_autoctl's own on a database
+        // machine or the referee.
+        assert_eq!(
+            detect(DEBIAN, "x86_64").unwrap().our_data(),
+            [
+                "/var/lib/postgresql/17/main",
+                "/var/lib/postgresql/17/sp",
+                "/var/lib/postgresql/17/monitor"
+            ]
+        );
+        assert_eq!(
+            detect(ROCKY, "x86_64").unwrap().our_data(),
+            [
+                "/var/lib/pgsql/17/data",
+                "/var/lib/pgsql/17/sp",
+                "/var/lib/pgsql/17/monitor"
+            ]
+        );
+    }
 
     #[test]
     fn a_supported_system_is_found_with_its_package_tools() {

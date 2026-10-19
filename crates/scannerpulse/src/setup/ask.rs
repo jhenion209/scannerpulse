@@ -81,6 +81,13 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
         .into());
     }
     if let Database::Nodes(pair) = &answers.database {
+        for name in pair.nodes.iter().chain([&pair.hub]).chain(&pair.referee) {
+            if !super::join::plain(name) {
+                return Err(format!(
+                    "{name:?} is not a name or an address: letters, digits, dots, dashes and colons"
+                ));
+            }
+        }
         if pair.nodes[0].eq_ignore_ascii_case(&pair.nodes[1]) {
             return Err("the database machines are two different machines".into());
         }
@@ -333,8 +340,8 @@ pub fn ask_join() -> Result<Option<super::join::Hub>, inquire::InquireError> {
         return Ok(None);
     }
     let named = |n: &str| {
-        if n.is_empty() || n.contains(char::is_whitespace) {
-            Err("a name or an address".into())
+        if !super::join::plain(n) {
+            Err("a name or an address: letters, digits, dots, dashes and colons".into())
         } else {
             Ok(())
         }
@@ -813,8 +820,8 @@ fn ask_database(
             _ => None,
         };
         let named = |n: &str| {
-            if n.is_empty() || n.contains(char::is_whitespace) {
-                Err("a name or an address".into())
+            if !super::join::plain(n) {
+                Err("a name or an address: letters, digits, dots, dashes and colons".into())
             } else {
                 Ok(())
             }
@@ -1553,6 +1560,31 @@ mod tests {
             "DATABASE=here\nREFEREE=ref.example.org\n",
             "two database machines",
         );
+        for (extra, name) in [
+            (
+                "DB_NODES=\"db_1.example.org db2.example.org\"\n",
+                "db_1.example.org",
+            ),
+            (
+                "DB_NODES=\"db1.example.org db2.example.org\"\nHUB=hub_1\n",
+                "hub_1",
+            ),
+            (
+                "DB_NODES=\"db1.example.org db2.example.org\"\nFAILOVER=auto\nREFEREE=ref_1\n",
+                "ref_1",
+            ),
+        ] {
+            let error = from_file(
+                &answers_file(dir.path(), &format!("{base}DATABASE=nodes\n{extra}"), 0o600),
+                &defaults(),
+            )
+            .unwrap_err();
+            assert!(error.contains(name), "{extra}: {error}");
+            assert!(
+                error.contains("letters, digits, dots, dashes and colons"),
+                "{extra}: {error}"
+            );
+        }
         refused(
             &format!(
                 "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nBACKUPS={}\n",

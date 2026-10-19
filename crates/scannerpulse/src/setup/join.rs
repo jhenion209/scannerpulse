@@ -17,7 +17,7 @@ pub struct Joining {
 }
 
 /// A host name or an address, nothing a shell would read more into.
-fn plain(name: &str) -> bool {
+pub(super) fn plain(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
@@ -222,6 +222,8 @@ pub async fn run(hub: Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
+    // Another PostgreSQL here would take port 5432 from the one setup makes.
+    super::system::other_postgres(&system.seen())?;
     let binary = Path::new(super::BINARY);
     let (steps, what) = match place {
         Place::Referee => (
