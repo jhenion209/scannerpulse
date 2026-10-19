@@ -33,9 +33,9 @@ configures on both, decides which one:
 - The first machine has the higher priority, so it holds the address while it
   is healthy. Two failed checks in a row lower its priority below the second's,
   and the second takes the address. That takes about 15 seconds after the
-  first's site stops, and about 2 seconds after the machine itself goes away.
-- When the first machine is healthy again for 30 seconds, it takes the address
-  back.
+  first's site stops, and a few seconds after the machine itself goes away.
+- When the first machine is healthy again, it takes the address back after 30
+  to 45 seconds.
 - If both machines fail their checks, the first keeps the address.
 
 The two machines tell each other their state with VRRP. They send it straight

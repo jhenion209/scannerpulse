@@ -309,11 +309,11 @@ second ScannerPulse machine `SECOND="web2.example.org"` and
 machines reach, `HUB`.
 
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
-`https://<this machine>/healthz` expecting 200 (with two ScannerPulse machines,
-one on the shared address and one on each machine's own address:
-[docs/deploying.md](docs/deploying.md)) (the web interface answers
+`https://<this machine>/healthz` expecting 200 (the web interface answers
 and so does the database), with certificate errors ignored while the site
-uses setup's own certificate. `/health` says only that the process is up.
+uses setup's own certificate. With two ScannerPulse machines, monitor the
+shared address and each machine's own address:
+[docs/deploying.md](docs/deploying.md). `/health` says only that the process is up.
 For the backups, a push monitor for each kind (above), with an interval of a
 day and a few hours: a backup missed or failed turns it red.
 
