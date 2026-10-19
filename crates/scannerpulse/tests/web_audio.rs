@@ -44,10 +44,7 @@ async fn send(
     pool: &PgPool,
     request: Request<Body>,
 ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-    let app = web::router(AppState::new(
-        pool.clone(),
-        (*pool.connect_options()).clone(),
-    ));
+    let app = web::router(AppState::new(pool.clone()));
     let response = app.oneshot(request).await.unwrap();
     let status = response.status();
     let headers = response.headers().clone();
@@ -246,7 +243,7 @@ async fn an_export_of_too_much_audio_is_refused_before_it_is_read(pool: PgPool) 
 #[sqlx::test(migrations = "./migrations")]
 async fn a_third_export_waits_for_nothing(pool: PgPool) {
     let (_root, ids) = calls_with_files(&pool, 1, 1, &[]).await;
-    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let state = AppState::new(pool.clone());
     let _both = state
         .exports
         .clone()
@@ -282,7 +279,7 @@ async fn an_export_keeps_its_permit_while_its_files_are_read(pool: PgPool) {
             .unwrap()
             .success()
     );
-    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let state = AppState::new(pool.clone());
     // The client gives up while the export reads.
     let cut = tokio::time::timeout(
         Duration::from_secs(1),

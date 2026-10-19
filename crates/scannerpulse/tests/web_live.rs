@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// The router served on a port of its own, with the host's feed listening.
 async fn serve(pool: &PgPool) -> String {
-    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let state = AppState::new(pool.clone());
     live::spawn(pool.clone(), state.live.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -142,7 +142,7 @@ async fn a_page_that_connects_during_shutdown_is_closed_at_once() {
     // A state whose shutdown fired before the page connected; no database is
     // needed, because the socket closes before it reads any call.
     let pool = PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap();
-    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let state = AppState::new(pool.clone());
     state.shutdown.send_replace(true);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -164,7 +164,7 @@ async fn a_page_that_sends_a_large_message_is_dropped() {
     // The page never needs to send anything, so the socket's incoming
     // messages are kept small; no database is needed.
     let pool = PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap();
-    let state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let state = AppState::new(pool.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, web::router(state)).await.unwrap() });

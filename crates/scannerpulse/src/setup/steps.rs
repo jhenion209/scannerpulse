@@ -20,7 +20,7 @@ pub const WEB_UNIT: &str = "/etc/systemd/system/scannerpulse-web.service";
 
 /// The answers to setup's questions: Simple's, and Advanced's, which
 /// Simple leaves at their defaults.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Answers {
     /// Where the recorder saves new recordings (ingest reads, then moves them).
     pub recordings: PathBuf,
@@ -108,7 +108,7 @@ impl Pair {
 }
 
 /// A database the person runs.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Remote {
     pub host: String,
     pub port: u16,
@@ -217,7 +217,7 @@ pub struct Transcription {
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Action {
     /// Runs `program`; `input` goes to its standard input, so a password is
     /// never in its arguments; `env` is added to its environment. Skipped when
@@ -258,6 +258,103 @@ pub enum Action {
     /// Waits until both database machines have joined and one is the
     /// primary.
     WaitForNodes,
+}
+
+/// Never a password, a password file's contents, or what a step feeds a
+/// program (SQL with a password in it).
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Action::Run {
+                program,
+                args,
+                input,
+                env,
+                unless,
+            } => f
+                .debug_struct("Run")
+                .field("program", program)
+                .field("args", args)
+                .field("input_bytes", &input.as_ref().map(String::len))
+                .field("env", &env.iter().map(|(k, _)| k).collect::<Vec<_>>())
+                .field("unless", unless)
+                .finish(),
+            Action::Write {
+                path, mode, owner, ..
+            } => f
+                .debug_struct("Write")
+                .field("path", path)
+                .field("mode", mode)
+                .field("owner", owner)
+                .finish_non_exhaustive(),
+            Action::Folders {
+                recordings,
+                archive,
+            } => f
+                .debug_struct("Folders")
+                .field("recordings", recordings)
+                .field("archive", archive)
+                .finish(),
+            Action::Admin { login, .. } => f
+                .debug_struct("Admin")
+                .field("login", login)
+                .finish_non_exhaustive(),
+            Action::WaitForWeb { port } => {
+                f.debug_struct("WaitForWeb").field("port", port).finish()
+            }
+            Action::Plan {
+                nodes,
+                hub,
+                referee,
+                ..
+            } => f
+                .debug_struct("Plan")
+                .field("nodes", nodes)
+                .field("hub", hub)
+                .field("referee", referee)
+                .finish_non_exhaustive(),
+            Action::WaitForNodes => f.write_str("WaitForNodes"),
+        }
+    }
+}
+
+/// Never the admin's password, the database's, or a push address.
+impl std::fmt::Debug for Answers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Answers")
+            .field("recordings", &self.recordings)
+            .field("archive", &self.archive)
+            .field("time_zone", &self.time_zone)
+            .field("admin", &self.admin)
+            .field("port", &self.port)
+            .field("host", &self.host)
+            .field("names", &self.names)
+            .field("advanced", &self.advanced)
+            .field("database", &self.database)
+            .field("certificate", &self.certificate)
+            .field("proxies", &self.proxies)
+            .field("syslog", &self.syslog)
+            .field("backups", &self.backups)
+            .field(
+                "pushes",
+                &self.pushes.iter().map(|(kind, _)| kind).collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Never the role's password.
+impl std::fmt::Debug for Remote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Remote")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("name", &self.name)
+            .field("role", &self.role)
+            .field("sslmode", &self.sslmode)
+            .field("root_cert", &self.root_cert)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1729,6 +1826,64 @@ mod tests {
                 .iter()
                 .any(|s| s.title.contains("PostgreSQL") || s.title.contains("EPEL"))
         );
+    }
+
+    #[test]
+    fn no_step_or_answer_shows_a_password() {
+        let actions = [
+            Action::Plan {
+                nodes: vec!["db1.example.org".into()],
+                hub: "192.0.2.10".into(),
+                password: "plan-secret".into(),
+                referee: None,
+            },
+            Action::Admin {
+                login: "chief".into(),
+                password: "admin-secret".into(),
+            },
+            Action::Run {
+                program: "psql".into(),
+                args: Vec::new(),
+                input: Some("ALTER ROLE r PASSWORD 'in-secret'".into()),
+                env: vec![("PASS".into(), "env-secret".into())],
+                unless: None,
+            },
+            Action::Write {
+                path: PathBuf::from("/root/.pgpass"),
+                contents: "*:*:*:r:file-secret".into(),
+                mode: 0o600,
+                owner: "root:root".into(),
+            },
+        ];
+        for action in &actions {
+            let shown = format!("{action:?}");
+            assert!(!shown.contains("secret"), "{shown}");
+        }
+        let answers = Answers {
+            password: "admin-secret".into(),
+            database: Database::Theirs(super::Remote {
+                host: "db.example.org".into(),
+                port: 5432,
+                name: "calls".into(),
+                role: "sp".into(),
+                password: "db-secret".into(),
+                ..Default::default()
+            }),
+            certificate: Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Cloudflare {
+                    token: "cf-secret".into(),
+                },
+                names: vec!["radio.example.org".into()],
+            },
+            pushes: vec![(
+                "dump".into(),
+                "https://kuma.example.org/api/push/push-secret".into(),
+            )],
+            ..answers()
+        };
+        let shown = format!("{answers:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("db.example.org"), "{shown}");
     }
 
     fn pair() -> Answers {

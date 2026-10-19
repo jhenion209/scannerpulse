@@ -40,10 +40,7 @@ async fn the_search_is_exported_newest_first_with_text_kept_as_text(pool: PgPool
         .execute(&pool)
         .await
         .unwrap();
-    let app = web::router(AppState::new(
-        pool.clone(),
-        (*pool.connect_options()).clone(),
-    ));
+    let app = web::router(AppState::new(pool.clone()));
     let response = app
         .clone()
         .oneshot(

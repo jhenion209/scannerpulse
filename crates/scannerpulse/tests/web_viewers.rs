@@ -50,7 +50,7 @@ async fn until_rows(pool: &PgPool, n: usize) {
 #[sqlx::test(migrations = "./migrations")]
 async fn an_open_page_is_a_viewer_until_it_closes(pool: PgPool) {
     admin(&pool, "ann", PASSWORD).await;
-    let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = AppState::new(pool.clone());
     state.host = "web-a".into();
     let address = serve(state.clone()).await;
     let (cookie, _) = sign_in(&common::app(&pool), "ann", PASSWORD).await;
@@ -108,7 +108,7 @@ async fn an_open_page_is_a_viewer_until_it_closes(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn a_refresh_keeps_the_open_pages_and_clears_the_rest(pool: PgPool) {
-    let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = AppState::new(pool.clone());
     state.host = "web-a".into();
     let page = viewers::Page {
         address: "192.0.2.9".into(),
@@ -161,7 +161,7 @@ async fn a_refresh_keeps_the_open_pages_and_clears_the_rest(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn a_page_whose_first_write_failed_gets_its_row_at_the_next_refresh(pool: PgPool) {
-    let mut state = AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = AppState::new(pool.clone());
     state.host = "web-a".into();
     // Every insert into viewers is refused, as a failed first write would be.
     sqlx::query(

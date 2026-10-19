@@ -198,9 +198,6 @@ impl Config {
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    /// `/healthz` opens its own connection with these, so a pool kept busy by
-    /// slow requests does not make a healthy host look down.
-    pub database: PgConnectOptions,
     /// The exact counts that may run at once on this host.
     pub exact_counts: Arc<tokio::sync::Semaphore>,
     /// The frontend's built files; `None` serves none.
@@ -238,10 +235,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, database: PgConnectOptions) -> AppState {
+    pub fn new(pool: PgPool) -> AppState {
         AppState {
             pool,
-            database,
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             traffic: Arc::new(tokio::sync::Mutex::new(None)),
@@ -412,7 +408,7 @@ pub async fn run(
             .acquire_timeout(Duration::from_secs(5)),
     );
     crate::settings::follow_syslog(pool.clone(), "scannerpulse-web");
-    let mut state = AppState::new(pool, config.database);
+    let mut state = AppState::new(pool);
     state.static_dir = config.static_dir;
     state.host = config.host;
     state.oidc_secret = config.oidc_secret;

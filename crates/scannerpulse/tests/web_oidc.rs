@@ -141,8 +141,7 @@ async fn set_up(pool: &PgPool, fake: &Fake) -> axum::Router {
             .await
             .unwrap();
     }
-    let mut state =
-        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.oidc_secret = Some(SECRET.into());
     scannerpulse::web::router(state)
 }

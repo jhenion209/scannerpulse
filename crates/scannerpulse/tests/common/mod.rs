@@ -435,10 +435,7 @@ pub async fn call(
 }
 
 pub async fn get(pool: &PgPool, uri: &str) -> (axum::http::StatusCode, serde_json::Value) {
-    let app = scannerpulse::web::router(scannerpulse::web::AppState::new(
-        pool.clone(),
-        (*pool.connect_options()).clone(),
-    ));
+    let app = scannerpulse::web::router(scannerpulse::web::AppState::new(pool.clone()));
     let response = app
         .oneshot(
             axum::http::Request::get(uri)
@@ -465,13 +462,9 @@ pub const PEER: [u8; 4] = [198, 51, 100, 7];
 
 /// The router, as a host serves it, with requests from `PEER`.
 pub fn app(pool: &PgPool) -> axum::Router {
-    scannerpulse::web::router(scannerpulse::web::AppState::new(
-        pool.clone(),
-        (*pool.connect_options()).clone(),
-    ))
-    .layer(axum::extract::connect_info::MockConnectInfo(
-        std::net::SocketAddr::from((PEER, 40_000)),
-    ))
+    scannerpulse::web::router(scannerpulse::web::AppState::new(pool.clone())).layer(
+        axum::extract::connect_info::MockConnectInfo(std::net::SocketAddr::from((PEER, 40_000))),
+    )
 }
 
 /// What the router answered: the status, the headers and the JSON body

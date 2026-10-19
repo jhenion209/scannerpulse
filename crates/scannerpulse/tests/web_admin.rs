@@ -253,8 +253,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
     let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
     scannerpulse::cert::make(&["radio-a.example.org".into()], &cert, &key).unwrap();
-    let mut state =
-        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.host = "radio-a".into();
     state.machine = scannerpulse::web::Machine {
         cert: Some(cert.clone()),
@@ -297,8 +296,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     assert!(!text.contains("http"), "no push address is shown: {text}");
     // Without a backups folder the database is not one setup installed,
     // wherever its address points.
-    let mut state =
-        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.machine = scannerpulse::web::Machine::default();
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
@@ -323,8 +321,7 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     std::fs::create_dir(&served).unwrap();
     let (c, k) = (served.join("cert.pem"), served.join("key.pem"));
     scannerpulse::cert::make(&["radio.example.org".into()], &c, &k).unwrap();
-    let mut state =
-        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.certs = Some(std::sync::Arc::new(scannerpulse::acme::Certs::new(
         std::sync::Arc::new(scannerpulse::cert::certified(&c, &k).unwrap()),
     )));

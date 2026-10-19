@@ -446,8 +446,7 @@ async fn parallel_guesses_check_at_most_five_passwords(pool: PgPool) {
     admin(&pool, "ann", PASSWORD).await;
     // A wide hashing limit, so that only the per-name lock can hold the
     // guesses back.
-    let mut state =
-        scannerpulse::web::AppState::new(pool.clone(), (*pool.connect_options()).clone());
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.sign_ins = std::sync::Arc::new(tokio::sync::Semaphore::new(100));
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
