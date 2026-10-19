@@ -74,10 +74,9 @@ async fn the_newest_release_and_its_programs_are_downloaded_and_checked() {
             "{program}"
         );
         // It runs from there once, for the schema, before it is put in place.
-        let output = std::process::Command::new(&path).output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            "scannerpulse 9.9.9"
+            scannerpulse::update::version_of(&path).as_deref(),
+            Some("9.9.9")
         );
     }
 }

@@ -276,17 +276,7 @@ pub fn install(binary: &Path, bytes: &[u8], sha256: &str, current: &str) -> Resu
             .map_err(fail)?;
         file.sync_all().map_err(fail)?;
     }
-    let version = Command::new(&new)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .strip_prefix("scannerpulse ")
-                .map(str::to_string)
-        });
+    let version = version_of(&new);
     let refused = match &version {
         None => Some("the program received does not run here: nothing was changed".to_string()),
         Some(version) if newer(version, current) => Some(format!(
@@ -303,6 +293,37 @@ pub fn install(binary: &Path, bytes: &[u8], sha256: &str, current: &str) -> Resu
         let _ = std::fs::File::open(folder).and_then(|folder| folder.sync_all());
     }
     Ok(version.unwrap_or_default())
+}
+
+/// Runs `program` with `args`, as the program just written. Linux refuses
+/// to start a file that another process still holds open for writing, and
+/// a process forked elsewhere in this one may hold the file's descriptor
+/// for an instant before it starts its own program: that refusal ("text
+/// file busy") is tried again.
+pub fn run_new(program: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut tries = 0;
+    loop {
+        match Command::new(program).args(args).output() {
+            Err(error) if error.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// The version a program gives (`scannerpulse <version>`), if it runs.
+pub fn version_of(program: &Path) -> Option<String> {
+    run_new(program, &["--version"])
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .strip_prefix("scannerpulse ")
+                .map(str::to_string)
+        })
 }
 
 /// The most `node serve update` reads of the checksums or the signature,
@@ -727,21 +748,16 @@ pub async fn run(
         let here = dir.join(program(std::env::consts::ARCH));
         // The signature covers the checksums, not the version: the program
         // must say it is the release it was downloaded as.
-        let output = Command::new(&here)
-            .arg("--version")
-            .output()
-            .map_err(|error| format!("cannot run the new program: {error}"))?;
-        let says = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if says != format!("scannerpulse {target}") {
+        let says = version_of(&here);
+        if says.as_deref() != Some(target.as_str()) {
             return Err(format!(
-                "the release {} holds a program that says {says:?}: nothing was changed",
-                release.tag
+                "the release {} holds a program that says it is {}: nothing was changed",
+                release.tag,
+                says.unwrap_or_else(|| "nothing (it does not run here)".into())
             ));
         }
         say("Bringing the database's tables up to date...");
-        let output = Command::new(&here)
-            .args(["db-update", "--quiet"])
-            .output()
+        let output = run_new(&here, &["db-update", "--quiet"])
             .map_err(|error| format!("cannot run the new program: {error}"))?;
         if !output.status.success() {
             return Err(format!(
