@@ -269,7 +269,8 @@ The admin page's **Layout** area shows the same from inside, every 15 seconds:
 ## Changes later
 
 - **A new release:** `sudo /usr/local/bin/scannerpulse update` on the first
-  machine updates every machine in turn: the referee and the database
+  machine, or "Update now" in the admin page's Updates area on either one,
+  updates every machine in turn: the referee and the database
   machines, then the second, then the first. Both ScannerPulse machines must
   answer first, and each restarts only while the other answers. The shared
   address does not move for a restart, so while the machine holding it

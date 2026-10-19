@@ -337,6 +337,17 @@ shared address restarts its web (a second or two) can a request fail.
 `update --check` only says what
 is newest and what each machine runs.
 
+The admin page's **Updates** area does the same from either ScannerPulse
+machine. It says whether a newer release exists, with its notes, and its
+"Update now" shows each step as the update runs. A root helper on the first
+ScannerPulse machine (`scannerpulse agent`, which setup starts) carries the
+update out, as the web service runs without root. It does only what an admin
+asks there, and once a day it looks for a newer release, unless the setting
+`updates.check` is `false`. The Layout area's "Switch the roles now" asks the
+same helper for a switchover. An install from before 0.9.0 that is updated
+with `scannerpulse update` needs `sudo /usr/local/bin/scannerpulse agent
+install` once on its first machine; the install line does that itself.
+
 From 0.7.0 or earlier, run the install line on each machine once instead,
 then `sudo systemctl restart scannerpulse-web scannerpulse-ingest` on each
 ScannerPulse machine. Then, on the second ScannerPulse machine, run
