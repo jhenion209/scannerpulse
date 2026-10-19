@@ -87,6 +87,20 @@ that either machine can file the recorder's calls.
 The scannerpulse account must be able to write on the share from both
 machines. Setup checks this too, and stops with a message if it cannot.
 
+**An archive already on the machine's own disk** moves to the share in three
+steps, with the site up throughout:
+1. `sudo /usr/local/bin/scannerpulse archive move /srv/shared/archive` compares
+   the two and gives the copy to run (rsync, as the scannerpulse account).
+2. Run that copy, then the first command again, until it finds nothing
+   missing.
+3. `sudo /usr/local/bin/scannerpulse archive move /srv/shared/archive --switch`
+   pauses filing (the recordings wait in their folder), copies the calls filed
+   since your copy, compares again, and points the site at the share.
+
+The old archive stays as it was until you remove it; the same command the
+other way moves back. The backups' folder (`.scannerpulse-backups`) is not
+copied: `scannerpulse backups location FOLDER` moves the backups.
+
 - **NFS:** give the scannerpulse account the same user number on both
   machines, or have the server map every user to one owner (for example
   `all_squash` with `anonuid` and `anongid`). Setup writes the mark as the
