@@ -6,10 +6,12 @@ pub mod ask;
 pub mod change;
 pub mod folders;
 pub mod join;
+pub mod keepalived;
 pub mod node;
 pub mod plan;
 pub mod referee;
 pub mod screen;
+pub mod second;
 pub mod steps;
 pub mod system;
 pub mod uninstall;
@@ -260,16 +262,25 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
                 remote.role,
                 remote.sslmode.name()
             ),
-            steps::Database::Nodes(pair) => format!(
-                "two machines of its own: {} (the primary) and {} (its standby, {}); this machine waits for them to join at {}",
-                pair.nodes[0],
-                pair.nodes[1],
-                match &pair.referee {
-                    Some(referee) => format!("promoted by itself, with {referee} as the referee"),
-                    None => "promoted by hand".into(),
+            steps::Database::Nodes(pair) =>
+                format!(
+                    "two machines of its own: {} (the primary) and {} (its standby, {}); this machine waits for them to join at {}",
+                    pair.nodes[0],
+                    pair.nodes[1],
+                    match &pair.referee {
+                        Some(referee) =>
+                            format!("promoted by itself, with {referee} as the referee"),
+                        None => "promoted by hand".into(),
+                    },
+                    pair.hub
+                ) + &match (&pair.second, &pair.shared) {
+                    (Some(second), Some(shared)) => format!(
+                        "; {second}, the second ScannerPulse machine, serves the site too, and the two share {shared}"
+                    ),
+                    (Some(second), None) =>
+                        format!("; {second}, the second ScannerPulse machine, serves the site too"),
+                    _ => String::new(),
                 },
-                pair.hub
-            ),
         },
         match steps::backups_folder(answers) {
             Some(folder) => format!(
@@ -313,7 +324,7 @@ fn addresses(answers: &Answers) -> Vec<String> {
             .map(|found| found.names)
             .unwrap_or_else(|_| answers.names.clone()),
         steps::Certificate::LetsEncrypt { names, .. } => names.clone(),
-        steps::Certificate::Own => answers.names.clone(),
+        steps::Certificate::Own => steps::own_names(answers),
     };
     names
         .iter()
@@ -373,6 +384,10 @@ fn detail(step: &Step) -> String {
                 .unwrap_or_default()
         ),
         Action::WaitForNodes => "wait until the machines of the plan have joined".into(),
+        Action::Ready => format!(
+            "mark {} ready: the second ScannerPulse machine may join",
+            plan::PLAN
+        ),
     }
 }
 

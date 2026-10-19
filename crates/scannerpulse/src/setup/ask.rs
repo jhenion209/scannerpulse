@@ -102,6 +102,28 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
                 return Err("the referee is a third machine, neither database machine".into());
             }
         }
+        if pair.shared.is_some() && pair.second.is_none() {
+            return Err("SHARED, the address the two ScannerPulse machines share, needs SECOND, the second machine".into());
+        }
+        if let Some(shared) = &pair.shared {
+            shared_address(shared)?;
+        }
+        if let Some(second) = &pair.second {
+            if !super::join::plain(second) {
+                return Err(format!(
+                    "{second:?} is not a name or an address: letters, digits, dots, dashes and colons"
+                ));
+            }
+            if matches!(
+                answers.certificate,
+                Certificate::LetsEncrypt {
+                    proof: crate::acme::Proof::Web,
+                    ..
+                }
+            ) {
+                return Err("with a second machine, Let's Encrypt proves the names through DNS (dns-cloudflare) or the certificate is installed: over the web, only the machine holding the address could answer".into());
+            }
+        }
         // By address too: a name and an address may be the same machine.
         let mut machines = vec![
             ("database machine 1", pair.nodes[0].as_str()),
@@ -109,6 +131,10 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
         ];
         if let Some(referee) = &pair.referee {
             machines.push(("the referee", referee.as_str()));
+        }
+        if let Some(second) = &pair.second {
+            machines.push(("the second ScannerPulse machine", second.as_str()));
+            machines.push(("this machine", pair.hub.as_str()));
         }
         distinct_machines(&machines, super::plan::resolve)?;
     }
@@ -466,14 +492,21 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
                 nodes,
                 hub: get("HUB").unwrap_or_else(|| default_hub(defaults)),
                 referee,
+                second: get("SECOND").map(|s| s.to_ascii_lowercase()),
+                shared: get("SHARED"),
             })
         }
         Some(other) => return Err(format!("DATABASE is {other:?}: here, theirs or nodes")),
     };
     if !matches!(database, Database::Nodes(_))
-        && (get("FAILOVER").is_some() || get("REFEREE").is_some())
+        && ["FAILOVER", "REFEREE", "SECOND", "SHARED"]
+            .iter()
+            .any(|name| get(name).is_some())
     {
-        return Err("FAILOVER and REFEREE go with two database machines (DATABASE=nodes)".into());
+        return Err(
+            "FAILOVER, REFEREE, SECOND and SHARED go with two database machines (DATABASE=nodes)"
+                .into(),
+        );
     }
     let certificate = match (get("CERT_FILE"), get("KEY_FILE"), get("LETSENCRYPT")) {
         (Some(cert), Some(key), None) => Certificate::Installed {
@@ -638,7 +671,16 @@ pub fn interactive(
                 say(
                     "Advanced 2 of 4. Web access. ScannerPulse serves HTTPS only. Its certificate is one setup makes for this machine (the browser warns once), one you have (a PEM certificate and its key), or Let's Encrypt's, which the site gets and renews itself: proved over the web when port 443 reaches this machine from the internet under the site's name, or through DNS when the name's zone is at Cloudflare (an API token with Zone, DNS, Edit on it). If a reverse proxy sits in front of the site, give its addresses, so the visitors' own addresses are read from it.",
                 );
-                certificate = ask_certificate(previous.map(|a| &a.certificate))?;
+                certificate = ask_certificate(
+                    previous.map(|a| &a.certificate),
+                    matches!(
+                        &database,
+                        Database::Nodes(Pair {
+                            second: Some(_),
+                            ..
+                        })
+                    ),
+                )?;
                 proxies = ask_proxies(previous.map(|a| a.proxies.as_slice()))?;
                 say(
                     "Advanced 3 of 4. Logs go to the journal (journalctl -u scannerpulse-web). They can also go to a syslog server, as RFC 5424 over UDP or TCP.",
@@ -893,10 +935,53 @@ fn ask_database(
             Some(&had.map_or_else(|| default_hub(defaults), |p| p.hub.clone())),
             named,
         )?;
+        println!(
+            "A second ScannerPulse machine serves the same site when this one is down. \
+             It mounts this machine's archive share at the same path, and the two can share one address."
+        );
+        let (web2, shared) = if Confirm::new("Add a second ScannerPulse machine?")
+            .with_default(had.is_some_and(|p| p.second.is_some()))
+            .prompt()?
+        {
+            let taken: Vec<String> = [&first, &second, &hub]
+                .into_iter()
+                .chain(referee.as_ref())
+                .map(|n| n.to_ascii_lowercase())
+                .collect();
+            let web2 = text(
+                "The second ScannerPulse machine (name or address):",
+                had.and_then(|p| p.second.as_deref()),
+                move |n| {
+                    named(n)?;
+                    if taken.contains(&n.to_ascii_lowercase()) {
+                        Err("a machine of its own".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )?
+            .to_ascii_lowercase();
+            let shared = text(
+                "The address the two share, as address/prefix such as 192.0.2.50/24 (empty for none):",
+                had.and_then(|p| p.shared.as_deref()),
+                |s| {
+                    if s.is_empty() {
+                        Ok(())
+                    } else {
+                        shared_address(s)
+                    }
+                },
+            )?;
+            (Some(web2), (!shared.is_empty()).then_some(shared))
+        } else {
+            (None, None)
+        };
         return Ok(Database::Nodes(Pair {
             nodes: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
             hub,
             referee,
+            second: web2,
+            shared,
         }));
     }
     let host = text(
@@ -1008,7 +1093,12 @@ fn ask_database(
     }))
 }
 
-fn ask_certificate(previous: Option<&Certificate>) -> Result<Certificate, inquire::InquireError> {
+/// With a second machine, `paired`, Let's Encrypt is not proved over the
+/// web: only the machine holding the address could answer.
+fn ask_certificate(
+    previous: Option<&Certificate>,
+    paired: bool,
+) -> Result<Certificate, inquire::InquireError> {
     const OWN: &str = "Made by setup";
     const MINE: &str = "One I have";
     const WEB: &str =
@@ -1020,16 +1110,20 @@ fn ask_certificate(previous: Option<&Certificate>) -> Result<Certificate, inquir
         }
         _ => None,
     };
-    let choices = vec![OWN, MINE, WEB, DNS];
-    let start = match previous {
-        Some(Certificate::Installed { .. }) => 1,
+    let choices: Vec<&str> = [OWN, MINE, WEB, DNS]
+        .into_iter()
+        .filter(|c| !(paired && *c == WEB))
+        .collect();
+    let had_choice = match previous {
+        Some(Certificate::Installed { .. }) => MINE,
         Some(Certificate::LetsEncrypt {
             proof: crate::acme::Proof::Web,
             ..
-        }) => 2,
-        Some(Certificate::LetsEncrypt { .. }) => 3,
-        _ => 0,
+        }) => WEB,
+        Some(Certificate::LetsEncrypt { .. }) => DNS,
+        _ => OWN,
     };
+    let start = choices.iter().position(|c| *c == had_choice).unwrap_or(0);
     let chosen = Select::new("Certificate:", choices)
         .with_starting_cursor(start)
         .prompt()?;
@@ -1268,6 +1362,18 @@ pub fn default_hub(defaults: &Defaults) -> String {
         .unwrap_or_else(|| defaults.host.clone())
 }
 
+/// An address with its prefix length, as the shared address is given.
+fn shared_address(shared: &str) -> Result<(), String> {
+    let bad = || format!("SHARED is {shared:?}: an address/prefix, such as 192.0.2.50/24");
+    let (address, prefix) = shared.split_once('/').ok_or_else(bad)?;
+    let address: std::net::IpAddr = address.parse().map_err(|_| bad())?;
+    let most = if address.is_ipv4() { 32 } else { 128 };
+    match prefix.parse::<u8>() {
+        Ok(p) if p <= most => Ok(()),
+        _ => Err(bad()),
+    }
+}
+
 /// The machines of a plan are each a machine of their own, by name or by
 /// the addresses their names give.
 fn distinct_machines(
@@ -1495,6 +1601,8 @@ mod tests {
                 nodes: ["db1.example.org".into(), "2001:db8::22".into()],
                 hub: "192.0.2.10".into(),
                 referee: None,
+                second: None,
+                shared: None,
             })
         );
         // Promoted by itself: a referee, the third machine.
@@ -1504,6 +1612,16 @@ mod tests {
             panic!()
         };
         assert_eq!(pair.referee.as_deref(), Some("ref.example.org"));
+        // A second ScannerPulse machine, and the address the two share.
+        let pair2 = format!("{nodes}SECOND=Web2.example.org\nSHARED=192.0.2.50/24\n");
+        let answers = from_file(&answers_file(dir.path(), &pair2, 0o600), &defaults()).unwrap();
+        let Database::Nodes(pair) = answers.database else {
+            panic!()
+        };
+        assert_eq!(
+            (pair.second.as_deref(), pair.shared.as_deref()),
+            (Some("web2.example.org"), Some("192.0.2.50/24"))
+        );
         let lets_encrypt = format!(
             "{base}LETSENCRYPT=dns-cloudflare\nLETSENCRYPT_NAMES=\"Radio.example.org www.example.org\"\nCLOUDFLARE_TOKEN=cf-token-1\n"
         );
@@ -1587,6 +1705,27 @@ mod tests {
         );
         refused(
             "DATABASE=here\nREFEREE=ref.example.org\n",
+            "two database machines",
+        );
+        let nodes2 = "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\n";
+        refused(&format!("{nodes2}SHARED=192.0.2.50/24\n"), "SECOND");
+        refused(
+            &format!("{nodes2}SECOND=web2.example.org\nSHARED=192.0.2.50\n"),
+            "address/prefix",
+        );
+        refused(
+            &format!("{nodes2}SECOND=web2.example.org\nSHARED=nowhere/24\n"),
+            "address/prefix",
+        );
+        refused(&format!("{nodes2}SECOND=db2.example.org\n"), "same machine");
+        refused(
+            &format!(
+                "{nodes2}SECOND=web2.example.org\nLETSENCRYPT=web\nLETSENCRYPT_NAMES=radio.example.org\n"
+            ),
+            "dns-cloudflare",
+        );
+        refused(
+            "DATABASE=here\nSECOND=web2.example.org\n",
             "two database machines",
         );
         // The same machine by name and by address.

@@ -76,7 +76,33 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 hub,
                 password,
                 referee,
-            } => write_plan(nodes, hub, password, referee.as_deref()).map_err(fail)?,
+                second,
+                shared,
+                archive,
+                recordings,
+            } => write_plan(super::plan::Plan {
+                hub: hub.clone(),
+                hub_key: String::new(),
+                nodes: nodes.clone(),
+                database: super::steps::DATABASE.into(),
+                role: super::steps::ACCOUNT.into(),
+                password: password.clone(),
+                replication_password: String::new(),
+                referee: referee.clone(),
+                monitor_password: String::new(),
+                second: second.clone(),
+                shared: shared.clone(),
+                install_id: String::new(),
+                archive: archive.display().to_string(),
+                recordings: recordings.display().to_string(),
+                ready: false,
+                joined: Vec::new(),
+            })
+            .map_err(fail)?,
+            Action::Ready => super::plan::Plan::update(Path::new(super::plan::PLAN), |plan| {
+                plan.ready = true;
+            })
+            .map_err(fail)?,
             Action::WaitForNodes => wait_for_nodes(context).await.map_err(fail)?,
         }
     }
@@ -202,22 +228,21 @@ pub async fn first_admin(
 /// Writes the plan of the database machines with this machine's public
 /// key. A plan for the same machines keeps who has joined and the
 /// replication role's password, so setup can run again.
-fn write_plan(
-    nodes: &[String],
-    hub: &str,
-    password: &str,
-    referee: Option<&str>,
-) -> Result<(), String> {
+fn write_plan(mut fresh: super::plan::Plan) -> Result<(), String> {
     use super::plan::{PLAN, Plan, SSH};
     let key_path = format!("{SSH}/id_ed25519.pub");
-    let hub_key = std::fs::read_to_string(&key_path)
+    fresh.hub_key = std::fs::read_to_string(&key_path)
         .map_err(|error| format!("{key_path}: {error}"))?
         .trim()
         .to_string();
     // A machine joining meanwhile waits for the plan's lock.
     Plan::replace(Path::new(PLAN), |kept| {
-        may_replan(kept.as_ref(), nodes, referee)?;
-        Ok(next_plan(kept, nodes, hub, &hub_key, password, referee))
+        may_replan(kept.as_ref(), &fresh.nodes, fresh.referee.as_deref())?;
+        let plan = next_plan(kept, fresh);
+        if plan.second.is_some() {
+            mark_archive(&plan)?;
+        }
+        Ok(plan)
     })
 }
 
@@ -248,36 +273,75 @@ pub(super) fn may_replan(
     }
 }
 
-/// The plan for `nodes` and `referee`, from the one `kept`: the machines'
-/// passwords, and who has joined, stay while the machines and the referee
-/// do; otherwise they are made anew.
+/// The install's mark in the archive, which the second machine reads to
+/// know it reaches the same share; written as the service account, which a
+/// network share lets write where root may not.
+fn mark_archive(plan: &super::plan::Plan) -> Result<(), String> {
+    let mark = Path::new(&plan.archive).join(super::second::MARK);
+    let output = std::process::Command::new("runuser")
+        .args([
+            "-u",
+            super::steps::ACCOUNT,
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$1\" > \"$2\"",
+            "mark",
+        ])
+        .arg(&plan.install_id)
+        .arg(&mark)
+        .output()
+        .map_err(|error| format!("cannot run runuser: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot write {}: {}",
+            mark.display(),
+            said(&output)
+        ))
+    }
+}
+
+/// The plan made again from `fresh` (this run's answers), keeping from the
+/// plan `kept` what the machines already hold: while the database machines
+/// and the referee stay, their passwords and who has joined; the install's
+/// mark always. A second machine added or changed sends the database
+/// machines back to join again, since their access rules must let it in.
 pub(super) fn next_plan(
     kept: Option<super::plan::Plan>,
-    nodes: &[String],
-    hub: &str,
-    hub_key: &str,
-    password: &str,
-    referee: Option<&str>,
+    fresh: super::plan::Plan,
 ) -> super::plan::Plan {
-    let kept = kept.filter(|old| old.nodes == nodes && old.referee.as_deref() == referee);
+    let install_id = kept
+        .as_ref()
+        .map(|old| old.install_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| crate::sessions::random_hex(8));
+    let same = kept.filter(|old| old.nodes == fresh.nodes && old.referee == fresh.referee);
+    let joined = match &same {
+        Some(old) if old.second == fresh.second => old.joined.clone(),
+        Some(old) => old
+            .joined
+            .iter()
+            .filter(|m| !fresh.nodes.contains(m))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
     super::plan::Plan {
-        hub: hub.to_string(),
-        hub_key: hub_key.to_string(),
-        nodes: nodes.to_vec(),
-        database: super::steps::DATABASE.into(),
-        role: super::steps::ACCOUNT.into(),
-        password: password.to_string(),
-        replication_password: kept
+        replication_password: same
             .as_ref()
             .map(|old| old.replication_password.clone())
             .unwrap_or_else(|| crate::sessions::random_hex(24)),
-        referee: referee.map(str::to_string),
-        monitor_password: match (&kept, referee) {
+        monitor_password: match (&same, &fresh.referee) {
             (Some(old), _) => old.monitor_password.clone(),
             (None, Some(_)) => crate::sessions::random_hex(24),
             (None, None) => String::new(),
         },
-        joined: kept.map(|old| old.joined).unwrap_or_default(),
+        install_id,
+        ready: false,
+        joined,
+        ..fresh
     }
 }
 
@@ -372,16 +436,67 @@ mod tests {
         vec!["db1.example.org".into(), "192.0.2.22".into()]
     }
 
+    /// The plan made from these answers over `kept`.
+    fn make(
+        kept: Option<Plan>,
+        nodes: &[String],
+        hub: &str,
+        referee: Option<&str>,
+        second: Option<&str>,
+    ) -> Plan {
+        super::next_plan(
+            kept,
+            Plan {
+                hub: hub.into(),
+                hub_key: "key".into(),
+                nodes: nodes.to_vec(),
+                database: "scannerpulse".into(),
+                role: "scannerpulse".into(),
+                password: "app".into(),
+                replication_password: String::new(),
+                referee: referee.map(String::from),
+                monitor_password: String::new(),
+                second: second.map(String::from),
+                shared: None,
+                install_id: String::new(),
+                archive: "/srv/archive".into(),
+                recordings: "/srv/recordings".into(),
+                ready: true,
+                joined: Vec::new(),
+            },
+        )
+    }
+
     #[test]
-    fn the_referee_is_not_changed_once_the_machines_have_joined() {
-        let mut kept = super::next_plan(
-            None,
+    fn a_second_machine_added_sends_the_database_machines_to_join_again() {
+        let mut kept = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
+        assert_eq!(kept.install_id.len(), 16);
+        assert!(!kept.ready);
+        for machine in ["ref.example.org", "db1.example.org", "192.0.2.22"] {
+            kept.mark_joined(machine);
+        }
+        let again = make(
+            Some(kept.clone()),
             &nodes(),
             "192.0.2.10",
-            "key",
-            "app",
             Some("ref.example.org"),
+            Some("web2.example.org"),
         );
+        // Their access rules must let the second in: they join again; the
+        // referee stays joined, and so does the install's mark.
+        assert_eq!(again.joined, ["ref.example.org"]);
+        assert_eq!(again.install_id, kept.install_id);
+        assert_eq!(again.replication_password, kept.replication_password);
+        assert_eq!(again.second.as_deref(), Some("web2.example.org"));
+        assert!(
+            !again.ready,
+            "the first machine is ready only at the end of its setup"
+        );
+    }
+
+    #[test]
+    fn the_referee_is_not_changed_once_the_machines_have_joined() {
+        let mut kept = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
         // Nothing has joined yet: any referee, or none.
         assert_eq!(
             super::may_replan(Some(&kept), &nodes(), Some("ref2.example.org")),
@@ -398,7 +513,7 @@ mod tests {
             assert!(error.contains("have joined"), "{error}");
         }
         // Promoted by hand, joined: no referee now either.
-        let mut by_hand = super::next_plan(None, &nodes(), "192.0.2.10", "key", "app", None);
+        let mut by_hand = make(None, &nodes(), "192.0.2.10", None, None);
         by_hand.mark_joined("db1.example.org");
         assert!(super::may_replan(Some(&by_hand), &nodes(), Some("ref.example.org")).is_err());
         // Other machines are a new install.
@@ -409,27 +524,19 @@ mod tests {
 
     #[test]
     fn a_plan_made_again_keeps_what_its_machines_hold() {
-        let first = super::next_plan(
-            None,
-            &nodes(),
-            "192.0.2.10",
-            "key",
-            "app",
-            Some("ref.example.org"),
-        );
+        let first = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
         assert_eq!(first.replication_password.len(), 48);
         assert_eq!(first.monitor_password.len(), 48);
         let mut kept = first.clone();
         kept.mark_joined("ref.example.org");
         // The same machines and referee: the passwords they hold, and who
         // has joined, stay.
-        let again = super::next_plan(
+        let again = make(
             Some(kept.clone()),
             &nodes(),
             "192.0.2.11",
-            "key",
-            "app",
             Some("ref.example.org"),
+            None,
         );
         assert_eq!(again.replication_password, first.replication_password);
         assert_eq!(again.monitor_password, first.monitor_password);
@@ -443,32 +550,18 @@ mod tests {
                 Some("ref.example.org"),
             ),
         ] {
-            let other = super::next_plan(
-                Some(kept.clone()),
-                &machines,
-                "192.0.2.10",
-                "key",
-                "app",
-                referee,
-            );
+            let other = make(Some(kept.clone()), &machines, "192.0.2.10", referee, None);
             assert_ne!(other.replication_password, first.replication_password);
             assert!(other.joined.is_empty());
         }
         // By hand: no referee's password.
-        let by_hand = super::next_plan(None, &nodes(), "192.0.2.10", "key", "app", None);
+        let by_hand = make(None, &nodes(), "192.0.2.10", None, None);
         assert_eq!(by_hand.monitor_password, "");
     }
 
     #[test]
     fn the_waiting_line_names_who_is_awaited_and_the_next_to_join() {
-        let mut plan: Plan = super::next_plan(
-            None,
-            &nodes(),
-            "192.0.2.10",
-            "key",
-            "app",
-            Some("ref.example.org"),
-        );
+        let mut plan: Plan = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
         let line = super::waiting_line(&plan);
         assert!(
             line.contains("waiting for: ref.example.org, db1.example.org, 192.0.2.22"),

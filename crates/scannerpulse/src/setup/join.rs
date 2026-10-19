@@ -14,6 +14,9 @@ use super::plan::{PLAN, Place, Plan, SSH, resolve};
 pub struct Joining {
     pub place: Place,
     pub plan: Plan,
+    /// For the second ScannerPulse machine, the first machine's files.
+    #[serde(default)]
+    pub files: Option<super::second::HubFiles>,
 }
 
 /// A host name or an address, nothing a shell would read more into.
@@ -50,7 +53,11 @@ pub fn info_from(
                 .join(", ")
         )
     })?;
-    serde_json::to_string(&Joining { place, plan }).map_err(|error| error.to_string())
+    let files = match place {
+        Place::Second => Some(super::second::HubFiles::read()?),
+        _ => None,
+    };
+    serde_json::to_string(&Joining { place, plan, files }).map_err(|error| error.to_string())
 }
 
 /// The hub's known_hosts, `kept`, with `node`'s lines replaced by `lines`.
@@ -88,7 +95,13 @@ pub fn done(node: &str, host_keys: &str) -> Result<String, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let plan = Plan::read(Path::new(PLAN))?;
-    if !plan.nodes.iter().chain(&plan.referee).any(|n| n == node) {
+    if !plan
+        .nodes
+        .iter()
+        .chain(&plan.referee)
+        .chain(&plan.second)
+        .any(|n| n == node)
+    {
         return Err(format!("{node} is not one of the install's machines"));
     }
     let lines = known_lines(node, host_keys);
@@ -265,10 +278,18 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         joining = hub.info(&names)?;
     }
-    let Joining { place, plan } = joining;
-    let hub_ips = resolve(&plan.hub);
+    let Joining { place, plan, files } = joining;
+    // The ScannerPulse machines: the database's access rules let both in.
+    let mut hub_ips = resolve(&plan.hub);
     if hub_ips.is_empty() {
         return Err(format!("{} does not resolve to an address here", plan.hub));
+    }
+    if let Some(second) = &plan.second {
+        let found = resolve(second);
+        if found.is_empty() {
+            return Err(format!("{second} does not resolve to an address here"));
+        }
+        hub_ips.extend(found);
     }
     let mut node_ips = Vec::new();
     for node in plan.nodes.iter().chain(&plan.referee) {
@@ -284,9 +305,21 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
     // Another PostgreSQL here would take port 5432 from the one setup makes.
-    super::system::other_postgres_joining(&system.seen())?;
+    if place != Place::Second {
+        super::system::other_postgres_joining(&system.seen())?;
+    }
     let binary = Path::new(super::BINARY);
     let (steps, what) = match place {
+        Place::Second => (
+            super::second::steps(
+                &plan,
+                files.as_ref().ok_or("the first machine sent no settings")?,
+                &system,
+                binary,
+                plan.name(place),
+            )?,
+            "the second ScannerPulse machine".to_string(),
+        ),
         Place::Referee => (
             super::referee::steps(&plan, &system, binary, &hub_ips, &node_ips),
             "the referee, which decides which database machine is the primary".to_string(),
@@ -425,6 +458,12 @@ mod tests {
             replication_password: "copy-secret-2".into(),
             referee: Some("ref.example.org".into()),
             monitor_password: "referee-secret-3".into(),
+            second: None,
+            shared: None,
+            install_id: String::new(),
+            archive: String::new(),
+            recordings: String::new(),
+            ready: false,
             joined: Vec::new(),
         };
         plan.write(&path).unwrap();

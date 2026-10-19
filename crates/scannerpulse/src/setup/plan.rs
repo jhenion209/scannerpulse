@@ -31,6 +31,25 @@ pub struct Plan {
     /// The password the database machines reach the referee with.
     #[serde(default)]
     pub monitor_password: String,
+    /// The second ScannerPulse machine, which joins last.
+    #[serde(default)]
+    pub second: Option<String>,
+    /// The address the two ScannerPulse machines share (address/prefix).
+    #[serde(default)]
+    pub shared: Option<String>,
+    /// The install's mark, which the first machine leaves in the archive for
+    /// the second to find.
+    #[serde(default)]
+    pub install_id: String,
+    /// The archive and the recordings folder, which both ScannerPulse
+    /// machines reach at the same paths.
+    #[serde(default)]
+    pub archive: String,
+    #[serde(default)]
+    pub recordings: String,
+    /// The first machine has finished its setup: the second may join.
+    #[serde(default)]
+    pub ready: bool,
     /// The machines that have joined.
     #[serde(default)]
     pub joined: Vec<String>,
@@ -43,6 +62,8 @@ pub enum Place {
     /// Database machine N (0 starts as the primary).
     Node(usize),
     Referee,
+    /// The second ScannerPulse machine.
+    Second,
 }
 
 /// Never a password.
@@ -52,6 +73,8 @@ impl std::fmt::Debug for Plan {
             .field("hub", &self.hub)
             .field("nodes", &self.nodes)
             .field("referee", &self.referee)
+            .field("second", &self.second)
+            .field("shared", &self.shared)
             .field("joined", &self.joined)
             .finish_non_exhaustive()
     }
@@ -142,10 +165,13 @@ impl Plan {
         if let Some(i) = self.nodes.iter().position(is) {
             return Some(Place::Node(i));
         }
-        self.referee
+        if self.referee.as_ref().is_some_and(is) {
+            return Some(Place::Referee);
+        }
+        self.second
             .as_ref()
-            .filter(|r| is(r))
-            .map(|_| Place::Referee)
+            .filter(|s| is(s))
+            .map(|_| Place::Second)
     }
 
     /// The machine at `place`.
@@ -153,6 +179,7 @@ impl Plan {
         match place {
             Place::Node(i) => &self.nodes[i],
             Place::Referee => self.referee.as_deref().unwrap_or_default(),
+            Place::Second => self.second.as_deref().unwrap_or_default(),
         }
     }
 
@@ -166,6 +193,14 @@ impl Plan {
     /// The first machine that joins before the one at `place` and has not
     /// yet: the referee comes first, then database machine 1, then 2.
     pub fn awaited_before(&self, place: Place) -> Option<&str> {
+        if place == Place::Second {
+            // The second joins last, once the first machine has finished.
+            return self
+                .waiting()
+                .first()
+                .copied()
+                .or((!self.ready).then_some(self.hub.as_str()));
+        }
         let mine = self.name(place);
         self.referee
             .iter()
@@ -227,6 +262,12 @@ mod tests {
             replication_password: "copy-secret-2".into(),
             referee: None,
             monitor_password: String::new(),
+            second: None,
+            shared: None,
+            install_id: String::new(),
+            archive: String::new(),
+            recordings: String::new(),
+            ready: false,
             joined: Vec::new(),
         }
     }
@@ -302,6 +343,36 @@ mod tests {
         );
         plan.mark_joined("ref.example.org");
         assert_eq!(plan.waiting(), ["db1.example.org", "192.0.2.22"]);
+    }
+
+    #[test]
+    fn the_second_scannerpulse_machine_joins_last() {
+        let none = |_: &str| Vec::<IpAddr>::new();
+        let mut plan = Plan {
+            second: Some("web2.example.org".into()),
+            ..refereed()
+        };
+        assert_eq!(
+            plan.place(&["WEB2.example.org".into()], none),
+            Some(Place::Second)
+        );
+        // The hub does not wait for the second: the second waits for the
+        // others, then for the hub to finish.
+        assert_eq!(
+            plan.waiting(),
+            ["ref.example.org", "db1.example.org", "192.0.2.22"]
+        );
+        assert_eq!(plan.awaited_before(Place::Second), Some("ref.example.org"));
+        for machine in ["ref.example.org", "db1.example.org", "192.0.2.22"] {
+            plan.mark_joined(machine);
+        }
+        assert_eq!(plan.awaited_before(Place::Second), Some("192.0.2.10"));
+        plan.ready = true;
+        assert_eq!(plan.awaited_before(Place::Second), None);
+        // A plan from before reads as one without a second.
+        let old = r#"{"hub":"h","hub_key":"k","nodes":["a","b"],"database":"d","role":"r","password":"p","replication_password":"q"}"#;
+        let old: Plan = serde_json::from_str(old).unwrap();
+        assert_eq!((old.second, old.ready), (None, false));
     }
 
     #[test]

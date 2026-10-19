@@ -51,6 +51,11 @@ pub struct Found {
     pub node: bool,
     /// This is the referee (the monitor's data is here).
     pub referee: bool,
+    /// This is the second ScannerPulse machine: the archive holds the first
+    /// machine's mark, and the plan is not here.
+    pub second: bool,
+    /// keepalived's settings are setup's: this machine shares an address.
+    pub keepalived: bool,
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -81,6 +86,9 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
     if (found.node || found.referee) && (remove.database || remove.backups || remove.archive) {
         return Err("this machine's PostgreSQL and its data stay: remove them with the system's package tool".into());
     }
+    if found.second && (remove.database || remove.backups || remove.archive) {
+        return Err("this is the second ScannerPulse machine: the archive, the database and the backups are the first ScannerPulse machine's; remove them there".into());
+    }
     // Setup writes the backups' folder only for a database it installed;
     // any other, even at localhost, is the person's.
     if remove.database && found.backups.is_none() {
@@ -101,6 +109,9 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         return Err("the settings file does not say where the backups are".into());
     }
     let mut steps = Vec::new();
+    if found.keepalived {
+        steps.extend(super::keepalived::undo_steps());
+    }
     let has = |unit: &str| found.units.iter().any(|u| u == unit);
     let running: Vec<&str> = UNITS[..3].iter().copied().filter(|u| has(u)).collect();
     if !running.is_empty() {
@@ -161,7 +172,9 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             ),
         ));
     }
-    if found.account {
+    // On the second machine the folders are the first machine's: an entry
+    // for this account's number there may be the first machine's account.
+    if found.account && !found.second {
         let mut folders: Vec<&Path> = found.recordings.iter().map(PathBuf::as_path).collect();
         if !remove.archive {
             folders.extend(found.archive.as_deref());
@@ -387,6 +400,10 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         .filter(|folder| !folder.exists())
         .cloned()
         .collect();
+    let second = !Path::new(super::plan::PLAN).exists()
+        && archive
+            .as_ref()
+            .is_some_and(|a| a.join(super::second::MARK).exists());
     let found = Found {
         units: UNITS
             .iter()
@@ -410,6 +427,9 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             .and_then(|listen| listen.parse::<std::net::SocketAddr>().ok())
             .map(|listen| listen.port()),
         gone,
+        second,
+        keepalived: std::fs::read_to_string(super::keepalived::CONF)
+            .is_ok_and(|text| super::keepalived::ours(&text)),
     };
     let steps = steps(&found, remove, &system)?;
     println!("\nUninstall will:");
@@ -515,7 +535,66 @@ mod tests {
             gone: vec![],
             node: false,
             referee: false,
+            second: false,
+            keepalived: false,
         }
+    }
+
+    #[test]
+    fn the_second_machine_leaves_the_shared_archive_and_gives_up_the_shared_address_first() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let second = Found {
+            second: true,
+            keepalived: true,
+            backups: None,
+            ..found()
+        };
+        for remove in [
+            Remove {
+                archive: true,
+                ..Default::default()
+            },
+            Remove {
+                backups: true,
+                ..Default::default()
+            },
+            Remove {
+                database: true,
+                ..Default::default()
+            },
+        ] {
+            let error = steps(&second, remove, &system).unwrap_err();
+            assert!(error.contains("first ScannerPulse machine"), "{error}");
+        }
+        let all: Vec<String> = steps(&second, Remove::default(), &system)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        // The address moves to the other machine before the site stops.
+        assert_eq!(
+            all[0],
+            "Stop keepalived: the shared address moves to the other machine"
+        );
+        assert!(
+            all.iter()
+                .any(|t| t == "Remove keepalived's settings and its firewall rule"),
+            "{all:?}"
+        );
+        // The folders are the first machine's: an entry for the account's
+        // number there may be the first machine's account too.
+        assert!(!all.iter().any(|t| t.contains("access off")), "{all:?}");
+        // Setup's keepalived only: none here, no keepalived steps.
+        let plain: Vec<String> = steps(&found(), Remove::default(), &system)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert!(!plain.iter().any(|t| t.contains("keepalived")), "{plain:?}");
+        assert!(crate::setup::keepalived::ours(
+            &crate::setup::keepalived::conf("192.0.2.50/24", true, 7, 443)
+        ));
+        assert!(!crate::setup::keepalived::ours("global_defs {\n}\n"));
     }
 
     #[test]

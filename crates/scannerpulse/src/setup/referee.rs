@@ -134,6 +134,12 @@ mod tests {
             replication_password: "copy-secret-2".into(),
             referee: Some("ref.example.org".into()),
             monitor_password: "referee-secret-3".into(),
+            second: None,
+            shared: None,
+            install_id: String::new(),
+            archive: String::new(),
+            recordings: String::new(),
+            ready: false,
             joined: Vec::new(),
         }
     }

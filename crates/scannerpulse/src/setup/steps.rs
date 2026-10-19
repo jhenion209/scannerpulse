@@ -74,6 +74,9 @@ pub struct Pair {
     /// The referee, which promotes the standby by itself; none when the
     /// standby is promoted by hand.
     pub referee: Option<String>,
+    /// The second ScannerPulse machine, and the address the two share.
+    pub second: Option<String>,
+    pub shared: Option<String>,
 }
 
 impl Pair {
@@ -254,7 +257,13 @@ pub enum Action {
         hub: String,
         password: String,
         referee: Option<String>,
+        second: Option<String>,
+        shared: Option<String>,
+        archive: PathBuf,
+        recordings: PathBuf,
     },
+    /// The first machine has finished: the second may join.
+    Ready,
     /// Waits until both database machines have joined and one is the
     /// primary.
     WaitForNodes,
@@ -306,13 +315,18 @@ impl std::fmt::Debug for Action {
                 nodes,
                 hub,
                 referee,
+                second,
+                shared,
                 ..
             } => f
                 .debug_struct("Plan")
                 .field("nodes", nodes)
                 .field("hub", hub)
                 .field("referee", referee)
+                .field("second", second)
+                .field("shared", shared)
                 .finish_non_exhaustive(),
+            Action::Ready => f.write_str("Ready"),
             Action::WaitForNodes => f.write_str("WaitForNodes"),
         }
     }
@@ -597,6 +611,23 @@ fn reach(account: &str) -> String {
     )
 }
 
+/// The names the certificate setup makes covers: this machine's, and with a
+/// second machine, which serves the same certificate, the shared address and
+/// the second's name.
+pub fn own_names(answers: &Answers) -> Vec<String> {
+    let mut names = answers.names.clone();
+    if let Database::Nodes(pair) = &answers.database {
+        let shared = pair.shared.as_deref().and_then(|s| s.split('/').next());
+        names.extend(
+            shared
+                .into_iter()
+                .chain(pair.second.as_deref())
+                .map(String::from),
+        );
+    }
+    names
+}
+
 /// `setfacl` with `args`, except that a filesystem without POSIX ACLs, as
 /// an NFSv4 or CIFS share, is let through: its own permissions decide, and
 /// setup's reach check proves them. Any other error still stops.
@@ -633,6 +664,17 @@ pub(super) fn database_sql(password: &str) -> String {
 /// program; `db_password` is the database role's new password.
 pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &str) -> Vec<Step> {
     let mut steps = Vec::new();
+    if let Database::Nodes(Pair {
+        second: Some(_), ..
+    }) = &answers.database
+    {
+        steps.push(super::node::script(
+            "Check that the archive is a network share, for the second machine",
+            super::second::SHARE_CHECK,
+            &[("ARCHIVE", &answers.archive.display().to_string())],
+            None,
+        ));
+    }
     let here = answers.database == Database::Here;
     match system.family {
         // A database the person runs: only the tool for folders' access lists.
@@ -840,7 +882,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 "--key".into(),
                 key_path().display().to_string(),
             ];
-            cert_args.extend(answers.names.iter().cloned());
+            cert_args.extend(own_names(answers));
             steps.push(Step {
                 title: "Make this machine's certificate".into(),
                 action: Action::Run {
@@ -921,6 +963,10 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 hub: pair.hub.clone(),
                 password: db_password.to_string(),
                 referee: pair.referee.clone(),
+                second: pair.second.clone(),
+                shared: pair.shared.clone(),
+                archive: answers.archive.clone(),
+                recordings: answers.recordings.clone(),
             },
         });
         steps.push(Step {
@@ -1012,6 +1058,29 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         backups.is_some(),
         answers.port,
     ));
+    // The second ScannerPulse machine joins once this one has finished.
+    if let Database::Nodes(Pair {
+        second: Some(second),
+        shared,
+        hub,
+        ..
+    }) = &answers.database
+    {
+        if let Some(shared) = shared {
+            steps.extend(super::keepalived::steps(
+                system,
+                shared,
+                second,
+                true,
+                super::keepalived::router_id(hub, second),
+                answers.port,
+            ));
+        }
+        steps.push(Step {
+            title: "Let the second ScannerPulse machine join".into(),
+            action: Action::Ready,
+        });
+    }
     steps
 }
 
@@ -1279,7 +1348,7 @@ pub(super) fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path,
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Answers, Certificate, Database, Transcription, backup_units, env_pairs,
+        Action, Answers, Certificate, Database, Transcription, backup_units, env_pairs, own_names,
         pgbackrest_conf, reach, steps, unit,
     };
     use crate::setup::system::detect;
@@ -1884,6 +1953,10 @@ mod tests {
                 hub: "192.0.2.10".into(),
                 password: "plan-secret".into(),
                 referee: None,
+                second: None,
+                shared: None,
+                archive: PathBuf::from("/srv/archive"),
+                recordings: PathBuf::from("/srv/recordings"),
             },
             Action::Admin {
                 login: "chief".into(),
@@ -1941,9 +2014,69 @@ mod tests {
                 nodes: ["db1.example.org".into(), "2001:db8::22".into()],
                 hub: "192.0.2.10".into(),
                 referee: None,
+                second: None,
+                shared: None,
             }),
             ..answers()
         }
+    }
+
+    #[test]
+    fn with_a_second_machine_this_one_marks_the_archive_shares_the_address_and_lets_it_join() {
+        let mut answers = pair();
+        if let Database::Nodes(p) = &mut answers.database {
+            p.second = Some("web2.example.org".into());
+            p.shared = Some("192.0.2.50/24".into());
+        }
+        let all = steps(
+            &answers,
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/b"),
+            "db secret",
+        );
+        let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
+        let at = |title: &str| {
+            titles
+                .iter()
+                .position(|t| *t == title)
+                .unwrap_or_else(|| panic!("{title}: {titles:?}"))
+        };
+        // The archive must be a network share both machines mount: checked
+        // before anything is changed.
+        assert_eq!(
+            at("Check that the archive is a network share, for the second machine"),
+            0
+        );
+        let Action::Plan {
+            second,
+            shared,
+            archive,
+            ..
+        } = &all[at("Write the plan of the database machines")].action
+        else {
+            panic!()
+        };
+        assert_eq!(second.as_deref(), Some("web2.example.org"));
+        assert_eq!(shared.as_deref(), Some("192.0.2.50/24"));
+        assert_eq!(archive, &answers.archive);
+        assert!(
+            at("Wait for the web interface")
+                < at("Write keepalived's settings for the shared address")
+        );
+        assert_eq!(
+            titles.last(),
+            Some(&"Let the second ScannerPulse machine join")
+        );
+        assert!(matches!(all.last().unwrap().action, Action::Ready));
+        // The second machine serves this certificate too: it covers the
+        // shared address and the second's name.
+        let Action::Run { args, .. } = &all[at("Make this machine's certificate")].action else {
+            panic!()
+        };
+        for name in ["192.0.2.50", "web2.example.org"] {
+            assert!(args.iter().any(|a| a == name), "{name}: {args:?}");
+        }
+        assert!(own_names(&answers).contains(&"192.0.2.50".to_string()));
     }
 
     #[test]
@@ -1982,6 +2115,7 @@ mod tests {
             hub,
             password,
             referee,
+            ..
         } = &all[at("Write the plan of the database machines")].action
         else {
             panic!()

@@ -1409,6 +1409,12 @@ mod tests {
             replication_password: "copy-secret-2".into(),
             referee: None,
             monitor_password: String::new(),
+            second: None,
+            shared: None,
+            install_id: String::new(),
+            archive: String::new(),
+            recordings: String::new(),
+            ready: false,
             joined: Vec::new(),
         }
     }
