@@ -33,6 +33,9 @@ pub fn ours(text: &str) -> bool {
 /// and the other's address) are filled in when it is set up.
 pub fn conf(shared: &str, first: bool, router_id: u8, port: u16) -> String {
     let priority = if first { FIRST } else { SECOND };
+    // The second takes the address as soon as the first fails its check;
+    // the first takes it back only once healthy for 30 s.
+    let delay = if first { "preempt_delay 30\n    " } else { "" };
     format!(
         "{HEADER}global_defs {{\n    script_user root\n    enable_script_security\n}}\n\
          \n\
@@ -42,7 +45,7 @@ pub fn conf(shared: &str, first: bool, router_id: u8, port: u16) -> String {
          \n\
          vrrp_instance scannerpulse {{\n    \
              state BACKUP\n    interface @IFACE@\n    virtual_router_id {router_id}\n    \
-             priority {priority}\n    advert_int 1\n    preempt_delay 30\n    \
+             priority {priority}\n    advert_int 1\n    {delay}\
              unicast_src_ip @SRC@\n    unicast_peer {{\n        @PEER@\n    }}\n    \
              virtual_ipaddress {{\n        {shared} dev @IFACE@\n    }}\n    \
              track_script {{\n        scannerpulse_healthy\n    }}\n}}\n"
@@ -156,6 +159,10 @@ mod tests {
         );
         let second = conf("192.0.2.50/24", false, 7, 8443);
         assert!(second.contains("priority 100\n"), "{second}");
+        // The second takes the address as soon as the first fails; the
+        // first takes it back only after 30 s of health.
+        assert!(first.contains("preempt_delay 30\n"), "{first}");
+        assert!(!second.contains("preempt_delay"), "{second}");
         let id = router_id("192.0.2.10", "web2.example.org");
         assert!((1..=254).contains(&id));
         assert_eq!(id, router_id("192.0.2.10", "web2.example.org"));
