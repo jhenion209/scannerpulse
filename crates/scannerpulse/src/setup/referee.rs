@@ -29,7 +29,8 @@ fn hba(nodes: &[IpAddr]) -> String {
     for ip in nodes {
         let bits = if ip.is_ipv4() { 32 } else { 128 };
         text.push_str(&format!(
-            "hostssl pg_auto_failover autoctl_node {ip}/{bits} scram-sha-256\n"
+            "hostssl pg_auto_failover autoctl_node {ip}/{bits} scram-sha-256{}\n",
+            super::node::TAG
         ));
     }
     text
@@ -197,7 +198,7 @@ mod tests {
         assert_eq!(
             input.as_deref(),
             Some(
-                "# scannerpulse: both database machines\nhostssl pg_auto_failover autoctl_node 192.0.2.21/32 scram-sha-256\nhostssl pg_auto_failover autoctl_node 2001:db8::22/128 scram-sha-256\n"
+                "# scannerpulse: both database machines\nhostssl pg_auto_failover autoctl_node 192.0.2.21/32 scram-sha-256 # scannerpulse\nhostssl pg_auto_failover autoctl_node 2001:db8::22/128 scram-sha-256 # scannerpulse\n"
             )
         );
         assert!(at(make) < at("Let both database machines in"));
