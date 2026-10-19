@@ -130,7 +130,6 @@ impl System {
         }
     }
 
-    /// What this machine has of PostgreSQL before setup changes anything.
     /// The data directories of PostgreSQL 17 that setup makes: the
     /// package's, and pg_autoctl's own on a database machine or the referee.
     pub fn our_data(&self) -> Vec<String> {
@@ -141,6 +140,7 @@ impl System {
         ]
     }
 
+    /// What this machine has of PostgreSQL before setup changes anything.
     pub fn seen(&self) -> Seen {
         use std::net::{SocketAddr, TcpStream};
         use std::path::Path;
@@ -197,8 +197,6 @@ pub struct Seen {
     pub ours: bool,
 }
 
-/// Refuses a machine that already runs a PostgreSQL other than the 17 setup
-/// installs: setup would turn on archiving in it and restart it.
 /// Another PostgreSQL, or a program on its port, that this machine has.
 fn other_found(seen: &Seen) -> Option<String> {
     let other = |v: &&String| *v != "17";
@@ -226,6 +224,8 @@ pub fn other_postgres_joining(seen: &Seen) -> Result<(), String> {
     }
 }
 
+/// Refuses a machine that already runs a PostgreSQL other than the 17 setup
+/// installs: setup would turn on archiving in it and restart it.
 pub fn other_postgres(seen: &Seen) -> Result<(), String> {
     let Some(found) = other_found(seen) else {
         return Ok(());

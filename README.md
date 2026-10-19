@@ -282,6 +282,10 @@ second. The same command finishes a setup that stopped after this machine's
 site had started (when the second's name did not resolve here yet, say);
 setup says so. The shared address is IPv4, as the site listens on IPv4.
 
+- [docs/deploying.md](docs/deploying.md) explains the shared address, where to
+  put the referee, the archive share, reverse proxies (HAProxy, nginx and Caddy,
+  each tried), port forwarding to the shared address, and name resolution: each
+  machine's name must resolve to its address on the others.
 - With a second machine, Let's Encrypt is proved through DNS, not over the
   web, where only the machine holding the address could answer; each machine
   gets and renews its own certificate. Setup's own certificate covers the
@@ -305,7 +309,9 @@ second ScannerPulse machine `SECOND="web2.example.org"` and
 machines reach, `HUB`.
 
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
-`https://<this machine>/healthz` expecting 200 (the web interface answers
+`https://<this machine>/healthz` expecting 200 (with two ScannerPulse machines,
+one on the shared address and one on each machine's own address:
+[docs/deploying.md](docs/deploying.md)) (the web interface answers
 and so does the database), with certificate errors ignored while the site
 uses setup's own certificate. `/health` says only that the process is up.
 For the backups, a push monitor for each kind (above), with an interval of a
