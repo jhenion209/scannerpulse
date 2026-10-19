@@ -1281,25 +1281,38 @@ fn on_node(node: &str, command: &str) -> Result<String, String> {
     ask(node, command, &[])
 }
 
+/// ssh's options for the hub's key: the install's own known hosts, no
+/// questions, and a machine that stops answering given up within a minute,
+/// even in the middle of a transfer.
+fn ssh_options() -> Vec<String> {
+    let ssh = super::plan::SSH;
+    [
+        "-i".to_string(),
+        format!("{ssh}/id_ed25519"),
+        "-o".into(),
+        format!("UserKnownHostsFile={ssh}/known_hosts"),
+    ]
+    .into_iter()
+    .chain(
+        [
+            "StrictHostKeyChecking=yes",
+            "BatchMode=yes",
+            "ConnectTimeout=5",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=4",
+        ]
+        .into_iter()
+        .flat_map(|option| ["-o".to_string(), option.to_string()]),
+    )
+    .collect()
+}
+
 /// Runs a node command on `node` with the hub's key, `input` on its
 /// standard input.
 pub fn ask(node: &str, command: &str, input: &[u8]) -> Result<String, String> {
-    let ssh = super::plan::SSH;
     let mut child = Command::new("ssh")
-        .args([
-            "-i",
-            &format!("{ssh}/id_ed25519"),
-            "-o",
-            &format!("UserKnownHostsFile={ssh}/known_hosts"),
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            &format!("root@{node}"),
-            command,
-        ])
+        .args(ssh_options())
+        .args([&format!("root@{node}"), command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1345,6 +1358,7 @@ fn as_status(answer: Result<String, String>) -> Status {
 /// healthy. Writes pause for the seconds it takes; nothing is lost, since
 /// the primary stops cleanly and its standby has everything first.
 pub fn db_switchover(say: impl Fn(&str)) -> Result<String, String> {
+    let _lock = crate::update::exclusive(Path::new(crate::update::LOCK))?;
     let plan = Plan::read(Path::new(super::plan::PLAN))?;
     if let Some(referee) = &plan.referee {
         say(&format!(
@@ -1782,6 +1796,16 @@ mod tests {
         assert_eq!(
             asked("follow db2.example.org"),
             Some(Asked::Follow("db2.example.org".into()))
+        );
+        // A machine cut off mid-transfer is given up within a minute.
+        let options = ssh_options();
+        assert!(
+            options.contains(&"ServerAliveInterval=15".to_string()),
+            "{options:?}"
+        );
+        assert!(
+            options.contains(&"ServerAliveCountMax=4".to_string()),
+            "{options:?}"
         );
         assert_eq!(asked("version"), Some(Asked::Version));
         assert_eq!(

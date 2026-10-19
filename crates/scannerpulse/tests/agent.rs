@@ -117,3 +117,18 @@ async fn the_daily_check_is_on_unless_set_off_and_keeps_the_newest_release(pool:
         .unwrap();
     assert_eq!(kept, vec![("0.9.1".into(), "What 0.9.1 changed.".into())]);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_open_request_is_busy_even_while_its_helper_is_quiet(pool: PgPool) {
+    agent::beat(&pool, "radio-a").await.unwrap();
+    agent::ask(&pool, Kind::Update, "ann").await.unwrap();
+    sqlx::query("UPDATE agents SET seen_at = now() - interval '1 minute'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The admin is told it is busy, not to install the helper.
+    assert!(matches!(
+        agent::ask(&pool, Kind::Switchover, "bob").await,
+        Err(Refused::Busy)
+    ));
+}

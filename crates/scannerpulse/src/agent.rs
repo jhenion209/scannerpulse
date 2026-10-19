@@ -79,6 +79,10 @@ pub struct Request {
 
 /// Records an admin's request, once a helper is up and none other is open.
 pub async fn ask(pool: &PgPool, kind: Kind, by: &str) -> Result<i64, Refused> {
+    // One that waits or runs comes first: its helper may be busy with it.
+    if open(pool).await? {
+        return Err(Refused::Busy);
+    }
     let up: Option<bool> = sqlx::query_scalar(
         "SELECT bool_or(seen_at > now() - make_interval(secs => $1)) FROM agents",
     )
@@ -212,9 +216,26 @@ async fn carry_out(pool: &PgPool, id: i64, kind: Kind) -> (bool, String) {
     let writer = {
         let pool = pool.clone();
         tokio::spawn(async move {
+            // A line the database did not take (it may be moving) goes with
+            // the next: late rather than lost.
+            let mut held = String::new();
             while let Some(line) = rx.recv().await {
                 crate::log::info(format!("agent: {line}"));
-                let _ = say(&pool, id, &line).await;
+                let lines = if held.is_empty() {
+                    line
+                } else {
+                    format!("{held}\n{line}")
+                };
+                held = match say(&pool, id, &lines).await {
+                    Ok(()) => String::new(),
+                    Err(_) => lines,
+                };
+            }
+            while !held.is_empty() {
+                match say(&pool, id, &held).await {
+                    Ok(()) => held.clear(),
+                    Err(_) => tokio::time::sleep(EVERY).await,
+                }
             }
         })
     };
@@ -246,16 +267,63 @@ fn host() -> String {
         .unwrap_or_else(|| "agent".to_string())
 }
 
+/// Says the helper is up every `EVERY`, whatever else it is doing: an
+/// update can take minutes.
+fn spawn_beat(pool: PgPool, host: String) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = beat(&pool, &host).await {
+                crate::log::warn(format!("agent: cannot say the helper is up: {error}"));
+            }
+            tokio::time::sleep(EVERY).await;
+        }
+    });
+}
+
+/// Looks for a newer release once a day while `updates.check` is on, each
+/// look given a minute; a failed one is tried again within the hour.
+fn spawn_check(pool: PgPool) {
+    tokio::spawn(async move {
+        loop {
+            let wait = if checks(&pool).await.unwrap_or(false) {
+                let source = crate::update::Source::from_env();
+                match tokio::time::timeout(Duration::from_secs(60), crate::update::latest(&source))
+                    .await
+                {
+                    Ok(Ok(release)) => {
+                        let _ = remember(&pool, &release).await;
+                        CHECK_EVERY
+                    }
+                    Ok(Err(error)) => {
+                        crate::log::warn(format!("agent: {error}"));
+                        Duration::from_secs(3600)
+                    }
+                    Err(_) => {
+                        crate::log::warn(
+                            "agent: the newest release did not answer within a minute",
+                        );
+                        Duration::from_secs(3600)
+                    }
+                }
+            } else {
+                Duration::from_secs(3600)
+            };
+            tokio::time::sleep(wait).await;
+        }
+    });
+}
+
 /// `scannerpulse agent`: runs until `shutdown`.
 pub async fn run(
     pool: PgPool,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), String> {
     let host = host();
+    spawn_beat(pool.clone(), host.clone());
+    spawn_check(pool.clone());
     // Until the requests it left unfinished are closed, it takes none: the
     // database may not answer at once (the pool finds the primary first).
     let mut cleaned = false;
-    let mut checked: Option<std::time::Instant> = None;
     tokio::pin!(shutdown);
     loop {
         if !cleaned {
@@ -273,25 +341,6 @@ pub async fn run(
                 }
             }
         }
-        if let Err(error) = beat(&pool, &host).await {
-            crate::log::warn(format!("agent: cannot say the helper is up: {error}"));
-        }
-        if checked.is_none_or(|at| at.elapsed() > CHECK_EVERY)
-            && checks(&pool).await.unwrap_or(false)
-        {
-            match crate::update::latest(&crate::update::Source::from_env()).await {
-                Ok(release) => {
-                    let _ = remember(&pool, &release).await;
-                    checked = Some(std::time::Instant::now());
-                }
-                // Tried again within the hour.
-                Err(error) => {
-                    crate::log::warn(format!("agent: {error}"));
-                    checked =
-                        Some(std::time::Instant::now() - CHECK_EVERY + Duration::from_secs(3600));
-                }
-            }
-        }
         let claimed = if cleaned {
             claim(&pool, &host).await
         } else {
@@ -301,7 +350,12 @@ pub async fn run(
             Ok(Some((id, kind))) => {
                 crate::log::info(format!("agent: request {id}, {}", kind.name()));
                 let (ok, line) = carry_out(&pool, id, kind).await;
-                let _ = finish(&pool, id, ok, &line).await;
+                // Closed before anything else is taken, however long the
+                // database takes to answer (a switchover moves it).
+                while let Err(error) = finish(&pool, id, ok, &line).await {
+                    crate::log::warn(format!("agent: cannot close request {id} yet: {error}"));
+                    tokio::time::sleep(EVERY).await;
+                }
                 // A new program in place: this helper runs the old one still.
                 if kind == Kind::Update
                     && crate::update::version_of(std::path::Path::new(crate::setup::BINARY))

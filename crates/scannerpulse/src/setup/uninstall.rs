@@ -114,7 +114,11 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         steps.extend(super::keepalived::undo_steps());
     }
     let has = |unit: &str| found.units.iter().any(|u| u == unit);
-    let running: Vec<&str> = UNITS[..3].iter().copied().filter(|u| has(u)).collect();
+    // The root helper first, so that it takes nothing while the rest goes.
+    let running: Vec<&str> = [UNITS[4], UNITS[0], UNITS[1], UNITS[2]]
+        .into_iter()
+        .filter(|u| has(u))
+        .collect();
     if !running.is_empty() {
         let mut args = vec!["disable", "--now"];
         args.extend(&running);
@@ -781,7 +785,8 @@ mod tests {
         let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
         let all = lines(&steps(&found(), Remove::default(), &system).unwrap());
         let text = all.join("\n");
-        assert!(text.contains("systemctl disable --now scannerpulse-web.service scannerpulse-ingest.service scannerpulse-backup.timer"));
+        // The root helper first, so that it takes nothing while the rest goes.
+        assert!(text.contains("systemctl disable --now scannerpulse-agent.service scannerpulse-web.service scannerpulse-ingest.service scannerpulse-backup.timer"), "{text}");
         assert!(
             text.contains("ALTER SYSTEM RESET archive_command"),
             "{text}"

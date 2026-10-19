@@ -267,7 +267,7 @@ pub fn install(binary: &Path, bytes: &[u8], sha256: &str, current: &str) -> Resu
         return Err("the program received does not match its checksum: nothing was changed".into());
     }
     // Beside the old one, so that the rename is one step.
-    let new = binary.with_file_name(".scannerpulse.update");
+    let new = binary.with_file_name(format!(".scannerpulse.update.{}", std::process::id()));
     let fail = |error: std::io::Error| format!("{}: {error}", new.display());
     {
         let mut file = std::fs::File::create(&new).map_err(fail)?;
@@ -324,6 +324,31 @@ pub fn version_of(program: &Path) -> Option<String> {
                 .strip_prefix("scannerpulse ")
                 .map(str::to_string)
         })
+}
+
+/// Held by an update or a switchover for as long as it runs, on this
+/// machine: the admin page's helper and a terminal never run two at once.
+pub const LOCK: &str = "/run/scannerpulse-change.lock";
+
+/// Takes `path`'s lock, or says that another holds it. The lock goes when
+/// the file returned is dropped (or the process ends).
+pub fn exclusive(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(file),
+        Err(rustix::io::Errno::WOULDBLOCK) => Err(
+            "an update or a switchover runs on this machine already, from the admin page or a terminal: wait for it to finish"
+                .into(),
+        ),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
 }
 
 /// The most `node serve update` reads of the checksums or the signature,
@@ -696,6 +721,8 @@ pub async fn run(
             "An update is available: `sudo /usr/local/bin/scannerpulse update` installs it.".into()
         });
     }
+    // From here on it may change machines: one update or switchover at once.
+    let _lock = exclusive(Path::new(LOCK))?;
     // An update never moves a machine back: the newest release may be one
     // pulled back to an older version.
     let mut ahead = ahead;
@@ -820,7 +847,7 @@ pub async fn run(
             // is the one updating, it restarts itself once it has finished.
             if !from_helper && Path::new(crate::agent::UNIT).exists() {
                 let _ = Command::new("systemctl")
-                    .args(["try-restart", "scannerpulse-agent.service"])
+                    .args(["--no-block", "try-restart", "scannerpulse-agent.service"])
                     .status();
             }
         }
@@ -929,12 +956,31 @@ mod tests {
         let error = install(&binary, broken, &sha256_hex(broken), "9.9.8").unwrap_err();
         assert!(error.contains("does not run"), "{error}");
         assert_eq!(std::fs::read_to_string(&binary).unwrap(), "old");
-        assert!(!dir.path().join(".scannerpulse.update").exists());
+        // Its own name while it is checked: two runs never share one.
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".scannerpulse.update")
+        }),);
         assert_eq!(
             install(&binary, new, &sha256_hex(new), "9.9.8").unwrap(),
             "9.9.9"
         );
         assert_eq!(std::fs::read(&binary).unwrap(), new);
+    }
+
+    #[test]
+    fn only_one_update_or_switchover_runs_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("change.lock");
+        let first = exclusive(&lock).unwrap();
+        // From the admin page's helper or a terminal: the other waits.
+        let error = exclusive(&lock).unwrap_err();
+        assert!(error.contains("already"), "{error}");
+        drop(first);
+        assert!(exclusive(&lock).is_ok());
     }
 
     #[test]
