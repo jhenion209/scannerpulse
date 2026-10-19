@@ -268,6 +268,11 @@ The admin page's **Layout** area shows the same from inside, every 15 seconds:
 
 ## Changes later
 
+- **A new release:** `sudo /usr/local/bin/scannerpulse update` on the first
+  machine updates every machine in turn: the referee and the database
+  machines, then the second, then the first. The shared address stays with a
+  machine that answers throughout. Every machine must be up; one that is not
+  stops the update before anything changes.
 - **A certificate changed on the first machine** (`tls install`, `tls self`,
   or Let's Encrypt): join the second again (`sudo /usr/local/bin/scannerpulse
   setup` there, Advanced, "join an existing install"). It takes the first

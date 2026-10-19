@@ -69,6 +69,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse second NAME [ADDRESS/PREFIX]
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse db promote | db rejoin | db switchover
+       scannerpulse update [--check | --yes]
        scannerpulse node serve | node status | node backup
        scannerpulse join info NAME... | join done NODE
        scannerpulse --version
@@ -187,14 +188,21 @@ second      as root, on the first ScannerPulse machine with two database
             machines: adds NAME, a second ScannerPulse machine, which
             shares ADDRESS/PREFIX with this one; the database machines
             join again, then NAME joins
-node        a database machine's or the referee's own: serve is what the
-            ScannerPulse machine's key may run there (status, stop, start,
-            promote [after LSN], follow HOST, switchover); backup, from its
+node        a database machine's, the referee's or the second ScannerPulse
+            machine's own: serve is what the first ScannerPulse machine's key
+            may run there (status, stop, start, promote [after LSN], follow
+            HOST, switchover, version, update SHA256); backup, from its
             timer, dumps the database on the primary
 join        on the ScannerPulse machine, as root, for a joining machine
             (a database machine, the referee or the second ScannerPulse
             machine): info gives its place and
             the plan; done notes it
+update      as root, on the first ScannerPulse machine (or one machine
+            alone): finds the newest release, checks its signature, brings
+            the database's tables up to date, then updates the referee, the
+            database machines, the second ScannerPulse machine and this one,
+            one at a time, each answering before the next; --check only says
+            what is newest and what each machine runs; --yes asks nothing
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
             the backups stay unless each is named, and each named one is
@@ -263,6 +271,11 @@ enum Command {
     Join(Joined),
     Node(NodeCommand),
     Db(DbCommand),
+    /// `update`: `check` only reads the newest release; `yes` asks nothing.
+    Update {
+        check: bool,
+        yes: bool,
+    },
     Talkgroups,
     TalkgroupSwitch {
         talkgroup: String,
@@ -611,6 +624,18 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db", "promote"] => Some(Command::Db(DbCommand::Promote)),
         ["db", "rejoin"] => Some(Command::Db(DbCommand::Rejoin)),
         ["db", "switchover"] => Some(Command::Db(DbCommand::Switchover)),
+        ["update"] => Some(Command::Update {
+            check: false,
+            yes: false,
+        }),
+        ["update", "--yes"] => Some(Command::Update {
+            check: false,
+            yes: true,
+        }),
+        ["update", "--check"] => Some(Command::Update {
+            check: true,
+            yes: false,
+        }),
         ["talkgroups"] => Some(Command::Talkgroups),
         ["talkgroups", "uncorrected"] => Some(Command::Uncorrected),
         ["talkgroup", "correct", talkgroup, rest @ ..] => {
@@ -929,6 +954,25 @@ async fn run() -> ExitCode {
                 scannerpulse::setup::node::db_switchover(|line| println!("{line}"))
             }
         })),
+        Some(Command::Update { check, yes }) => {
+            let result = match as_root() {
+                Ok(()) => {
+                    scannerpulse::update::run(
+                        check,
+                        |line| println!("{line}"),
+                        |question| {
+                            yes || inquire::Confirm::new(question)
+                                .with_default(false)
+                                .prompt()
+                                .unwrap_or(false)
+                        },
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            node_answer(result.map_err(|error| format!("update: {error}")))
+        }
         Some(Command::Uninstall(remove)) => {
             match scannerpulse::setup::uninstall::run_uninstall(remove).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -2212,6 +2256,33 @@ mod tests {
             Some(Command::Db(DbCommand::Switchover))
         );
         assert_eq!(parse(&["db", "failover"]), None);
+    }
+
+    #[test]
+    fn update_checks_asks_or_goes_ahead() {
+        assert_eq!(
+            parse(&["update"]),
+            Some(Command::Update {
+                check: false,
+                yes: false
+            })
+        );
+        assert_eq!(
+            parse(&["update", "--yes"]),
+            Some(Command::Update {
+                check: false,
+                yes: true
+            })
+        );
+        assert_eq!(
+            parse(&["update", "--check"]),
+            Some(Command::Update {
+                check: true,
+                yes: false
+            })
+        );
+        assert_eq!(parse(&["update", "--check", "--yes"]), None);
+        assert_eq!(parse(&["update", "now"]), None);
     }
 
     #[test]

@@ -324,11 +324,24 @@ Debian's and Ubuntu's `unattended-upgrades` leaves that repository out unless
 told otherwise: add `"origin=apt.postgresql.org";` to
 `Unattended-Upgrade::Origins-Pattern` in a file under `/etc/apt/apt.conf.d/`.
 On the Red Hat family, `dnf-automatic` covers every enabled repository,
-that one included. ScannerPulse itself is one program: running the install
-script again installs the latest release and brings the database's tables up
-to date, and `sudo systemctl restart scannerpulse-web scannerpulse-ingest`
-puts it to work. A program copied in by hand needs
-`sudo /usr/local/bin/scannerpulse db-update` before that restart.
+that one included.
+
+ScannerPulse itself is one program, updated by
+`sudo /usr/local/bin/scannerpulse update` on the first ScannerPulse machine
+(or on one machine alone). It finds the newest release and checks its
+signature with the same key as the install script. It brings the database's
+tables up to date, then updates the referee, the database machines, the
+second ScannerPulse machine and this one, one at a time, each answering
+before the next. A pair stays up throughout. `update --check` only says what
+is newest and what each machine runs.
+
+From 0.7.0 or earlier, run the install line on each machine once instead,
+then `sudo systemctl restart scannerpulse-web scannerpulse-ingest` on each
+ScannerPulse machine. Then, on the second ScannerPulse machine, run
+`sudo /usr/local/bin/scannerpulse setup` and "join an existing install"
+again: that lets the first machine reach it for the next update. A program
+copied in by hand needs `sudo /usr/local/bin/scannerpulse db-update` before
+that restart.
 
 ## Commands
 
