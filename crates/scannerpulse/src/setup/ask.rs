@@ -350,9 +350,9 @@ pub fn join_from_file(path: &Path) -> Result<Option<super::join::Hub>, String> {
 /// as a database machine.
 pub fn ask_join() -> Result<Option<super::join::Hub>, inquire::InquireError> {
     const NEW: &str = "A new install";
-    const JOIN: &str = "Join an existing install, as one of its other machines (a database machine or the referee)";
+    const JOIN: &str = "Join an existing install, as one of its other machines (a database machine, the referee or the second ScannerPulse machine)";
     say(
-        "Advanced: a new install, or a database machine joining an install whose first ScannerPulse machine planned it (that machine's setup waits for it). Joining needs that machine's address and a login there that may use sudo; nothing here keeps the login.",
+        "Advanced: a new install, or another machine joining an install whose first ScannerPulse machine planned it (that machine's setup waits for it). Joining needs that machine's address and a login there that may use sudo; nothing here keeps the login.",
     );
     if Select::new("This machine:", vec![NEW, JOIN]).prompt()? == NEW {
         return Ok(None);

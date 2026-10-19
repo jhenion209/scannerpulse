@@ -400,10 +400,11 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         .filter(|folder| !folder.exists())
         .cloned()
         .collect();
-    let second = !Path::new(super::plan::PLAN).exists()
-        && archive
-            .as_ref()
-            .is_some_and(|a| a.join(super::second::MARK).exists());
+    // Known here, without the database or the share.
+    let second = super::second::is_second(
+        &std::fs::read_to_string(super::steps::env_path()).unwrap_or_default(),
+        Path::new(super::plan::PLAN).exists(),
+    );
     let found = Found {
         units: UNITS
             .iter()

@@ -48,6 +48,7 @@ pub fn info_from(
             plan.referee
                 .iter()
                 .chain(&plan.nodes)
+                .chain(&plan.second)
                 .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -271,29 +272,40 @@ fn ssh_failed(address: &str, output: &std::process::Output) -> String {
 pub async fn run(hub: Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<(), String> {
     // The kept connection to the hub, the person's login, closes however
     // the join ends: done, failed, or stopped by Ctrl-C, a hang-up or a stop.
+    let stop = stopped();
     let joined = tokio::select! {
+        biased;
+        () = stop => Err("the join was stopped".into()),
         joined = join(&hub, dry_run, yes) => joined,
-        () = stopped() => Err("the join was stopped".into()),
     };
     hub.close();
     joined
 }
 
-/// Completes at Ctrl-C, a hang-up (the terminal gone) or SIGTERM.
-async fn stopped() {
+/// Completes at Ctrl-C, a hang-up (the terminal gone) or SIGTERM. Its
+/// handlers exist from this call on, so a stop during the join's first steps
+/// is caught too; it takes effect between steps.
+fn stopped() -> impl std::future::Future<Output = ()> {
     use tokio::signal::unix::{SignalKind, signal};
-    match (
-        signal(SignalKind::hangup()),
-        signal(SignalKind::terminate()),
-    ) {
-        (Ok(mut hangup), Ok(mut term)) => tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = hangup.recv() => {}
-            _ = term.recv() => {}
-        },
-        _ => {
-            let _ = tokio::signal::ctrl_c().await;
+    let mut interrupt = signal(SignalKind::interrupt()).ok();
+    let mut hangup = signal(SignalKind::hangup()).ok();
+    let mut term = signal(SignalKind::terminate()).ok();
+    async move {
+        tokio::select! {
+            () = received(&mut interrupt) => {}
+            () = received(&mut hangup) => {}
+            () = received(&mut term) => {}
         }
+    }
+}
+
+/// Completes when `stream` receives its signal; never without one.
+async fn received(stream: &mut Option<tokio::signal::unix::Signal>) {
+    match stream {
+        Some(stream) => {
+            stream.recv().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -489,7 +501,7 @@ mod tests {
             replication_password: "copy-secret-2".into(),
             referee: Some("ref.example.org".into()),
             monitor_password: "referee-secret-3".into(),
-            second: None,
+            second: Some("web2.example.org".into()),
             shared: None,
             install_id: String::new(),
             archive: String::new(),
@@ -502,7 +514,9 @@ mod tests {
         let error = info_from(&path, &["web.example.org".into()], none).unwrap_err();
         assert!(
             error.contains("web.example.org")
-                && error.contains("ref.example.org, db1.example.org, db2.example.org"),
+                && error.contains(
+                    "ref.example.org, db1.example.org, db2.example.org, web2.example.org"
+                ),
             "{error}"
         );
         let told: Joining =
@@ -599,5 +613,17 @@ mod tests {
         let said = super::ssh_failed("192.0.2.10", &output);
         assert!(said.contains("closed by remote host"), "{said}");
         assert!(!said.contains("secret"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_is_caught_from_the_moment_the_join_starts() {
+        // The handlers exist once `stopped` is called, before the join's
+        // first wait: a hang-up then ends the join, never the process.
+        let stop = super::stopped();
+        rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::HUP)
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("the hang-up ends the wait");
     }
 }

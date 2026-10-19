@@ -62,6 +62,17 @@ pub fn settings_for(settings: &str, name: &str) -> Result<String, String> {
     crate::hostfile::changed(&text, "SCANNERPULSE_PREFERRED", Some("false"))
 }
 
+/// This machine is a second ScannerPulse machine: its settings say it is not
+/// the preferred one, and it holds no plan (the first machine does).
+pub fn is_second(settings: &str, plan_here: bool) -> bool {
+    !plan_here
+        && crate::hostfile::parse(settings).is_ok_and(|pairs| {
+            pairs
+                .iter()
+                .any(|(name, value)| name == "SCANNERPULSE_PREFERRED" && value == "false")
+        })
+}
+
 /// The site's port, from the settings file.
 pub fn port_of(settings: &str) -> Result<u16, String> {
     crate::hostfile::parse(settings)?
@@ -458,5 +469,15 @@ pub(super) mod tests {
             assert_eq!(ran.ok, ok, "{:?}: {}", mark, ran.stderr);
             assert!(ran.stderr.contains(said), "{:?}: {}", mark, ran.stderr);
         }
+    }
+
+    #[test]
+    fn the_second_knows_itself_by_its_settings_and_no_plan() {
+        let second = settings_for(&files().settings, "web2").unwrap();
+        assert!(is_second(&second, false));
+        // The first machine's settings, or any machine holding the plan.
+        assert!(!is_second(&files().settings, false));
+        assert!(!is_second(&second, true));
+        assert!(!is_second("SCANNERPULSE_HOST=\"radio-a\"\n", false));
     }
 }

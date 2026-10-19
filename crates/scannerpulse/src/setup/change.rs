@@ -249,6 +249,17 @@ fn second_planned() -> bool {
     super::plan::Plan::read(Path::new(super::plan::PLAN)).is_ok_and(|plan| plan.second.is_some())
 }
 
+/// On the second ScannerPulse machine, the certificate is the first
+/// machine's: it is changed there, then taken by a join here.
+fn refuse_on_second(change: &Change, second: bool) -> Result<(), String> {
+    match change {
+        Change::TlsInstall { .. } | Change::TlsSelf | Change::LetsEncrypt { .. } if second => Err(
+            "this is the second ScannerPulse machine, whose certificate is the first ScannerPulse machine's: change it there, then join this machine again (`sudo /usr/local/bin/scannerpulse setup`, Advanced, \"join an existing install\")".into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// Makes `change` on this machine, as root, saying each step.
 pub async fn run_change(change: Change) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
@@ -260,6 +271,10 @@ pub async fn run_change(change: Change) -> Result<(), String> {
             env_path().display()
         )
     })?;
+    refuse_on_second(
+        &change,
+        super::second::is_second(&text, Path::new(super::plan::PLAN).exists()),
+    )?;
     let binary = Path::new(super::BINARY);
     let (steps, said) = match &change {
         Change::TlsInstall { cert, key } => {
@@ -360,7 +375,11 @@ pub async fn run_change(change: Change) -> Result<(), String> {
         }
         Change::Second { name, shared } => {
             let plan = super::plan::Plan::read(Path::new(super::plan::PLAN)).map_err(|_| {
-                "a second ScannerPulse machine goes with two database machines, which this install does not have".to_string()
+                if super::second::is_second(&text, false) {
+                    "this is the second ScannerPulse machine: run `second` on the first ScannerPulse machine, which holds the plan".to_string()
+                } else {
+                    "a second ScannerPulse machine goes with two database machines, which this install does not have".to_string()
+                }
             })?;
             let le_web = crate::hostfile::parse(&text)?
                 .iter()
@@ -600,5 +619,30 @@ mod tests {
         let known = Some((vec![rec.clone()], Some(arc.clone()), 0));
         assert!(location_apart(Path::new("/srv/recordings/b"), known.clone()).is_err());
         assert!(location_apart(Path::new("/srv/backups"), known).is_ok());
+    }
+
+    #[test]
+    fn the_certificate_is_changed_on_the_first_machine_not_the_second() {
+        use super::{Change, refuse_on_second};
+        for change in [
+            Change::TlsSelf,
+            Change::TlsInstall {
+                cert: "/root/site.pem".into(),
+                key: "/root/site.key".into(),
+            },
+            Change::LetsEncrypt {
+                dns: true,
+                names: vec!["radio.example.org".into()],
+            },
+        ] {
+            let error = refuse_on_second(&change, true).unwrap_err();
+            assert!(error.contains("first ScannerPulse machine"), "{error}");
+            assert!(error.contains("join"), "{error}");
+            assert_eq!(refuse_on_second(&change, false), Ok(()));
+        }
+        assert_eq!(
+            refuse_on_second(&Change::Location("/srv/backups".into()), true),
+            Ok(())
+        );
     }
 }
