@@ -232,8 +232,8 @@ the new primary. When the old primary is back, it rejoins as the standby by
 itself. `db promote` and `db rejoin` are not needed then; `db switchover`
 asks the referee. While the referee is down the primary goes on, but
 nothing is promoted until it returns; if the referee and the standby are
-down together, writes (filing calls) pause until either returns, while
-reading and playback go on. Put the referee on a different switch from the
+down together, writes (filing calls) pause until the referee returns (the
+standby waits for it too), while reading and playback go on. Put the referee on a different switch from the
 database machines where you can.
 
 An unattended join reads `JOIN` (the first machine's address) and, unless
