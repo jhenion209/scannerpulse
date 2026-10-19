@@ -8,8 +8,9 @@ export type Mode = 'one' | 'hand' | 'referee' | 'unknown';
 
 export interface LayoutMachine {
   host: string;
-  version: string;
-  seen_seconds_ago: number;
+  /** Null for a machine that has never said it is up. */
+  version: string | null;
+  seen_seconds_ago: number | null;
   /** Heard from within the last 45 seconds. */
   up: boolean;
   holds_shared: boolean;
@@ -91,6 +92,8 @@ export function machineText(machine: Pick<LayoutMachine, 'up' | 'version' | 'see
   text: string;
   ok: boolean;
 } {
+  if (machine.seen_seconds_ago === null)
+    return { text: 'never heard from (a version before 0.7.0, or its web has not started)', ok: false };
   if (machine.up) return { text: `answering (version ${machine.version})`, ok: true };
   return { text: `not heard from for ${durationText(machine.seen_seconds_ago * 1000)}`, ok: false };
 }

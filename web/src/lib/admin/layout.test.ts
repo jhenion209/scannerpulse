@@ -44,4 +44,11 @@ describe('the layout in words', () => {
       'answers as a primary on an older timeline: run sudo /usr/local/bin/scannerpulse db rejoin there',
     );
   });
+
+  it('says a machine that never beat was never heard from', () => {
+    expect(machineText({ up: false, version: null, seen_seconds_ago: null })).toEqual({
+      text: 'never heard from (a version before 0.7.0, or its web has not started)',
+      ok: false,
+    });
+  });
 });

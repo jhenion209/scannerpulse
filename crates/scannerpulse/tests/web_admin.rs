@@ -279,7 +279,7 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
     let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.host = "radio-a".into();
     state.machine = scannerpulse::web::Machine {
-        layout: Some(layout),
+        layout: Some(layout.clone()),
         nodes: vec![primary.clone()],
         ..Default::default()
     };
@@ -320,6 +320,49 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
         body["switchover"],
         "sudo /usr/local/bin/scannerpulse db switchover"
     );
+    // A second that has never said it is up is listed as down, not left
+    // out; a machine not heard from for a week is forgotten.
+    let silent = dir.path().join("silent.json");
+    scannerpulse::layout::Layout {
+        second: Some("radio-c".into()),
+        ..scannerpulse::layout::Layout::read(&layout).unwrap()
+    }
+    .write(&silent)
+    .unwrap();
+    sqlx::query("INSERT INTO machines (host, version, holds_shared, seen_at) VALUES ('radio-old', '0.6.0', false, now() - interval '8 days')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    scannerpulse::layout::forget_stale(&pool).await.unwrap();
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
+    state.machine = scannerpulse::web::Machine {
+        layout: Some(silent),
+        nodes: vec![primary.clone()],
+        ..Default::default()
+    };
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let (cookie, _) = sign_in(&app, "ann", PASSWORD).await;
+    let silent = send(
+        &app,
+        "GET",
+        "/api/admin/layout",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    let hosts: Vec<_> = silent.body["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["host"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(hosts, ["radio-a", "radio-b", "radio-c"]);
+    let never = &silent.body["machines"][2];
+    assert_eq!(never["up"], false);
+    assert!(never["seen_seconds_ago"].is_null());
+    assert!(never["version"].is_null());
     // Database machines whose plan this machine has not been given (an
     // install from before the layout file): said so, the machines shown.
     let mut state = scannerpulse::web::AppState::new(pool.clone());

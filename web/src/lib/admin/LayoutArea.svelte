@@ -42,8 +42,8 @@
       <dl class="facts">
         {#each data.machines as machine (machine.host)}
           {@const state = machineText(machine)}
-          <!-- The plan names the first machine by the address the others reach it at, and the second by its name. -->
-          <dt>{machine.host}{#if data.second !== null}{machine.host === data.second ? ' (the second)' : ' (the first)'}{/if}</dt>
+          <!-- The plan names the second machine by its name. -->
+          <dt>{machine.host}{#if machine.host === data.second} (the second){/if}</dt>
           <dd>
             <span class={state.ok ? '' : 'flag'}>{state.text}</span>{#if machine.holds_shared}; holds the shared address{/if}{#if machine.holds_lease}; files and transcribes the calls{/if}
           </dd>

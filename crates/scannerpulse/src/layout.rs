@@ -125,9 +125,21 @@ pub fn spawn_beat(pool: PgPool, host: String, layout: Option<PathBuf>) {
             if let Err(error) = beat {
                 crate::log::warn(format!("cannot say this machine is up: {error}"));
             }
+            if let Err(error) = forget_stale(&pool).await {
+                crate::log::warn(format!("cannot forget machines gone for good: {error}"));
+            }
             tokio::time::sleep(BEAT_EVERY).await;
         }
     });
+}
+
+/// Forgets a machine not heard from for a week, such as a replaced second,
+/// so it is not listed for ever.
+pub async fn forget_stale(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM machines WHERE seen_at < now() - interval '7 days'")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// One database machine as it answers: whether it is a standby, its WAL
@@ -224,7 +236,7 @@ pub async fn report(
     .fetch_all(&mut *conn)
     .await?;
     drop(conn);
-    let machines: Vec<Value> = rows
+    let mut machines: Vec<Value> = rows
         .into_iter()
         .map(|(host, version, holds_shared, age)| {
             let up = age < UP_WITHIN_SECONDS;
@@ -238,6 +250,20 @@ pub async fn report(
             })
         })
         .collect();
+    // A second that has never said it is up (a version before 0.7.0, or its
+    // web has not started) is listed as down, not left out.
+    if let Some(second) = layout.and_then(|l| l.second.as_deref())
+        && !machines.iter().any(|m| m["host"] == second)
+    {
+        machines.push(json!({
+            "host": second,
+            "version": null,
+            "seen_seconds_ago": null,
+            "up": false,
+            "holds_shared": false,
+            "holds_lease": false,
+        }));
+    }
     let options = pool.connect_options();
     let mut answers = Vec::with_capacity(nodes.len());
     for node in nodes {
