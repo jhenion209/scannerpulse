@@ -47,6 +47,10 @@ pub struct Found {
     /// The folders above that are not there (an unmounted share, a deleted
     /// folder): their access entries cannot be taken off.
     pub gone: Vec<PathBuf>,
+    /// This is a database machine (its place, `node.json`, is here).
+    pub node: bool,
+    /// This is the referee (the monitor's data is here).
+    pub referee: bool,
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -74,6 +78,9 @@ fn postgres(title: &str, sql: &str) -> Step {
 
 /// The steps that undo setup on `system`, keeping what `remove` does not name.
 pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>, String> {
+    if (found.node || found.referee) && (remove.database || remove.backups || remove.archive) {
+        return Err("this machine's PostgreSQL and its data stay: remove them with the system's package tool".into());
+    }
     // Setup writes the backups' folder only for a database it installed;
     // any other, even at localhost, is the person's.
     if remove.database && found.backups.is_none() {
@@ -264,6 +271,51 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             &["--remove", ACCOUNT],
         ));
     }
+    if found.node {
+        let units = [
+            "scannerpulse-node-backup.timer",
+            "scannerpulse-node-backup.service",
+        ];
+        steps.push(run(
+            "Stop the nightly dump",
+            "systemctl",
+            &["disable", "--now", units[0], units[1]],
+        ));
+        let files: Vec<String> = units
+            .iter()
+            .map(|u| format!("/etc/systemd/system/{u}"))
+            .collect();
+        let mut args = vec!["-f"];
+        args.extend(files.iter().map(String::as_str));
+        steps.push(run("Remove the nightly dump's units", "rm", &args));
+        steps.push(run("Read the units again", "systemctl", &["daemon-reload"]));
+        steps.push(run(
+            "Remove this machine's place among the database machines",
+            "rm",
+            &["-f", super::node::NODE],
+        ));
+    }
+    if found.node || found.referee {
+        steps.push(Step {
+            title: "Take the ScannerPulse machine's key off".into(),
+            action: Action::Run {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "[ -f \"$AK\" ] || exit 0; T=$(mktemp) && { grep -vF \"$COMMAND\" \"$AK\" || true; } > \"$T\" && cat \"$T\" > \"$AK\" && rm -f \"$T\"".into(),
+                ],
+                input: None,
+                env: vec![
+                    ("AK".into(), "/root/.ssh/authorized_keys".into()),
+                    (
+                        "COMMAND".into(),
+                        format!("command=\"{} node serve\"", super::BINARY),
+                    ),
+                ],
+                unless: None,
+            },
+        });
+    }
     steps.push(run("Remove the program", "rm", &["-f", super::BINARY]));
     Ok(steps)
 }
@@ -346,6 +398,10 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         backups: std::env::var("SCANNERPULSE_BACKUPS")
             .ok()
             .map(PathBuf::from),
+        node: Path::new(super::node::NODE).exists(),
+        referee: Path::new(&super::referee::monitor_data(&system))
+            .join("PG_VERSION")
+            .exists(),
         port: std::env::var("SCANNERPULSE_WEB_LISTEN")
             .ok()
             .and_then(|listen| listen.parse::<std::net::SocketAddr>().ok())
@@ -365,28 +421,32 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             );
         }
     }
-    let kept: Vec<String> = [
-        (!remove.archive).then(|| {
-            found.archive.as_ref().map_or("the archive".into(), |a| {
-                format!("the archive {}", a.display())
-            })
-        }),
-        (!remove.database).then(|| {
-            if found.backups.is_some() {
-                format!("the database {DATABASE}")
-            } else {
-                "the database you run".into()
-            }
-        }),
-        found
-            .backups
-            .as_ref()
-            .filter(|_| !remove.backups)
-            .map(|b| format!("the backups {}", b.display())),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let kept: Vec<String> = if found.node || found.referee {
+        vec!["this machine's PostgreSQL, its data, its access rules and its roles".into()]
+    } else {
+        [
+            (!remove.archive).then(|| {
+                found.archive.as_ref().map_or("the archive".into(), |a| {
+                    format!("the archive {}", a.display())
+                })
+            }),
+            (!remove.database).then(|| {
+                if found.backups.is_some() {
+                    format!("the database {DATABASE}")
+                } else {
+                    "the database you run".into()
+                }
+            }),
+            found
+                .backups
+                .as_ref()
+                .filter(|_| !remove.backups)
+                .map(|b| format!("the backups {}", b.display())),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    };
     if !kept.is_empty() {
         println!("It keeps {}.", kept.join(", "));
     }
@@ -450,7 +510,92 @@ mod tests {
             backups: Some(PathBuf::from("/srv/archive/.scannerpulse-backups")),
             port: Some(443),
             gone: vec![],
+            node: false,
+            referee: false,
         }
+    }
+
+    #[test]
+    fn a_database_machine_or_the_referee_uninstalls_its_own_parts() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let titles = |found: &Found| -> Vec<String> {
+            steps(found, Remove::default(), &system)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.title)
+                .collect()
+        };
+        let node = Found {
+            node: true,
+            ..Default::default()
+        };
+        let all = titles(&node);
+        for title in [
+            "Stop the nightly dump",
+            "Remove the nightly dump's units",
+            "Take the ScannerPulse machine's key off",
+            "Remove this machine's place among the database machines",
+            "Remove the program",
+        ] {
+            assert!(all.iter().any(|t| t == title), "{title}: {all:?}");
+        }
+        assert!(
+            !all.iter()
+                .any(|t| t.contains("database and its role") || t.contains("pgBackRest")),
+            "{all:?}"
+        );
+        let referee = Found {
+            referee: true,
+            ..Default::default()
+        };
+        let all = titles(&referee);
+        assert!(
+            all.iter()
+                .any(|t| t == "Take the ScannerPulse machine's key off"),
+            "{all:?}"
+        );
+        assert!(!all.iter().any(|t| t.contains("nightly dump")), "{all:?}");
+        // PostgreSQL and its data stay there.
+        let error = steps(
+            &node,
+            Remove {
+                database: true,
+                ..Default::default()
+            },
+            &system,
+        )
+        .unwrap_err();
+        assert!(error.contains("package tool"), "{error}");
+        // The key's line goes, and the others stay.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("authorized_keys");
+        std::fs::write(
+            &keys,
+            "ssh-ed25519 AAAAother someone\nrestrict,from=\"192.0.2.10\",command=\"/usr/local/bin/scannerpulse node serve\" ssh-ed25519 AAAAhub hub\n",
+        )
+        .unwrap();
+        let step = steps(&referee, Remove::default(), &system)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.title == "Take the ScannerPulse machine's key off")
+            .unwrap();
+        let Action::Run {
+            program, args, env, ..
+        } = &step.action
+        else {
+            panic!()
+        };
+        let ran = std::process::Command::new(program)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .env("AK", &keys)
+            .status()
+            .unwrap();
+        assert!(ran.success());
+        assert_eq!(
+            std::fs::read_to_string(&keys).unwrap(),
+            "ssh-ed25519 AAAAother someone\n"
+        );
     }
 
     #[test]
