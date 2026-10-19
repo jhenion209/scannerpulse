@@ -264,7 +264,8 @@ same way, so either machine can file the recorder's calls. The share must let
 the scannerpulse account write on both: setup makes that account and checks
 that it can write, and says so if it cannot. In Advanced, after the database
 machines, add a second ScannerPulse machine, name it, and give the address
-the two share (address/prefix, a free address in their network). This
+the two share (address/prefix: a free address on the network segment
+both machines are on). This
 machine checks that the archive is a network share, leaves the install's
 mark in it, and holds the shared address with keepalived. The second joins
 last, the same way as the database machines: it checks that it mounts the
