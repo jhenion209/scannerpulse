@@ -176,6 +176,7 @@ pub fn steps(
     binary: &Path,
     name: &str,
     here: Option<&str>,
+    hub: &[std::net::IpAddr],
 ) -> Result<Vec<Step>, String> {
     // `here`: this machine's settings, when it already runs a site. Joining
     // again keeps it; a site of another install's is not taken over.
@@ -272,6 +273,11 @@ pub fn steps(
             },
         });
     }
+    // `scannerpulse update` on the first machine reaches this one through
+    // its key, which may run only `node serve`.
+    let mut key = super::node::hub_key_step(plan, hub, binary);
+    key.title = "Let the first machine update this machine's program".into();
+    steps.push(key);
     steps.extend(start_steps(
         binary, system, recordings, archive, false, false, port,
     ));
@@ -350,6 +356,7 @@ pub(super) mod tests {
             Path::new("/usr/local/bin/scannerpulse"),
             "web2",
             None,
+            &["192.0.2.10".parse().unwrap()],
         )
         .unwrap();
         let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
@@ -361,6 +368,18 @@ pub(super) mod tests {
         };
         let check = "Check that the archive is the first machine's share";
         assert!(at(check) < at("Make the scannerpulse account"));
+        // The first machine's key may then run `node serve` here, from its
+        // own address only: `scannerpulse update` reaches this machine so.
+        let key = at("Let the first machine update this machine's program");
+        let Action::Run { input, .. } = &all[key].action else {
+            panic!()
+        };
+        assert_eq!(
+            input.as_deref(),
+            Some(
+                "restrict,from=\"192.0.2.10\",command=\"/usr/local/bin/scannerpulse node serve\" ssh-ed25519 AAAA hub\n"
+            )
+        );
         let Action::Run { args, env, .. } = &all[at(check)].action else {
             panic!()
         };
@@ -456,6 +475,7 @@ pub(super) mod tests {
                 Path::new("/b"),
                 "web2.example.org",
                 None,
+                &["192.0.2.10".parse().unwrap()],
             )
             .unwrap()
         };
@@ -478,6 +498,7 @@ pub(super) mod tests {
             Path::new("/b"),
             "web2.example.org",
             None,
+            &["192.0.2.10".parse().unwrap()],
         )
         .unwrap();
         // Before any package or account: a refusal leaves nothing behind.
@@ -527,6 +548,7 @@ pub(super) mod tests {
                 Path::new("/b"),
                 "web2.example.org",
                 here,
+                &["192.0.2.10".parse().unwrap()],
             )
         };
         // Joining again: its settings are this install's.

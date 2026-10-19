@@ -279,6 +279,7 @@ mod tests {
             std::path::Path::new("/b"),
             "web2.example.org",
             None,
+            &["192.0.2.10".parse().unwrap()],
         )
         .unwrap();
         let tools = second

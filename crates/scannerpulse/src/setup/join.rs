@@ -365,6 +365,7 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
                     .then(|| std::fs::read_to_string(super::steps::env_path()).ok())
                     .flatten()
                     .as_deref(),
+                &hub_ips,
             )?,
             "the second ScannerPulse machine".to_string(),
         ),

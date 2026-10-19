@@ -311,7 +311,8 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             &["-f", super::node::NODE],
         ));
     }
-    if found.node || found.referee {
+    // The second machine lets the first machine's key in too, for updates.
+    if found.node || found.referee || found.second {
         steps.push(Step {
             title: "Take the ScannerPulse machine's key off".into(),
             action: Action::Run {
@@ -587,6 +588,12 @@ mod tests {
         // The folders are the first machine's: an entry for the account's
         // number there may be the first machine's account too.
         assert!(!all.iter().any(|t| t.contains("access off")), "{all:?}");
+        // The first machine's key, let in for updates, goes too.
+        assert!(
+            all.iter()
+                .any(|t| t == "Take the ScannerPulse machine's key off"),
+            "{all:?}"
+        );
         // Setup's keepalived only: none here, no keepalived steps.
         let plain: Vec<String> = steps(&found(), Remove::default(), &system)
             .unwrap()
