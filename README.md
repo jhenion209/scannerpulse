@@ -282,8 +282,9 @@ second.
 - With a second machine, Let's Encrypt is proved through DNS, not over the
   web, where only the machine holding the address could answer; each machine
   gets and renews its own certificate. Setup's own certificate covers the
-  shared address and the second's name too. After `tls install` here, run
-  the same on the second.
+  shared address and the second's name too. After `tls install` or `tls
+  self` here, join the second again: a join runs again on a machine set up,
+  and the second takes this machine's settings and certificate afresh.
 - Uninstall on the second leaves the archive, the database and the backups
   to this machine, and gives up the shared address first.
 

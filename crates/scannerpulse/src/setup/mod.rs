@@ -34,21 +34,6 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                     .into(),
             );
         }
-        // A setup that stopped part way, even at its last steps (the web
-        // unit written, the web not running), runs again; a finished one
-        // does not.
-        let running = || {
-            std::process::Command::new("systemctl")
-                .args(["is-active", "--quiet", "scannerpulse-web.service"])
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        if Path::new(steps::WEB_UNIT).exists() && running() {
-            return Err(format!(
-                "this machine is set up already ({} exists); `sudo /usr/local/bin/scannerpulse uninstall` removes that setup first",
-                steps::WEB_UNIT
-            ));
-        }
         let me = std::env::current_exe().and_then(|p| p.canonicalize()).ok();
         if me.as_deref() != Some(Path::new(BINARY)) {
             return Err(format!(
@@ -62,13 +47,33 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     // Another PostgreSQL here matters only to a database setup installs here.
     let seen = system.seen();
     let defaults = ask::defaults();
+    // A setup that stopped part way, even at its last steps (the web unit
+    // written, the web not running), runs again; a finished one does not.
+    // A join runs again: the second ScannerPulse machine takes the first
+    // machine's files afresh.
+    let refuse_finished = || {
+        let running = std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", "scannerpulse-web.service"])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !dry_run && Path::new(steps::WEB_UNIT).exists() && running {
+            return Err(format!(
+                "this machine is set up already ({} exists); `sudo /usr/local/bin/scannerpulse uninstall` removes that setup first",
+                steps::WEB_UNIT
+            ));
+        }
+        Ok(())
+    };
     if let Some(path) = answers_file
         && let Some(hub) = ask::join_from_file(path)?
     {
         return join::run(hub, dry_run, |_| true).await;
     }
     let mut answers = match answers_file {
-        Some(path) => ask::from_file(path, &defaults)?,
+        Some(path) => {
+            refuse_finished()?;
+            ask::from_file(path, &defaults)?
+        }
         None => {
             use std::io::IsTerminal;
             if !std::io::stdin().is_terminal() {
@@ -79,6 +84,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                 return Ok(());
             };
             if kind == screen::Kind::Simple {
+                refuse_finished()?;
                 system::other_postgres(&seen)?;
             } else if let Some(hub) = ask::ask_join().map_err(|e| e.to_string())? {
                 return join::run(hub, dry_run, |question| {
@@ -88,6 +94,8 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
                         .unwrap_or(false)
                 })
                 .await;
+            } else {
+                refuse_finished()?;
             }
             match ask::interactive(&defaults, None, kind == screen::Kind::Advanced)? {
                 Some(answers) => answers,
