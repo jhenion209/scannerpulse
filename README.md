@@ -270,8 +270,8 @@ mark in it, and holds the shared address with keepalived. The second joins
 last, the same way as the database machines: it checks that it mounts the
 same archive (by the mark), takes this machine's settings, password file and
 certificate, starts the site under its own name, and joins keepalived. When
-this machine's `/healthz` fails for about ten seconds, the shared address
-moves to the second; it comes back 30 seconds after this machine is healthy
+this machine's `/healthz` fails, the shared address moves to the second
+within about fifteen seconds; it comes back 30 seconds after this machine is healthy
 again. The two hold a lease in the database: this machine files and
 transcribes calls, and the second takes over when it stops. To add a second
 machine to an install already set up, run

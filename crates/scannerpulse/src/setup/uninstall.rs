@@ -446,6 +446,8 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     }
     let kept: Vec<String> = if found.node || found.referee {
         vec!["this machine's PostgreSQL, its data, its access rules and its roles".into()]
+    } else if found.second {
+        vec!["the archive, the database and the backups, the first ScannerPulse machine's".into()]
     } else {
         [
             (!remove.archive).then(|| {
