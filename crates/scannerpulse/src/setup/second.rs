@@ -72,6 +72,76 @@ pub fn port_of(settings: &str) -> Result<u16, String> {
         .ok_or_else(|| "the first machine's settings name no port".into())
 }
 
+/// The first machine's check, before anything is changed, that the archive
+/// is a network share.
+pub fn share_check(archive: &Path) -> Step {
+    super::node::script(
+        "Check that the archive is a network share, for the second machine",
+        SHARE_CHECK,
+        &[("ARCHIVE", &archive.display().to_string())],
+        None,
+    )
+}
+
+/// The first machine's last steps for its second machine, `second`: hold
+/// the shared address with it, and let it join.
+pub fn first_steps(
+    system: &System,
+    hub: &str,
+    second: &str,
+    shared: Option<&str>,
+    port: u16,
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+    if let Some(shared) = shared {
+        steps.extend(super::keepalived::steps(
+            system,
+            shared,
+            second,
+            true,
+            super::keepalived::router_id(hub, second),
+            port,
+        ));
+    }
+    steps.push(Step {
+        title: "Let the second ScannerPulse machine join".into(),
+        action: Action::Ready,
+    });
+    steps
+}
+
+/// The steps that add `second` (sharing `shared`) to the install of `plan`,
+/// on a first machine already set up. The database machines join again,
+/// to let the second in, and then the second joins.
+pub fn add_steps(
+    plan: &Plan,
+    second: &str,
+    shared: Option<&str>,
+    archive: &Path,
+    recordings: &Path,
+    system: &System,
+    port: u16,
+) -> Vec<Step> {
+    let mut steps = vec![
+        share_check(archive),
+        Step {
+            title: "Add the second ScannerPulse machine to the plan".into(),
+            action: Action::Plan {
+                nodes: plan.nodes.clone(),
+                hub: plan.hub.clone(),
+                password: plan.password.clone(),
+                referee: plan.referee.clone(),
+                second: Some(second.into()),
+                shared: shared.map(String::from),
+                archive: archive.into(),
+                recordings: recordings.into(),
+            },
+        },
+    ];
+    steps.extend(first_steps(system, &plan.hub, second, shared, port));
+    steps
+}
+
 /// The steps that make this machine the second ScannerPulse machine of
 /// `plan`, named `name`, from the first machine's `files`.
 pub fn steps(
@@ -272,5 +342,52 @@ mod tests {
             assert!(!titles.contains(&title), "{title}");
         }
         assert!(!format!("{all:?}").contains("secret"));
+    }
+
+    #[test]
+    fn a_second_machine_added_to_an_install_set_up_checks_the_share_plans_it_and_shares_the_address()
+     {
+        use crate::setup::system::detect;
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let kept = Plan {
+            second: None,
+            shared: None,
+            ..plan()
+        };
+        let all = add_steps(
+            &kept,
+            "web2.example.org",
+            Some("192.0.2.50/24"),
+            Path::new("/srv/archive"),
+            Path::new("/srv/recordings"),
+            &system,
+            8443,
+        );
+        let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles[0],
+            "Check that the archive is a network share, for the second machine"
+        );
+        let Action::Plan {
+            nodes,
+            password,
+            second,
+            shared,
+            archive,
+            ..
+        } = &all[1].action
+        else {
+            panic!("{titles:?}")
+        };
+        assert_eq!(*nodes, kept.nodes);
+        assert_eq!(*password, kept.password);
+        assert_eq!(second.as_deref(), Some("web2.example.org"));
+        assert_eq!(shared.as_deref(), Some("192.0.2.50/24"));
+        assert_eq!(archive, Path::new("/srv/archive"));
+        assert!(
+            titles.contains(&"Write keepalived's settings for the shared address"),
+            "{titles:?}"
+        );
+        assert!(matches!(all.last().unwrap().action, Action::Ready));
     }
 }

@@ -66,6 +66,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse tls letsencrypt web|dns-cloudflare NAME...
        scannerpulse backups push pgbackrest|dump [off]
        scannerpulse backups location FOLDER
+       scannerpulse second NAME [ADDRESS/PREFIX]
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse db promote | db rejoin | db switchover
        scannerpulse node serve | node status | node backup
@@ -182,12 +183,17 @@ db          as root, with two database machines: promote, on the standby
             ScannerPulse machine, swaps the roles while both are healthy.
             With a referee, it promotes and rejoins by itself, and
             switchover asks it
+second      as root, on the first ScannerPulse machine with two database
+            machines: adds NAME, a second ScannerPulse machine, which
+            shares ADDRESS/PREFIX with this one; the database machines
+            join again, then NAME joins
 node        a database machine's or the referee's own: serve is what the
             ScannerPulse machine's key may run there (status, stop, start,
             promote [after LSN], follow HOST, switchover); backup, from its
             timer, dumps the database on the primary
 join        on the ScannerPulse machine, as root, for a joining machine
-            (a database machine or the referee): info gives its place and
+            (a database machine, the referee or the second ScannerPulse
+            machine): info gives its place and
             the plan; done notes it
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
@@ -582,6 +588,14 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["backups", "push", kind, "off"] => Some(Command::Change(Change::Push {
             kind: kind.to_string(),
             off: true,
+        })),
+        ["second", name] => Some(Command::Change(Change::Second {
+            name: name.to_ascii_lowercase(),
+            shared: None,
+        })),
+        ["second", name, shared] => Some(Command::Change(Change::Second {
+            name: name.to_ascii_lowercase(),
+            shared: Some(shared.to_string()),
         })),
         ["backups", "location", folder] => {
             Some(Command::Change(Change::Location(PathBuf::from(folder))))
@@ -2072,6 +2086,24 @@ mod tests {
         assert_eq!(parse(&["setup", "now"]), None);
         assert_eq!(parse(&["backup"]), Some(Command::Backup));
         assert_eq!(parse(&["backup", "now"]), None);
+    }
+
+    #[test]
+    fn the_second_command_adds_a_second_scannerpulse_machine() {
+        assert_eq!(
+            parse(&["second", "web2.example.org", "192.0.2.50/24"]),
+            Some(Command::Change(Change::Second {
+                name: "web2.example.org".into(),
+                shared: Some("192.0.2.50/24".into()),
+            }))
+        );
+        assert_eq!(
+            parse(&["second", "web2.example.org"]),
+            Some(Command::Change(Change::Second {
+                name: "web2.example.org".into(),
+                shared: None,
+            }))
+        );
     }
 
     #[test]

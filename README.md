@@ -257,12 +257,44 @@ systemctl restart pgautofailover
 in `/var/lib/pgsql/17/sp`.) Joining a database machine again checks that the
 referee knows it, and says these steps if it does not.
 
+**A second ScannerPulse machine** serves the same site while this one is
+down, with two database machines. Mount the archive as a network share (NFS
+or SMB) at the same path on both machines, and the recordings folder the
+same way, so either machine can file the recorder's calls. The share must let
+the scannerpulse account write on both: setup makes that account and checks
+that it can write, and says so if it cannot. In Advanced, after the database
+machines, add a second ScannerPulse machine, name it, and give the address
+the two share (address/prefix, a free address in their network). This
+machine checks that the archive is a network share, leaves the install's
+mark in it, and holds the shared address with keepalived. The second joins
+last, the same way as the database machines: it checks that it mounts the
+same archive (by the mark), takes this machine's settings, password file and
+certificate, starts the site under its own name, and joins keepalived. When
+this machine's `/healthz` fails for about ten seconds, the shared address
+moves to the second; it comes back 30 seconds after this machine is healthy
+again. The two hold a lease in the database: this machine files and
+transcribes calls, and the second takes over when it stops. To add a second
+machine to an install already set up, run
+`sudo /usr/local/bin/scannerpulse second web2.example.org 192.0.2.50/24` here;
+the database machines then join again (to let the second in), and then the
+second.
+
+- With a second machine, Let's Encrypt is proved through DNS, not over the
+  web, where only the machine holding the address could answer; each machine
+  gets and renews its own certificate. Setup's own certificate covers the
+  shared address and the second's name too. After `tls install` here, run
+  the same on the second.
+- Uninstall on the second leaves the archive, the database and the backups
+  to this machine, and gives up the shared address first.
+
 An unattended join reads `JOIN` (the first machine's address) and, unless
 the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers
 file; SSH must not ask for a password then. The first machine's answers
 file sets `DATABASE="nodes"`, `DB_NODES="db1.example.org db2.example.org"`,
-for a referee `FAILOVER="auto"` and `REFEREE="ref.example.org"`, and, if
-its own address is not the one other machines reach, `HUB`.
+for a referee `FAILOVER="auto"` and `REFEREE="ref.example.org"`, for a
+second ScannerPulse machine `SECOND="web2.example.org"` and
+`SHARED="192.0.2.50/24"`, and, if its own address is not the one other
+machines reach, `HUB`.
 
 **Watching it** from Uptime Kuma or a similar service: an HTTPS monitor on
 `https://<this machine>/healthz` expecting 200 (the web interface answers

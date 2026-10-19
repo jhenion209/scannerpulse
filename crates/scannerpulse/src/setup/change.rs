@@ -27,6 +27,12 @@ pub enum Change {
     Push { kind: String, off: bool },
     /// Keep the backups in `folder` from now on.
     Location(PathBuf),
+    /// Add `name`, a second ScannerPulse machine sharing `shared`
+    /// (address/prefix) with this one.
+    Second {
+        name: String,
+        shared: Option<String>,
+    },
 }
 
 /// The settings file, rewritten with `name` set to `value` (or removed).
@@ -238,6 +244,11 @@ fn read_secret(question: &str) -> Result<String, String> {
     Ok(secret.trim().to_string())
 }
 
+/// The plan names a second ScannerPulse machine.
+fn second_planned() -> bool {
+    super::plan::Plan::read(Path::new(super::plan::PLAN)).is_ok_and(|plan| plan.second.is_some())
+}
+
 /// Makes `change` on this machine, as root, saying each step.
 pub async fn run_change(change: Change) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
@@ -271,6 +282,9 @@ pub async fn run_change(change: Change) -> Result<(), String> {
             (tls_self_steps(&text, binary, &names)?, said)
         }
         Change::LetsEncrypt { dns, names } => {
+            if !dns && second_planned() {
+                return Err("with a second ScannerPulse machine, Let's Encrypt proves the names through DNS (dns-cloudflare): over the web, only the machine holding the address could answer".into());
+            }
             let names: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
             for name in &names {
                 crate::acme::check_name(name)?;
@@ -333,6 +347,53 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                 format!(
                     "The backups now go to {}. The ones taken before stay in {old}: remove them when you no longer need them.",
                     found.path.display()
+                ),
+            )
+        }
+        Change::Second { name, shared } => {
+            let plan = super::plan::Plan::read(Path::new(super::plan::PLAN)).map_err(|_| {
+                "a second ScannerPulse machine goes with two database machines, which this install does not have".to_string()
+            })?;
+            let le_web = crate::hostfile::parse(&text)?
+                .iter()
+                .any(|(name, value)| name == "SCANNERPULSE_ACME" && value == "web");
+            super::ask::check_machines(
+                &plan.nodes,
+                plan.referee.as_deref(),
+                &plan.hub,
+                Some(name),
+                shared.as_deref(),
+                le_web,
+                super::plan::resolve,
+            )?;
+            let (recordings, archive, _) = super::uninstall::folders().await.unwrap_or_default();
+            let (Some(recordings), Some(archive)) = (recordings.first(), archive) else {
+                return Err(
+                    "the folders are recorded in the database, which does not answer".into(),
+                );
+            };
+            let os_release = std::fs::read_to_string("/etc/os-release")
+                .map_err(|error| format!("/etc/os-release: {error}"))?;
+            let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
+            let port = super::second::port_of(&text)?;
+            // ponytail: the plan carries the first recordings folder only; a
+            // second source the second machine cannot reach is the person's.
+            (
+                super::second::add_steps(
+                    &plan,
+                    name,
+                    shared.as_deref(),
+                    &archive,
+                    recordings,
+                    &system,
+                    port,
+                ),
+                format!(
+                    "{name} is the second ScannerPulse machine{}. Join each database machine again (`sudo /usr/local/bin/scannerpulse setup` there, Advanced, then \"join an existing install\"), then {name} the same way, after the install line.",
+                    shared
+                        .as_ref()
+                        .map(|s| format!(", sharing {s} with this one"))
+                        .unwrap_or_default()
                 ),
             )
         }

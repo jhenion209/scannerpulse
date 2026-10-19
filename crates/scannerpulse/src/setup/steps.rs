@@ -668,12 +668,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         second: Some(_), ..
     }) = &answers.database
     {
-        steps.push(super::node::script(
-            "Check that the archive is a network share, for the second machine",
-            super::second::SHARE_CHECK,
-            &[("ARCHIVE", &answers.archive.display().to_string())],
-            None,
-        ));
+        steps.push(super::second::share_check(&answers.archive));
     }
     let here = answers.database == Database::Here;
     match system.family {
@@ -1066,20 +1061,13 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         ..
     }) = &answers.database
     {
-        if let Some(shared) = shared {
-            steps.extend(super::keepalived::steps(
-                system,
-                shared,
-                second,
-                true,
-                super::keepalived::router_id(hub, second),
-                answers.port,
-            ));
-        }
-        steps.push(Step {
-            title: "Let the second ScannerPulse machine join".into(),
-            action: Action::Ready,
-        });
+        steps.extend(super::second::first_steps(
+            system,
+            hub,
+            second,
+            shared.as_deref(),
+            answers.port,
+        ));
     }
     steps
 }

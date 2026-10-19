@@ -102,41 +102,21 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
                 return Err("the referee is a third machine, neither database machine".into());
             }
         }
-        if pair.shared.is_some() && pair.second.is_none() {
-            return Err("SHARED, the address the two ScannerPulse machines share, needs SECOND, the second machine".into());
-        }
-        if let Some(shared) = &pair.shared {
-            shared_address(shared)?;
-        }
-        if let Some(second) = &pair.second {
-            if !super::join::plain(second) {
-                return Err(format!(
-                    "{second:?} is not a name or an address: letters, digits, dots, dashes and colons"
-                ));
-            }
-            if matches!(
+        check_machines(
+            &pair.nodes,
+            pair.referee.as_deref(),
+            &pair.hub,
+            pair.second.as_deref(),
+            pair.shared.as_deref(),
+            matches!(
                 answers.certificate,
                 Certificate::LetsEncrypt {
                     proof: crate::acme::Proof::Web,
                     ..
                 }
-            ) {
-                return Err("with a second machine, Let's Encrypt proves the names through DNS (dns-cloudflare) or the certificate is installed: over the web, only the machine holding the address could answer".into());
-            }
-        }
-        // By address too: a name and an address may be the same machine.
-        let mut machines = vec![
-            ("database machine 1", pair.nodes[0].as_str()),
-            ("database machine 2", pair.nodes[1].as_str()),
-        ];
-        if let Some(referee) = &pair.referee {
-            machines.push(("the referee", referee.as_str()));
-        }
-        if let Some(second) = &pair.second {
-            machines.push(("the second ScannerPulse machine", second.as_str()));
-            machines.push(("this machine", pair.hub.as_str()));
-        }
-        distinct_machines(&machines, super::plan::resolve)?;
+            ),
+            super::plan::resolve,
+        )?;
     }
     if let Some(backups) = &answers.backups {
         answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
@@ -1362,6 +1342,47 @@ pub fn default_hub(defaults: &Defaults) -> String {
         .unwrap_or_else(|| defaults.host.clone())
 }
 
+/// The machines of a plan each a machine of their own, and a second
+/// ScannerPulse machine's own checks: the shared address, and no Let's
+/// Encrypt over the web (`le_web`).
+pub(super) fn check_machines(
+    nodes: &[String],
+    referee: Option<&str>,
+    hub: &str,
+    second: Option<&str>,
+    shared: Option<&str>,
+    le_web: bool,
+    resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
+) -> Result<(), String> {
+    if shared.is_some() && second.is_none() {
+        return Err("SHARED, the address the two ScannerPulse machines share, needs SECOND, the second machine".into());
+    }
+    if let Some(shared) = shared {
+        shared_address(shared)?;
+    }
+    if let Some(second) = second {
+        if !super::join::plain(second) {
+            return Err(format!(
+                "{second:?} is not a name or an address: letters, digits, dots, dashes and colons"
+            ));
+        }
+        if le_web {
+            return Err("with a second machine, Let's Encrypt proves the names through DNS (dns-cloudflare) or the certificate is installed: over the web, only the machine holding the address could answer".into());
+        }
+    }
+    // By address too: a name and an address may be the same machine.
+    let mut machines = vec![
+        ("database machine 1", nodes[0].as_str()),
+        ("database machine 2", nodes[1].as_str()),
+    ];
+    machines.extend(referee.map(|referee| ("the referee", referee)));
+    if let Some(second) = second {
+        machines.push(("the second ScannerPulse machine", second));
+        machines.push(("this machine", hub));
+    }
+    distinct_machines(&machines, resolve)
+}
+
 /// An address with its prefix length, as the shared address is given.
 fn shared_address(shared: &str) -> Result<(), String> {
     let bad = || format!("SHARED is {shared:?}: an address/prefix, such as 192.0.2.50/24");
@@ -1533,6 +1554,52 @@ mod tests {
         let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let port = taken.local_addr().unwrap().port();
         assert!(free_port(port) > port);
+    }
+
+    #[test]
+    fn a_second_machine_is_checked_the_same_when_added_later() {
+        let nodes = ["db1.example.org".to_string(), "db2.example.org".to_string()];
+        let none = |_: &str| Vec::new();
+        let ok = super::check_machines(
+            &nodes,
+            None,
+            "192.0.2.10",
+            Some("web2.example.org"),
+            Some("192.0.2.50/24"),
+            false,
+            none,
+        );
+        assert_eq!(ok, Ok(()));
+        let web = super::check_machines(
+            &nodes,
+            None,
+            "192.0.2.10",
+            Some("web2.example.org"),
+            None,
+            true,
+            none,
+        );
+        assert!(web.unwrap_err().contains("dns-cloudflare"));
+        let same = super::check_machines(
+            &nodes,
+            None,
+            "192.0.2.10",
+            Some("db2.example.org"),
+            None,
+            false,
+            none,
+        );
+        assert!(same.unwrap_err().contains("same machine"));
+        let bad = super::check_machines(
+            &nodes,
+            None,
+            "192.0.2.10",
+            Some("web2.example.org"),
+            Some("192.0.2.50"),
+            false,
+            none,
+        );
+        assert!(bad.unwrap_err().contains("address/prefix"));
     }
 
     #[test]
