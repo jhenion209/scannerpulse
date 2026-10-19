@@ -340,6 +340,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
     let context = super::apply::Context {
         database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
         db_password: String::new(),
+        nodes: crate::primary::from_env()?,
     };
     super::apply::apply(&steps, &context, true).await?;
     println!("{said}");

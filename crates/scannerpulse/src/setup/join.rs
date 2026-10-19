@@ -309,6 +309,7 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
     let context = super::apply::Context {
         database_url: String::new(),
         db_password: String::new(),
+        nodes: Vec::new(),
     };
     super::apply::apply(&steps, &context, true).await?;
     hub.done(&name, &host_keys())?;

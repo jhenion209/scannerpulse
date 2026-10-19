@@ -417,6 +417,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     let context = apply::Context {
         database_url: String::new(),
         db_password: String::new(),
+        nodes: Vec::new(),
     };
     apply::apply(&steps, &context, true).await?;
     println!("\nScannerPulse is uninstalled.");

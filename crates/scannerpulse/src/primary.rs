@@ -166,6 +166,21 @@ pub fn pool(options: &PgConnectOptions, nodes: &[Node], settings: PgPoolOptions)
             let since = *since.lock().unwrap_or_else(|e| e.into_inner());
             Box::pin(async move { Ok(since.is_none_or(|at| meta.age < at.elapsed())) })
         })
+        // A connection begun before a move, to the node that is now a
+        // standby, is refused once made.
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                let standby: bool = sqlx::query_scalar("SELECT pg_is_in_recovery()")
+                    .fetch_one(&mut *conn)
+                    .await?;
+                if standby {
+                    return Err(sqlx::Error::Protocol(
+                        "a standby: the primary has moved".into(),
+                    ));
+                }
+                Ok(())
+            })
+        })
         .connect_lazy_with(options.clone());
     let (watched, nodes, base) = (pool.clone(), nodes.to_vec(), options.clone());
     tokio::spawn(async move {
@@ -246,20 +261,21 @@ pub async fn options(url: &str) -> Result<PgConnectOptions, String> {
     let options: PgConnectOptions = url
         .parse()
         .map_err(|error| format!("DATABASE_URL is not a database URL: {error}"))?;
-    let nodes = from_env()?;
+    options_on(options, &from_env()?).await
+}
+
+/// `options` on the node of `nodes` that is the primary, when there are
+/// two or more.
+pub async fn options_on(
+    options: PgConnectOptions,
+    nodes: &[Node],
+) -> Result<PgConnectOptions, String> {
     if nodes.len() < 2 {
         return Ok(options);
     }
-    let found = find(&options, &nodes).await.ok_or_else(|| {
-        let tried: Vec<String> = nodes
-            .iter()
-            .map(|n| format!("{}:{}", n.host, n.port))
-            .collect();
-        format!(
-            "no database node answers as the primary ({})",
-            tried.join(", ")
-        )
-    })?;
+    let found = find_why(&options, nodes)
+        .await
+        .map_err(|why| format!("no database node answers as the primary ({why})"))?;
     Ok(on(&options, &nodes[found]))
 }
 

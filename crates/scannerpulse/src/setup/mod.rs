@@ -188,6 +188,10 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             .map(|(_, url)| url)
             .unwrap_or_default(),
         db_password,
+        nodes: match &answers.database {
+            steps::Database::Nodes(pair) => crate::primary::nodes(&pair.hosts())?,
+            _ => Vec::new(),
+        },
     };
     apply::apply(&steps, &context, true).await?;
     print!("{}", finished(&answers));

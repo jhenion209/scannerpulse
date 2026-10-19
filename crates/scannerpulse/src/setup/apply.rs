@@ -16,7 +16,11 @@ pub const WEB_WAIT: Duration = Duration::from_secs(60);
 /// What the steps that touch the database need.
 pub struct Context {
     pub database_url: String,
+    /// The database role's password; none keeps the URL's.
     pub db_password: String,
+    /// The database machines, when there are two: the steps that reach the
+    /// database reach the primary.
+    pub nodes: Vec<crate::primary::Node>,
 }
 
 /// Runs `steps`, saying each; `quiet` keeps a step's own output (apt's, for
@@ -156,11 +160,16 @@ fn write(path: &Path, contents: &str, mode: u32, owner: &str) -> Result<(), Stri
 
 async fn connect(context: &Context) -> Result<sqlx::PgConnection, String> {
     use sqlx::Connection;
-    let options = context
+    let mut options = context
         .database_url
         .parse::<sqlx::postgres::PgConnectOptions>()
-        .map_err(|error| error.to_string())?
-        .password(&context.db_password);
+        .map_err(|error| error.to_string())?;
+    if !context.db_password.is_empty() {
+        options = options.password(&context.db_password);
+    }
+    let options = crate::primary::options_on(options, &context.nodes)
+        .await
+        .map_err(|error| format!("cannot reach the new database: {error}"))?;
     sqlx::PgConnection::connect_with(&options)
         .await
         .map_err(|error| format!("cannot reach the new database: {error}"))
@@ -332,6 +341,7 @@ mod tests {
         Context {
             database_url: String::new(),
             db_password: String::new(),
+            nodes: Vec::new(),
         }
     }
 
