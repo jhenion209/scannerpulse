@@ -1054,8 +1054,9 @@ pub enum Asked {
     /// This machine's version and processor (`scannerpulse update` asks
     /// every machine first).
     Version,
-    /// The program on standard input, with this SHA-256, takes this
-    /// machine's program's place, and its services restart.
+    /// The release's program of this name, on standard input with the
+    /// release's signed checksums, takes this machine's program's place once
+    /// they check out, and its services restart.
     Update(String),
 }
 
@@ -1087,10 +1088,8 @@ pub fn asked(command: &str) -> Option<Asked> {
             Some(Asked::Follow(host.to_string()))
         }
         ["version"] => Some(Asked::Version),
-        ["update", sha256]
-            if sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit()) =>
-        {
-            Some(Asked::Update(sha256.to_string()))
+        ["update", name] if crate::update::is_program(name) => {
+            Some(Asked::Update(name.to_string()))
         }
         _ => None,
     }
@@ -1109,7 +1108,7 @@ pub fn serve() -> Result<String, String> {
     }
     match asked(&command) {
         None => Err(format!(
-            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST, switchover, version or update SHA256"
+            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST, switchover, version or update PROGRAM"
         )),
         Some(Asked::Status) => serde_json::to_string(&status()).map_err(|e| e.to_string()),
         Some(Asked::Stop) => stop(),
@@ -1119,11 +1118,15 @@ pub fn serve() -> Result<String, String> {
         Some(Asked::PromoteAfter(lsn)) => promote_after(&lsn).map(|()| "promoted".into()),
         Some(Asked::Follow(host)) => follow(&host).map(|()| format!("following {host}")),
         Some(Asked::Version) => Ok(crate::update::running_here()),
-        Some(Asked::Update(sha256)) => {
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
-                .map_err(|error| format!("cannot read the program sent: {error}"))?;
-            let version = crate::update::install(Path::new(super::BINARY), &bytes, &sha256)?;
+        Some(Asked::Update(name)) => {
+            let version = crate::update::receive(
+                Path::new(super::BINARY),
+                &name,
+                &mut std::io::stdin().lock(),
+                &crate::update::release_key()?,
+                &crate::update::work_folder(),
+                crate::update::VERSION,
+            )?;
             crate::update::restart()?;
             Ok(format!("now runs {version}"))
         }
@@ -1781,16 +1784,16 @@ mod tests {
             Some(Asked::Follow("db2.example.org".into()))
         );
         assert_eq!(asked("version"), Some(Asked::Version));
-        let sha256 = "a".repeat(64);
         assert_eq!(
-            asked(&format!("update {sha256}")),
-            Some(Asked::Update(sha256))
+            asked("update scannerpulse-x86_64-linux"),
+            Some(Asked::Update("scannerpulse-x86_64-linux".into()))
         );
         for refused in [
             "update",
-            "update 0a1b",
-            &format!("update {}g", "a".repeat(63)),
-            &format!("update {};id", "a".repeat(64)),
+            &format!("update {}", "a".repeat(64)),
+            "update scannerpulse-../../x-linux",
+            "update scannerpulse--linux",
+            "update scannerpulse-x86_64-linux now",
             "version now",
             "",
             "sh",
@@ -2074,7 +2077,7 @@ mod tests {
             Asked::Status,
             Asked::Switchover,
             Asked::Version,
-            Asked::Update("a".repeat(64)),
+            Asked::Update("scannerpulse-x86_64-linux".into()),
         ] {
             assert!(!refused_with_referee(true, &asked), "{asked:?}");
         }

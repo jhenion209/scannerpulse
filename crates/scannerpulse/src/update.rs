@@ -7,6 +7,7 @@
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -257,17 +258,24 @@ pub fn checked(sums: &str, program: &str, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Puts `bytes` in place of `binary`, once they match `sha256` and run, and
-/// returns the version they give. The old program stays until then.
-pub fn install(binary: &Path, bytes: &[u8], sha256: &str) -> Result<String, String> {
+/// Puts `bytes` in place of `binary`, once they match `sha256`, run, and
+/// give a version no older than `current`, and returns that version. The old
+/// program stays until then, and the new one is on disk before the rename,
+/// so a power cut leaves one or the other.
+pub fn install(binary: &Path, bytes: &[u8], sha256: &str, current: &str) -> Result<String, String> {
     if !sha256.eq_ignore_ascii_case(&sha256_hex(bytes)) {
         return Err("the program received does not match its checksum: nothing was changed".into());
     }
     // Beside the old one, so that the rename is one step.
     let new = binary.with_file_name(".scannerpulse.update");
-    std::fs::write(&new, bytes).map_err(|error| format!("{}: {error}", new.display()))?;
-    std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
-        .map_err(|error| format!("{}: {error}", new.display()))?;
+    let fail = |error: std::io::Error| format!("{}: {error}", new.display());
+    {
+        let mut file = std::fs::File::create(&new).map_err(fail)?;
+        std::io::Write::write_all(&mut file, bytes).map_err(fail)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .map_err(fail)?;
+        file.sync_all().map_err(fail)?;
+    }
     let version = Command::new(&new)
         .arg("--version")
         .output()
@@ -279,12 +287,135 @@ pub fn install(binary: &Path, bytes: &[u8], sha256: &str) -> Result<String, Stri
                 .strip_prefix("scannerpulse ")
                 .map(str::to_string)
         });
-    let Some(version) = version else {
-        let _ = std::fs::remove_file(&new);
-        return Err("the program received does not run here: nothing was changed".into());
+    let refused = match &version {
+        None => Some("the program received does not run here: nothing was changed".to_string()),
+        Some(version) if newer(version, current) => Some(format!(
+            "the program received ({version}) is older than {current}, which runs here: nothing was changed"
+        )),
+        Some(_) => None,
     };
+    if let Some(refused) = refused {
+        let _ = std::fs::remove_file(&new);
+        return Err(refused);
+    }
     std::fs::rename(&new, binary).map_err(|error| format!("{}: {error}", binary.display()))?;
-    Ok(version)
+    if let Some(folder) = binary.parent() {
+        let _ = std::fs::File::open(folder).and_then(|folder| folder.sync_all());
+    }
+    Ok(version.unwrap_or_default())
+}
+
+/// The most `node serve update` reads of the checksums or the signature,
+/// and of the program.
+const LIST_MOST: usize = 64 * 1024;
+const PROGRAM_MOST: u64 = 256 * 1024 * 1024;
+
+/// What the first machine sends with `update NAME`: the release's checksums
+/// and their signature, each after its length on a line of its own, then
+/// the program.
+pub fn bundle(sums: &[u8], sig: &[u8], program: &[u8]) -> Vec<u8> {
+    let mut sent = Vec::with_capacity(sums.len() + sig.len() + program.len() + 16);
+    for part in [sums, sig] {
+        sent.extend_from_slice(format!("{}\n", part.len()).as_bytes());
+        sent.extend_from_slice(part);
+    }
+    sent.extend_from_slice(program);
+    sent
+}
+
+/// What a bundle holds.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Sent {
+    pub sums: Vec<u8>,
+    pub sig: Vec<u8>,
+    pub program: Vec<u8>,
+}
+
+/// A bundle's checksums, signature and program, refusing a part that is cut
+/// off or longer than its limit.
+pub fn unbundle(input: &mut impl Read) -> Result<Sent, String> {
+    let mut list = || -> Result<Vec<u8>, String> {
+        let mut digits = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            input
+                .read_exact(&mut byte)
+                .map_err(|_| "the program sent was cut off".to_string())?;
+            match byte[0] {
+                b'\n' => break,
+                digit @ b'0'..=b'9' if digits.len() < 10 => digits.push(digit),
+                _ => return Err("the program sent is not laid out as `update` sends it".into()),
+            }
+        }
+        let length: usize = String::from_utf8_lossy(&digits)
+            .parse()
+            .map_err(|_| "the program sent is not laid out as `update` sends it".to_string())?;
+        if length > LIST_MOST {
+            return Err("the checksums or signature sent are too long".into());
+        }
+        let mut part = vec![0u8; length];
+        input
+            .read_exact(&mut part)
+            .map_err(|_| "the program sent was cut off".to_string())?;
+        Ok(part)
+    };
+    let (sums, sig) = (list()?, list()?);
+    let mut program = Vec::new();
+    input
+        .take(PROGRAM_MOST + 1)
+        .read_to_end(&mut program)
+        .map_err(|error| format!("cannot read the program sent: {error}"))?;
+    if program.len() as u64 > PROGRAM_MOST {
+        return Err("the program sent is too long".into());
+    }
+    Ok(Sent { sums, sig, program })
+}
+
+/// `node serve update NAME`, on the far side: the release's signature is
+/// checked with this machine's own `key`, and the program `name` against its
+/// checksum, so that the first machine's key puts nothing in place that the
+/// release key did not sign; then it goes in place unless it is older than
+/// `current`. `work` holds the checksums meanwhile.
+pub fn receive(
+    binary: &Path,
+    name: &str,
+    input: &mut impl Read,
+    key: &[u8],
+    work: &Path,
+    current: &str,
+) -> Result<String, String> {
+    let Sent { sums, sig, program } = unbundle(input)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(work)
+        .map_err(|error| format!("{}: {error}", work.display()))?;
+    let result = (|| {
+        std::fs::write(work.join("SHA256SUMS"), &sums).map_err(|error| error.to_string())?;
+        std::fs::write(work.join("SHA256SUMS.sig"), &sig).map_err(|error| error.to_string())?;
+        signed(work, key)?;
+        checked(&String::from_utf8_lossy(&sums), name, &program)?;
+        install(binary, &program, &sha256_hex(&program), current)
+    })();
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
+/// A program's file name in a release: `scannerpulse-<processor>-linux`.
+pub fn is_program(name: &str) -> bool {
+    name.strip_prefix("scannerpulse-")
+        .and_then(|rest| rest.strip_suffix("-linux"))
+        .is_some_and(|arch| {
+            !arch.is_empty()
+                && arch
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+}
+
+/// The folder `node serve update` works in on this machine.
+pub fn work_folder() -> PathBuf {
+    PathBuf::from(format!("{UPDATES}/receive-{}", std::process::id()))
 }
 
 /// The services that run the program: those setup made on this machine
@@ -375,27 +506,85 @@ fn why_not(name: &str, answer: Result<String, String>) -> String {
         ),
         // A second machine that joined before 0.8.0 never let the key in.
         Err(error) if error.contains("Permission denied") => format!(
-            "{name} does not let this machine's key in: run `sudo /usr/local/bin/scannerpulse setup` there and \"join an existing install\" again"
+            "{name} does not let this machine's key in: if it runs a version from before 0.8.0, run the install line there first; then run `sudo /usr/local/bin/scannerpulse setup` there and \"join an existing install\" again"
         ),
         Err(error) => format!("{name} cannot be reached ({error}): check that it is up"),
         Ok(answer) => format!("{name} gave an answer that is not a version ({answer:?})"),
     }
 }
 
-/// Waits until `https://<host>:<port>/healthz` answers 200. Its certificate
-/// is not checked: this asks only whether the site is up.
-async fn healthy(host: &str, port: u16) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+/// The machines behind `target`, to update, and those ahead of it, named
+/// with their version: an update never moves a machine back.
+pub fn sort_out<'a>(
+    found: &'a [(Other, String, String)],
+    target: &str,
+) -> (Vec<&'a (Other, String, String)>, Vec<String>) {
+    let pending = found
+        .iter()
+        .filter(|(_, version, _)| newer(version, target))
+        .collect();
+    let ahead = found
+        .iter()
+        .filter(|(_, version, _)| newer(target, version))
+        .map(|(other, version, _)| format!("{} ({version})", other.name))
+        .collect();
+    (pending, ahead)
+}
+
+/// Both ScannerPulse machines answer, so that each carries the site while
+/// the other restarts: `second` is the second machine's name and whether it
+/// answers, when there is one.
+pub fn both_answer(here: bool, second: Option<(&str, bool)>) -> Result<(), String> {
+    let mut silent = Vec::new();
+    if !here {
+        silent.push("this machine".to_string());
+    }
+    if let Some((name, false)) = second {
+        silent.push(name.to_string());
+    }
+    if silent.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "nothing was changed: the site does not answer on {} (`/healthz`); the update restarts one ScannerPulse machine at a time while the other carries the site, so both must answer first",
+            silent.join(" or ")
+        ))
+    }
+}
+
+fn health_url(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("https://[{host}]:{port}/healthz")
+    } else {
+        format!("https://{host}:{port}/healthz")
+    }
+}
+
+fn health_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|error| error.to_string())?;
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    let url = format!("https://{host}:{port}/healthz");
+        .map_err(|error| error.to_string())
+}
+
+/// `https://<host>:<port>/healthz` answers 200 now.
+async fn answers(host: &str, port: u16) -> bool {
+    match health_client() {
+        Ok(client) => client
+            .get(health_url(host, port))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success()),
+        Err(_) => false,
+    }
+}
+
+/// Waits until `https://<host>:<port>/healthz` answers 200. Its certificate
+/// is not checked: this asks only whether the site is up.
+async fn healthy(host: &str, port: u16) -> Result<(), String> {
+    let client = health_client()?;
+    let url = health_url(host, port);
     let started = std::time::Instant::now();
     loop {
         if let Ok(response) = client.get(&url).send().await
@@ -464,11 +653,8 @@ pub async fn run(
             unreachable.join("; ")
         ));
     }
-    let pending: Vec<_> = found
-        .iter()
-        .filter(|(_, version, _)| version != &target)
-        .collect();
-    let mine = VERSION != target;
+    let (pending, ahead) = sort_out(&found, &target);
+    let mine = newer(VERSION, &target);
     let mut lines = vec![format!("The newest release is {target}.")];
     for (other, version, _) in &found {
         lines.push(format!("  {}: {version}", other.name));
@@ -479,21 +665,38 @@ pub async fn run(
         if !release.notes.trim().is_empty() {
             say(&format!("Its notes:\n{}", release.notes.trim()));
         }
-        return Ok(if pending.is_empty() && !mine {
+        return Ok(if !ahead.is_empty() || newer(&target, VERSION) {
+            "A machine runs a version newer than the newest release: update leaves the install as it is.".into()
+        } else if pending.is_empty() && !mine {
             "Every machine runs the newest release.".into()
         } else {
             "An update is available: `sudo /usr/local/bin/scannerpulse update` installs it.".into()
         });
+    }
+    // An update never moves a machine back: the newest release may be one
+    // pulled back to an older version.
+    let mut ahead = ahead;
+    if newer(&target, VERSION) {
+        ahead.push(format!("this machine ({VERSION})"));
+    }
+    if !ahead.is_empty() {
+        return Err(format!(
+            "{} runs a version newer than the newest release ({target}): nothing was changed",
+            ahead.join(", ")
+        ));
     }
     if pending.is_empty() && !mine {
         return Ok(format!(
             "Every machine runs ScannerPulse {target}: nothing to do."
         ));
     }
-    if !newer(VERSION, &target) && mine {
-        return Err(format!(
-            "this machine runs {VERSION}, newer than the newest release ({target}): nothing was changed"
-        ));
+    let second = others.iter().find(|other| other.second);
+    let second_answers = match second {
+        Some(second) => Some((second.name.as_str(), answers(&second.name, port).await)),
+        None => None,
+    };
+    if second.is_some() {
+        both_answer(answers("127.0.0.1", port).await, second_answers)?;
     }
     let order: Vec<String> = pending
         .iter()
@@ -522,6 +725,19 @@ pub async fn run(
         say(&format!("Downloading {target} and checking its signature..."));
         fetch(&source, &release, &arches, &dir, &release_key()?).await?;
         let here = dir.join(program(std::env::consts::ARCH));
+        // The signature covers the checksums, not the version: the program
+        // must say it is the release it was downloaded as.
+        let output = Command::new(&here)
+            .arg("--version")
+            .output()
+            .map_err(|error| format!("cannot run the new program: {error}"))?;
+        let says = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if says != format!("scannerpulse {target}") {
+            return Err(format!(
+                "the release {} holds a program that says {says:?}: nothing was changed",
+                release.tag
+            ));
+        }
         say("Bringing the database's tables up to date...");
         let output = Command::new(&here)
             .args(["db-update", "--quiet"])
@@ -533,25 +749,52 @@ pub async fn run(
                 crate::setup::apply::said(&output)
             ));
         }
+        let read = |file: &str| {
+            std::fs::read(dir.join(file)).map_err(|error| format!("{file}: {error}"))
+        };
+        let (sums, sig) = (read("SHA256SUMS")?, read("SHA256SUMS.sig")?);
         for (other, version, arch) in &pending {
+            if other.second && !answers("127.0.0.1", port).await {
+                return Err(format!(
+                    "this machine's site does not answer, so {} was not restarted: it carries the site meanwhile",
+                    other.name
+                ));
+            }
             say(&format!("Updating {} ({version} to {target})...", other.name));
-            let bytes = std::fs::read(dir.join(program(arch)))
-                .map_err(|error| format!("{}: {error}", program(arch)))?;
+            let name = program(arch);
             let answer = crate::setup::node::ask(
                 &other.name,
-                &format!("update {}", sha256_hex(&bytes)),
-                &bytes,
+                &format!("update {name}"),
+                &bundle(&sums, &sig, &read(&name)?),
             )?;
+            if answer != format!("now runs {target}") {
+                return Err(format!(
+                    "{} answered {answer:?}, not that it runs {target}",
+                    other.name
+                ));
+            }
             say(&format!("  {}: {answer}", other.name));
             if other.second {
                 healthy(&other.name, port).await?;
                 say(&format!("  {} answers again.", other.name));
             }
         }
+        // The second carries the site while this machine restarts, whether
+        // or not this run updated it.
+        if let Some(second) = second {
+            healthy(&second.name, port).await.map_err(|error| {
+                format!("{error}: this machine was not restarted, as {} carries the site meanwhile", second.name)
+            })?;
+        }
         if mine {
             say(&format!("Updating this machine ({VERSION} to {target})..."));
             let bytes = std::fs::read(&here).map_err(|error| format!("{}: {error}", here.display()))?;
-            install(Path::new(crate::setup::BINARY), &bytes, &sha256_hex(&bytes))?;
+            install(
+                Path::new(crate::setup::BINARY),
+                &bytes,
+                &sha256_hex(&bytes),
+                VERSION,
+            )?;
             restart()?;
             healthy("127.0.0.1", port).await?;
             say("  This machine answers again.");
@@ -654,16 +897,123 @@ mod tests {
         let binary = dir.path().join("scannerpulse");
         std::fs::write(&binary, "old").unwrap();
         let new = b"#!/bin/sh\necho 'scannerpulse 9.9.9'\n";
-        let wrong = install(&binary, new, &sha256_hex(b"other")).unwrap_err();
+        let wrong = install(&binary, new, &sha256_hex(b"other"), "9.9.8").unwrap_err();
         assert!(wrong.contains("does not match"), "{wrong}");
         assert_eq!(std::fs::read_to_string(&binary).unwrap(), "old");
         let broken = b"#!/bin/sh\nexit 1\n";
-        let error = install(&binary, broken, &sha256_hex(broken)).unwrap_err();
+        let error = install(&binary, broken, &sha256_hex(broken), "9.9.8").unwrap_err();
         assert!(error.contains("does not run"), "{error}");
         assert_eq!(std::fs::read_to_string(&binary).unwrap(), "old");
         assert!(!dir.path().join(".scannerpulse.update").exists());
-        assert_eq!(install(&binary, new, &sha256_hex(new)).unwrap(), "9.9.9");
+        assert_eq!(
+            install(&binary, new, &sha256_hex(new), "9.9.8").unwrap(),
+            "9.9.9"
+        );
         assert_eq!(std::fs::read(&binary).unwrap(), new);
+    }
+
+    #[test]
+    fn an_older_program_is_not_put_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("scannerpulse");
+        std::fs::write(&binary, "old").unwrap();
+        let new = b"#!/bin/sh\necho 'scannerpulse 9.9.9'\n";
+        let error = install(&binary, new, &sha256_hex(new), "9.9.10").unwrap_err();
+        assert!(error.contains("older than 9.9.10"), "{error}");
+        assert_eq!(std::fs::read_to_string(&binary).unwrap(), "old");
+        // The same version again is allowed: a machine put right by hand.
+        assert_eq!(
+            install(&binary, new, &sha256_hex(new), "9.9.9").unwrap(),
+            "9.9.9"
+        );
+    }
+
+    #[test]
+    fn a_bundle_is_read_back_whole_and_a_cut_or_oversized_one_is_refused() {
+        let whole = bundle(b"sums", b"signature", b"program");
+        assert_eq!(
+            unbundle(&mut whole.as_slice()).unwrap(),
+            Sent {
+                sums: b"sums".to_vec(),
+                sig: b"signature".to_vec(),
+                program: b"program".to_vec()
+            }
+        );
+        let cut = &whole[..whole.len() - 12];
+        assert!(unbundle(&mut &cut[..]).is_err());
+        let huge = format!("{}\n", 1024 * 1024).into_bytes();
+        let error = unbundle(&mut huge.as_slice()).unwrap_err();
+        assert!(error.contains("too long"), "{error}");
+        assert!(unbundle(&mut &b"x\n"[..]).is_err());
+    }
+
+    #[test]
+    fn a_program_is_put_in_place_only_with_the_release_signature() {
+        let read = |file: &str| std::fs::read(fixtures().join(file)).unwrap();
+        let (sums, sig) = (read("SHA256SUMS"), read("SHA256SUMS.sig"));
+        let name = "scannerpulse-x86_64-linux";
+        let program = read(name);
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("scannerpulse");
+        let work = dir.path().join("work");
+        let receive_with = |key: &[u8], program: &[u8], name: &str| {
+            std::fs::write(&binary, "old").unwrap();
+            let sent = bundle(&sums, &sig, program);
+            receive(&binary, name, &mut sent.as_slice(), key, &work, "9.9.8")
+        };
+        // Signed by another key: the far side's own key decides.
+        let error = receive_with(&release_key().unwrap(), &program, name).unwrap_err();
+        assert!(error.contains("does not check out"), "{error}");
+        assert_eq!(std::fs::read_to_string(&binary).unwrap(), "old");
+        // A program the checksums do not name, or not this one.
+        let other = b"#!/bin/sh\necho 'scannerpulse 9.9.9'\n# changed\n";
+        let error = receive_with(&fixture_key(), other, name).unwrap_err();
+        assert!(error.contains("does not match"), "{error}");
+        let error =
+            receive_with(&fixture_key(), &program, "scannerpulse-riscv64-linux").unwrap_err();
+        assert!(error.contains("name no"), "{error}");
+        assert_eq!(std::fs::read_to_string(&binary).unwrap(), "old");
+        assert!(!work.exists());
+        // Signed, and named: in place.
+        assert_eq!(
+            receive_with(&fixture_key(), &program, name).unwrap(),
+            "9.9.9"
+        );
+        assert_eq!(std::fs::read(&binary).unwrap(), program);
+        assert!(!work.exists());
+    }
+
+    #[test]
+    fn machines_behind_are_updated_and_those_ahead_are_named() {
+        let at = |name: &str, version: &str| {
+            (
+                Other {
+                    name: name.into(),
+                    second: false,
+                },
+                version.to_string(),
+                "x86_64".to_string(),
+            )
+        };
+        let found = vec![at("db1", "0.8.0"), at("db2", "0.9.0"), at("ref", "0.9.1")];
+        let (pending, ahead) = sort_out(&found, "0.9.0");
+        let names: Vec<&str> = pending
+            .iter()
+            .map(|(other, _, _)| other.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["db1"]);
+        assert_eq!(ahead, vec!["ref (0.9.1)".to_string()]);
+    }
+
+    #[test]
+    fn both_scannerpulse_machines_answer_before_either_restarts() {
+        assert!(both_answer(true, None).is_ok());
+        assert!(both_answer(true, Some(("web2", true))).is_ok());
+        let second = both_answer(true, Some(("web2", false))).unwrap_err();
+        assert!(second.contains("web2"), "{second}");
+        let here = both_answer(false, Some(("web2", true))).unwrap_err();
+        assert!(here.contains("this machine"), "{here}");
+        assert!(both_answer(false, None).is_err());
     }
 
     #[test]
@@ -704,6 +1054,9 @@ mod tests {
             Err("web2: root@web2: Permission denied (publickey).".into()),
         );
         assert!(shut.contains("join an existing install"), "{shut}");
+        // A second still before 0.8.0 joins with its old program, which
+        // cannot let the key in: the install line comes first.
+        assert!(shut.contains("install line"), "{shut}");
     }
 
     #[test]

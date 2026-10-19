@@ -191,7 +191,7 @@ second      as root, on the first ScannerPulse machine with two database
 node        a database machine's, the referee's or the second ScannerPulse
             machine's own: serve is what the first ScannerPulse machine's key
             may run there (status, stop, start, promote [after LSN], follow
-            HOST, switchover, version, update SHA256); backup, from its
+            HOST, switchover, version, update PROGRAM); backup, from its
             timer, dumps the database on the primary
 join        on the ScannerPulse machine, as root, for a joining machine
             (a database machine, the referee or the second ScannerPulse
