@@ -21,7 +21,10 @@ pub struct Defaults {
 
 /// Every answer checked as the questions check it, the folders made
 /// canonical as the questions make them.
-fn checked(mut answers: Answers) -> Result<Answers, String> {
+fn checked(
+    mut answers: Answers,
+    resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
+) -> Result<Answers, String> {
     let recordings = folders::check(&answers.recordings)?;
     let archive = folders::check(&answers.archive)?;
     folders::apart(&recordings, &archive)?;
@@ -115,7 +118,7 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
                     ..
                 }
             ),
-            super::plan::resolve,
+            resolve,
         )?;
     }
     if let Some(backups) = &answers.backups {
@@ -393,6 +396,15 @@ pub fn ask_join() -> Result<Option<super::join::Hub>, inquire::InquireError> {
 /// written. ADMIN_PASSWORD is in the file, so the file must be its owner's
 /// alone.
 pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
+    from_file_with(path, defaults, super::plan::resolve)
+}
+
+/// `from_file`, telling machines apart by address with `resolve`.
+fn from_file_with(
+    path: &Path,
+    defaults: &Defaults,
+    resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
+) -> Result<Answers, String> {
     let pairs = read_pairs(path)?;
     let get = |name: &str| {
         pairs
@@ -562,7 +574,7 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
         backups: get("BACKUPS").map(PathBuf::from),
         pushes,
     };
-    checked(answers)
+    checked(answers, resolve)
 }
 
 fn say(text: &str) {
@@ -1445,7 +1457,16 @@ fn free(port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Defaults, distinct_machines, free_port, from_file, program_in, zone_from_link};
+    use super::{Defaults, distinct_machines, free_port, program_in, zone_from_link};
+
+    /// The answers file read with no name resolving: a test's names are
+    /// invented, and a resolver with a wildcard would make them one machine.
+    fn from_file(
+        path: &std::path::Path,
+        defaults: &Defaults,
+    ) -> Result<crate::setup::steps::Answers, String> {
+        super::from_file_with(path, defaults, |_| Vec::new())
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
