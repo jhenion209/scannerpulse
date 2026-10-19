@@ -319,12 +319,16 @@ pub(super) fn next_plan(
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| crate::sessions::random_hex(8));
     let same = kept.filter(|old| old.nodes == fresh.nodes && old.referee == fresh.referee);
+    // A second changed: the database machines join again, to let it in.
+    // A second or a shared address changed: the second joins again, to
+    // take it; so does an earlier second named again.
     let joined = match &same {
-        Some(old) if old.second == fresh.second => old.joined.clone(),
+        Some(old) if old.second == fresh.second && old.shared == fresh.shared => old.joined.clone(),
         Some(old) => old
             .joined
             .iter()
-            .filter(|m| !fresh.nodes.contains(m))
+            .filter(|m| old.second == fresh.second || !fresh.nodes.contains(m))
+            .filter(|m| fresh.nodes.contains(m) || fresh.referee.as_ref() == Some(m))
             .cloned()
             .collect(),
         None => Vec::new(),
@@ -515,6 +519,57 @@ mod tests {
         assert!(
             !again.ready,
             "the first machine is ready only at the end of its setup"
+        );
+    }
+
+    #[test]
+    fn a_changed_shared_address_or_an_earlier_second_sends_the_second_to_join_again() {
+        let machines = ["ref.example.org", "db1.example.org", "192.0.2.22"];
+        let second = Some("web2.example.org");
+        let mut kept = make(
+            None,
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            second,
+        );
+        kept.shared = Some("192.0.2.50/24".into());
+        for machine in machines.iter().chain(&["web2.example.org"]) {
+            kept.mark_joined(machine);
+        }
+        // Only the shared address changes (here to none): the second joins
+        // again to take it; the database machines stay joined.
+        let again = make(
+            Some(kept.clone()),
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            second,
+        );
+        assert_eq!(again.joined, machines);
+        assert_eq!(again.waiting_all(), ["web2.example.org"]);
+        // web2, then web3, then web2 again: web2 has not joined this plan.
+        let mut to3 = make(
+            Some(kept),
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            Some("web3.example.org"),
+        );
+        for machine in machines.iter().chain(&["web3.example.org"]) {
+            to3.mark_joined(machine);
+        }
+        let back = make(
+            Some(to3),
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            second,
+        );
+        assert_eq!(back.joined, ["ref.example.org"]);
+        assert_eq!(
+            back.waiting_all(),
+            ["db1.example.org", "192.0.2.22", "web2.example.org"]
         );
     }
 

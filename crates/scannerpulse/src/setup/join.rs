@@ -233,11 +233,7 @@ impl Hub {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
-            Err(format!(
-                "on {}: {}",
-                self.address,
-                super::apply::said(&output)
-            ))
+            Err(ssh_failed(&self.address, &output))
         }
     }
 
@@ -251,6 +247,20 @@ impl Hub {
 
     pub fn done(&self, node: &str, host_keys: &str) -> Result<(), String> {
         self.run(&["done", node], host_keys).map(drop)
+    }
+}
+
+/// What a failed command to the first machine says: ssh's and the
+/// command's errors only. Its answer, which holds the plan's passwords and
+/// the key, may have arrived before it failed.
+fn ssh_failed(address: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+    let said = lines[lines.len().saturating_sub(10)..].join("\n");
+    if said.is_empty() {
+        format!("on {address}: ssh ended with {}", output.status)
+    } else {
+        format!("on {address}: {said}")
     }
 }
 
@@ -573,5 +583,21 @@ mod tests {
                 "db2.example.org ecdsa-sha2-nistp256 AAAAkey2"
             ]
         );
+    }
+
+    #[test]
+    fn a_failed_answer_from_the_first_machine_is_never_shown() {
+        use std::os::unix::process::ExitStatusExt;
+        // ssh can fail (a dropped connection gives 255) after the answer,
+        // which holds the plan's passwords and the key, has arrived.
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(255 << 8),
+            stdout: br#"{"plan":{"password":"app-secret-1"},"files":{"key":"key-secret"}}"#
+                .to_vec(),
+            stderr: b"Connection to 192.0.2.10 closed by remote host.\n".to_vec(),
+        };
+        let said = super::ssh_failed("192.0.2.10", &output);
+        assert!(said.contains("closed by remote host"), "{said}");
+        assert!(!said.contains("secret"), "{said}");
     }
 }

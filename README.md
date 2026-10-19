@@ -278,7 +278,9 @@ transcribes calls, and the second takes over when it stops. To add a second
 machine to an install already set up, run
 `sudo /usr/local/bin/scannerpulse second web2.example.org 192.0.2.50/24` here;
 the database machines then join again (to let the second in), and then the
-second.
+second. The same command finishes a setup that stopped after this machine's
+site had started (when the second's name did not resolve here yet, say);
+setup says so. The shared address is IPv4, as the site listens on IPv4.
 
 - With a second machine, Let's Encrypt is proved through DNS, not over the
   web, where only the machine holding the address could answer; each machine

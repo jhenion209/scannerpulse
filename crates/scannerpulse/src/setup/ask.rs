@@ -1400,9 +1400,13 @@ fn shared_address(shared: &str) -> Result<(), String> {
     let bad = || format!("SHARED is {shared:?}: an address/prefix, such as 192.0.2.50/24");
     let (address, prefix) = shared.split_once('/').ok_or_else(bad)?;
     let address: std::net::IpAddr = address.parse().map_err(|_| bad())?;
-    let most = if address.is_ipv4() { 32 } else { 128 };
+    if !address.is_ipv4() {
+        return Err(format!(
+            "SHARED is {shared:?}: the site listens on IPv4, so the shared address is an IPv4 one"
+        ));
+    }
     match prefix.parse::<u8>() {
-        Ok(p) if p <= most => Ok(()),
+        Ok(p) if p <= 32 => Ok(()),
         _ => Err(bad()),
     }
 }
@@ -1621,6 +1625,17 @@ mod tests {
             none,
         );
         assert!(bad.unwrap_err().contains("address/prefix"));
+        // The site listens on IPv4: an IPv6 shared address would answer nothing.
+        let six = super::check_machines(
+            &nodes,
+            None,
+            "192.0.2.10",
+            Some("web2.example.org"),
+            Some("2001:db8::50/64"),
+            false,
+            none,
+        );
+        assert!(six.unwrap_err().contains("IPv4"));
     }
 
     #[test]

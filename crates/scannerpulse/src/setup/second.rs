@@ -93,15 +93,16 @@ pub fn first_steps(
     port: u16,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
-    if let Some(shared) = shared {
-        steps.extend(super::keepalived::steps(
+    match shared {
+        Some(shared) => steps.extend(super::keepalived::steps(
             system,
             shared,
             second,
             true,
             super::keepalived::router_id(hub, second),
             port,
-        ));
+        )),
+        None => steps.push(super::keepalived::drop_step()),
     }
     steps.push(Step {
         title: "Let the second ScannerPulse machine join".into(),
@@ -175,7 +176,7 @@ pub fn steps(
         Family::Dnf => steps.push(run(
             "Install the tool for folders' access lists",
             "dnf",
-            &["install", "-y", "acl", "curl"],
+            &["install", "-y", "acl", "/usr/bin/curl"],
         )),
     }
     steps.push(super::node::script(
@@ -237,24 +238,25 @@ pub fn steps(
     steps.extend(start_steps(
         binary, system, recordings, archive, false, false, port,
     ));
-    if let Some(shared) = &plan.shared {
-        steps.extend(super::keepalived::steps(
+    match &plan.shared {
+        Some(shared) => steps.extend(super::keepalived::steps(
             system,
             shared,
             &plan.hub,
             false,
             super::keepalived::router_id(&plan.hub, name),
             port,
-        ));
+        )),
+        None => steps.push(super::keepalived::drop_step()),
     }
     Ok(steps)
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn plan() -> Plan {
+    pub(in crate::setup) fn plan() -> Plan {
         Plan {
             hub: "192.0.2.10".into(),
             hub_key: "ssh-ed25519 AAAA hub".into(),
@@ -275,7 +277,7 @@ mod tests {
         }
     }
 
-    fn files() -> HubFiles {
+    pub(in crate::setup) fn files() -> HubFiles {
         HubFiles {
             settings: "DATABASE_URL=postgres://scannerpulse@db1.example.org:5432/scannerpulse?sslmode=require\nSCANNERPULSE_HOST=web1\nSCANNERPULSE_PREFERRED=true\nSCANNERPULSE_WEB_LISTEN=0.0.0.0:8443\n".into(),
             pgpass: "*:5432:scannerpulse:scannerpulse:app-secret-1\n".into(),
@@ -394,5 +396,27 @@ mod tests {
         );
         assert!(matches!(all[all.len() - 2].action, Action::Ready));
         assert!(matches!(all.last().unwrap().action, Action::WaitForSecond));
+    }
+
+    #[test]
+    fn without_a_shared_address_each_machine_drops_setups_keepalived() {
+        use crate::setup::system::detect;
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let dropped = |steps: &[Step]| {
+            steps
+                .iter()
+                .any(|s| s.title == super::super::keepalived::drop_step().title)
+        };
+        let first = |shared| first_steps(&system, "192.0.2.10", "web2.example.org", shared, 443);
+        assert!(dropped(&first(None)));
+        assert!(!dropped(&first(Some("192.0.2.50/24"))));
+        let second = |plan: &Plan| {
+            steps(plan, &files(), &system, Path::new("/b"), "web2.example.org").unwrap()
+        };
+        assert!(dropped(&second(&Plan {
+            shared: None,
+            ..plan()
+        })));
+        assert!(!dropped(&second(&plan())));
     }
 }

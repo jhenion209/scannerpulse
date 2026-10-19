@@ -52,13 +52,12 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     // A join runs again: the second ScannerPulse machine takes the first
     // machine's files afresh.
     let refuse_finished = || {
-        let running = std::process::Command::new("systemctl")
-            .args(["is-active", "--quiet", "scannerpulse-web.service"])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !dry_run && Path::new(steps::WEB_UNIT).exists() && running {
+        if !dry_run && web_running() {
+            let finish = finish_second(plan::Plan::read(Path::new(plan::PLAN)).ok().as_ref())
+                .map(|said| format!("; {said}"))
+                .unwrap_or_default();
             return Err(format!(
-                "this machine is set up already ({} exists); `sudo /usr/local/bin/scannerpulse uninstall` removes that setup first",
+                "this machine is set up already ({} exists){finish}; `sudo /usr/local/bin/scannerpulse uninstall` removes that setup first",
                 steps::WEB_UNIT
             ));
         }
@@ -204,9 +203,41 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
             _ => Vec::new(),
         },
     };
-    apply::apply(&steps, &context, true).await?;
+    apply::apply(&steps, &context, true)
+        .await
+        .map_err(|error| {
+            // Its web runs: setup does not run here again, `second` does.
+            match finish_second(plan::Plan::read(Path::new(plan::PLAN)).ok().as_ref()) {
+                Some(said) if web_running() => format!("{error}\n{said}"),
+                _ => error,
+            }
+        })?;
     print!("{}", finished(&answers));
     Ok(())
+}
+
+/// This machine's site is set up and running.
+fn web_running() -> bool {
+    Path::new(steps::WEB_UNIT).exists()
+        && std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", "scannerpulse-web.service"])
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+/// How to finish a first machine whose second ScannerPulse machine is not
+/// yet let in (`plan` not ready): with `second`, which runs the steps left.
+fn finish_second(plan: Option<&plan::Plan>) -> Option<String> {
+    let plan = plan.filter(|plan| !plan.ready)?;
+    let second = plan.second.as_deref()?;
+    let shared = plan
+        .shared
+        .as_deref()
+        .map(|shared| format!(" {shared}"))
+        .unwrap_or_default();
+    Some(format!(
+        "to finish adding the second ScannerPulse machine once the cause is fixed, run `sudo /usr/local/bin/scannerpulse second {second}{shared}` here"
+    ))
 }
 
 /// What setup will do, shown before anything is written.
@@ -425,6 +456,28 @@ fn finished(answers: &Answers) -> String {
 mod tests {
     use super::{detail, finished, steps, summary, system};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_first_machine_stopped_after_its_web_started_is_told_to_finish_with_second() {
+        let plan = |more: &str| -> super::plan::Plan {
+            serde_json::from_str(&format!(
+                r#"{{"hub":"192.0.2.10","hub_key":"k","nodes":["a","b"],"database":"d","role":"r","password":"p","replication_password":"q"{more}}}"#
+            ))
+            .unwrap()
+        };
+        let unready = plan(r#","second":"web2.example.org","shared":"192.0.2.50/24""#);
+        let said = super::finish_second(Some(&unready)).unwrap();
+        assert!(
+            said.contains(
+                "`sudo /usr/local/bin/scannerpulse second web2.example.org 192.0.2.50/24`"
+            ),
+            "{said}"
+        );
+        let ready = plan(r#","second":"web2.example.org","ready":true"#);
+        assert_eq!(super::finish_second(Some(&ready)), None);
+        assert_eq!(super::finish_second(Some(&plan(""))), None);
+        assert_eq!(super::finish_second(None), None);
+    }
 
     #[test]
     fn with_your_certificate_the_site_is_opened_by_the_names_it_covers() {
