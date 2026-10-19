@@ -128,12 +128,15 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
     if let Some(port) = found.port {
         steps.push(super::steps::firewall(false, port));
     }
-    steps.push(run("Remove the services' units", "rm", &args));
-    steps.push(run(
-        "Read the services again",
-        "systemctl",
-        &["daemon-reload"],
-    ));
+    // A database machine or the referee has no ScannerPulse services.
+    if !((found.node || found.referee) && found.units.is_empty()) {
+        steps.push(run("Remove the services' units", "rm", &args));
+        steps.push(run(
+            "Read the services again",
+            "systemctl",
+            &["daemon-reload"],
+        ));
+    }
     if found.pgbackrest {
         steps.push(postgres(
             "Stop sending PostgreSQL's WAL to pgBackRest",
@@ -544,6 +547,8 @@ mod tests {
                 .any(|t| t.contains("database and its role") || t.contains("pgBackRest")),
             "{all:?}"
         );
+        // No ScannerPulse services there, so none to take off.
+        assert!(!all.iter().any(|t| t.contains("services")), "{all:?}");
         let referee = Found {
             referee: true,
             ..Default::default()
