@@ -619,17 +619,27 @@ fn reach(account: &str) -> String {
 /// second machine, which serves the same certificate, the shared address and
 /// the second's name.
 pub fn own_names(answers: &Answers) -> Vec<String> {
-    let mut names = answers.names.clone();
-    if let Database::Nodes(pair) = &answers.database {
-        let shared = pair.shared.as_deref().and_then(|s| s.split('/').next());
-        names.extend(
-            shared
-                .into_iter()
-                .chain(pair.second.as_deref())
-                .map(String::from),
-        );
+    match &answers.database {
+        Database::Nodes(pair) => pair_names(
+            &answers.names,
+            pair.second.as_deref(),
+            pair.shared.as_deref(),
+        ),
+        _ => answers.names.clone(),
     }
+}
+
+/// `names`, then the shared address (without its prefix) and the second
+/// machine's name.
+pub fn pair_names(names: &[String], second: Option<&str>, shared: Option<&str>) -> Vec<String> {
+    let shared = shared.and_then(|s| s.split('/').next());
     names
+        .iter()
+        .map(String::as_str)
+        .chain(shared)
+        .chain(second)
+        .map(String::from)
+        .collect()
 }
 
 /// `setfacl` with `args`, except that a filesystem without POSIX ACLs, as
@@ -1341,7 +1351,7 @@ pub(super) fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path,
 mod tests {
     use super::{
         Action, Answers, Certificate, Database, Transcription, backup_units, env_pairs, own_names,
-        pgbackrest_conf, reach, steps, unit,
+        pair_names, pgbackrest_conf, reach, steps, unit,
     };
     use crate::setup::system::detect;
     use std::path::{Path, PathBuf};
@@ -2074,6 +2084,15 @@ mod tests {
             assert!(args.iter().any(|a| a == name), "{name}: {args:?}");
         }
         assert!(own_names(&answers).contains(&"192.0.2.50".to_string()));
+        // `tls self` later, on the first machine, names them from the plan.
+        assert_eq!(
+            pair_names(
+                &["radio-a".to_string()],
+                Some("web2.example.org"),
+                Some("192.0.2.50/24")
+            ),
+            ["radio-a", "192.0.2.50", "web2.example.org"]
+        );
     }
 
     #[test]

@@ -274,7 +274,15 @@ pub async fn run_change(change: Change) -> Result<(), String> {
             )
         }
         Change::TlsSelf => {
-            let names = super::ask::defaults().names;
+            let mut names = super::ask::defaults().names;
+            // The second ScannerPulse machine serves this certificate too.
+            if let Ok(plan) = super::plan::Plan::read(Path::new(super::plan::PLAN)) {
+                names = super::steps::pair_names(
+                    &names,
+                    plan.second.as_deref(),
+                    plan.shared.as_deref(),
+                );
+            }
             let said = format!(
                 "The site serves a certificate this machine made for {}; the browser warns once.",
                 names.join(", ")

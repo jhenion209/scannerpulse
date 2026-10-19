@@ -286,8 +286,12 @@ second.
   shared address and the second's name too. After `tls install` or `tls
   self` here, join the second again: a join runs again on a machine set up,
   and the second takes this machine's settings and certificate afresh.
+  A certificate setup made before the second was added does not name the
+  shared address: `tls self` here makes one that does.
 - Uninstall on the second leaves the archive, the database and the backups
-  to this machine, and gives up the shared address first.
+  to this machine, and gives up the shared address first. To replace the
+  second, uninstall the old one first: while its keepalived runs, it would
+  hold the address too. Then run `second` here with the new one's name.
 
 An unattended join reads `JOIN` (the first machine's address) and, unless
 the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers
