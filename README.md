@@ -236,8 +236,26 @@ itself. `db promote` and `db rejoin` are not needed then; `db switchover`
 asks the referee. While the referee is down the primary goes on, but
 nothing is promoted until it returns; if the referee and the standby are
 down together, writes (filing calls) pause until the referee returns (the
-standby waits for it too), while reading and playback go on. Put the referee on a different switch from the
-database machines where you can.
+standby waits for it too), while reading and playback go on. Put the
+referee on a different switch from the database machines where you can.
+
+To replace a referee (a Raspberry Pi whose card failed, say), give the new
+one the same name and join it as before; setup keeps the install's referee
+once the database machines have joined. Then register each database
+machine with it again, the primary first, then the standby, as root there:
+
+```
+runuser -u postgres -- env PATH=/usr/lib/postgresql/17/bin:/usr/bin:/bin \
+  pg_autoctl disable monitor --force --pgdata /var/lib/postgresql/17/sp
+runuser -u postgres -- env PATH=/usr/lib/postgresql/17/bin:/usr/bin:/bin \
+  pg_autoctl enable monitor --pgdata /var/lib/postgresql/17/sp \
+  'postgres://autoctl_node@ref.example.org:5432/pg_auto_failover?sslmode=require'
+systemctl restart pgautofailover
+```
+
+(On the Red Hat family the programs are in `/usr/pgsql-17/bin` and the data
+in `/var/lib/pgsql/17/sp`.) Joining a database machine again checks that the
+referee knows it, and says these steps if it does not.
 
 An unattended join reads `JOIN` (the first machine's address) and, unless
 the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers

@@ -216,8 +216,36 @@ fn write_plan(
         .to_string();
     // A machine joining meanwhile waits for the plan's lock.
     Plan::replace(Path::new(PLAN), |kept| {
+        may_replan(kept.as_ref(), nodes, referee)?;
         Ok(next_plan(kept, nodes, hub, &hub_key, password, referee))
     })
+}
+
+/// Whether the plan may name `referee` (or none) for `nodes`: once the
+/// same machines have joined, their referee (or their promotion by hand)
+/// stays, since they are registered with it; replacing the referee is the
+/// README's, and a change of mode a new install.
+pub(super) fn may_replan(
+    kept: Option<&super::plan::Plan>,
+    nodes: &[String],
+    referee: Option<&str>,
+) -> Result<(), String> {
+    match kept {
+        Some(old)
+            if old.nodes == nodes
+                && old.referee.as_deref() != referee
+                && !old.joined.is_empty() =>
+        {
+            let had = match &old.referee {
+                Some(r) => format!("{r} as their referee"),
+                None => "promotion by hand".into(),
+            };
+            Err(format!(
+                "the database machines have joined with {had}: setup keeps it (to replace a referee, give the new one the same name, as the README says)"
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The plan for `nodes` and `referee`, from the one `kept`: the machines'
@@ -342,6 +370,41 @@ mod tests {
 
     fn nodes() -> Vec<String> {
         vec!["db1.example.org".into(), "192.0.2.22".into()]
+    }
+
+    #[test]
+    fn the_referee_is_not_changed_once_the_machines_have_joined() {
+        let mut kept = super::next_plan(
+            None,
+            &nodes(),
+            "192.0.2.10",
+            "key",
+            "app",
+            Some("ref.example.org"),
+        );
+        // Nothing has joined yet: any referee, or none.
+        assert_eq!(
+            super::may_replan(Some(&kept), &nodes(), Some("ref2.example.org")),
+            Ok(())
+        );
+        assert_eq!(super::may_replan(Some(&kept), &nodes(), None), Ok(()));
+        kept.mark_joined("ref.example.org");
+        assert_eq!(
+            super::may_replan(Some(&kept), &nodes(), Some("ref.example.org")),
+            Ok(())
+        );
+        for other in [Some("ref2.example.org"), None] {
+            let error = super::may_replan(Some(&kept), &nodes(), other).unwrap_err();
+            assert!(error.contains("have joined"), "{error}");
+        }
+        // Promoted by hand, joined: no referee now either.
+        let mut by_hand = super::next_plan(None, &nodes(), "192.0.2.10", "key", "app", None);
+        by_hand.mark_joined("db1.example.org");
+        assert!(super::may_replan(Some(&by_hand), &nodes(), Some("ref.example.org")).is_err());
+        // Other machines are a new install.
+        let others = vec!["db3.example.org".to_string(), "db4.example.org".to_string()];
+        assert_eq!(super::may_replan(Some(&kept), &others, None), Ok(()));
+        assert_eq!(super::may_replan(None, &nodes(), None), Ok(()));
     }
 
     #[test]

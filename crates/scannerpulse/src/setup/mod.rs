@@ -140,8 +140,9 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         let db_password = match &answers.database {
             steps::Database::Here => made_password.clone(),
             steps::Database::Nodes(pair) => {
-                plan::kept_password(plan::Plan::read(Path::new(plan::PLAN)).ok(), &pair.nodes)
-                    .unwrap_or_else(|| made_password.clone())
+                let kept = plan::Plan::read(Path::new(plan::PLAN)).ok();
+                apply::may_replan(kept.as_ref(), &pair.nodes, pair.referee.as_deref())?;
+                plan::kept_password(kept, &pair.nodes).unwrap_or_else(|| made_password.clone())
             }
             steps::Database::Theirs(remote) => remote.password.clone(),
         };

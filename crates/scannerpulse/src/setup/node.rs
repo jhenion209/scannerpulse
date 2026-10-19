@@ -512,6 +512,18 @@ fn by_referee(
         },
     });
     steps.push(script(
+        "Check that the referee still knows this machine",
+        CHECK_REGISTERED,
+        &[
+            ("UNIT", AUTOCTL_UNIT),
+            ("MONITOR", &monitor),
+            ("NAME", name),
+            ("DATA", &data),
+            ("BIN", system.postgres_bin()),
+        ],
+        None,
+    ));
+    steps.push(script(
         "Let the ScannerPulse machine in",
         REPLACE_BLOCK,
         &[("MARK", HUB_MARK), ("HBA", &format!("{data}/pg_hba.conf"))],
@@ -545,6 +557,16 @@ fn by_referee(
     }
     steps
 }
+
+/// A machine registered before (its pg_autoctl service written) that the
+/// referee no longer knows: the referee was made anew. Registering it again
+/// is pg_auto_failover's own, the primary first: the steps are said.
+const CHECK_REGISTERED: &str = r#"[ -f "$UNIT" ] || exit 0
+n=$(runuser -u postgres -- psql "$MONITOR" -tAXc "SELECT count(*) FROM pgautofailover.node WHERE nodehost = '$NAME'") || { echo "the referee does not answer ($MONITOR)" >&2; exit 1; }
+[ "$n" -gt 0 ] && exit 0
+echo "the referee no longer knows this machine (was it made anew?). Register it again, the primary first, then the standby: runuser -u postgres -- env PATH=$BIN:/usr/bin:/bin pg_autoctl disable monitor --force --pgdata $DATA; then runuser -u postgres -- env PATH=$BIN:/usr/bin:/bin pg_autoctl enable monitor --pgdata $DATA '$MONITOR'; then systemctl restart pgautofailover" >&2
+exit 1
+"#;
 
 /// The end of each of setup's lines in an access-rules file: pg_autoctl and
 /// the person add their own rules to the same file.
@@ -1532,6 +1554,24 @@ mod tests {
             args[1]
         );
         assert!(env.contains(&("DATA".into(), "/var/lib/postgresql/17/sp".into())));
+        // Joined again, a machine the referee no longer knows (a referee
+        // made anew) is refused, with the steps that register it again.
+        let check = "Check that the referee still knows this machine";
+        assert_eq!(at(check), at(register) + 1);
+        let (_, args, env, _) = ran(&first, check);
+        assert!(
+            args[1].starts_with("[ -f \"$UNIT\" ] || exit 0"),
+            "{}",
+            args[1]
+        );
+        assert!(args[1].contains("pgautofailover.node"), "{}", args[1]);
+        assert!(
+            args[1].contains("disable monitor --force") && args[1].contains("enable monitor"),
+            "{}",
+            args[1]
+        );
+        assert!(env.contains(&("NAME".into(), "db1.example.org".into())));
+        assert!(!args.join(" ").contains("secret"));
         // The ScannerPulse machine's access, then pg_autoctl's service.
         let hba = "Let the ScannerPulse machine in";
         let (_, _, _, input) = ran(&first, hba);
