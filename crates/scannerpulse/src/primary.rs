@@ -79,14 +79,43 @@ pub fn timeline_of(wal: &str) -> Option<u32> {
 /// answers within `ASK_LIMIT` and is not a standby. Each promotion starts a
 /// newer timeline.
 async fn timeline(options: &PgConnectOptions) -> Option<u32> {
+    timeline_why(options).await.ok().flatten()
+}
+
+/// The node's timeline if it is a primary, `None` for a standby, or why it
+/// did not answer.
+async fn timeline_why(options: &PgConnectOptions) -> Result<Option<u32>, String> {
     let ask = async {
         let mut conn = PgConnection::connect_with(options).await?;
         let wal: Option<String> = sqlx::query_scalar(CURRENT_WAL).fetch_one(&mut conn).await?;
         let _ = conn.close().await;
         Ok::<_, sqlx::Error>(wal)
     };
-    let wal = tokio::time::timeout(ASK_LIMIT, ask).await.ok()?.ok()??;
-    timeline_of(&wal)
+    match tokio::time::timeout(ASK_LIMIT, ask).await {
+        Err(_) => Err(format!("no answer within {} s", ASK_LIMIT.as_secs())),
+        Ok(Err(error)) => Err(error.to_string()),
+        Ok(Ok(wal)) => Ok(wal.as_deref().and_then(timeline_of)),
+    }
+}
+
+/// Which of `nodes` is the primary now, or why none is: each node's
+/// reason (no answer, or a standby).
+pub async fn find_why(options: &PgConnectOptions, nodes: &[Node]) -> Result<usize, String> {
+    let mut timelines = Vec::with_capacity(nodes.len());
+    let mut reasons = Vec::new();
+    for node in nodes {
+        let answer = timeline_why(&on(options, node)).await;
+        let why = match &answer {
+            Ok(Some(_)) => None,
+            Ok(None) => Some("a standby".to_string()),
+            Err(error) => Some(error.clone()),
+        };
+        if let Some(why) = why {
+            reasons.push(format!("{}:{}: {why}", node.host, node.port));
+        }
+        timelines.push(answer.ok().flatten());
+    }
+    newest(&timelines).ok_or_else(|| reasons.join("; "))
 }
 
 /// Which of the nodes' timelines (`None` for a standby or no answer) is

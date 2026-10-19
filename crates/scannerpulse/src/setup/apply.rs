@@ -235,7 +235,7 @@ fn write_plan(
 /// `scannerpulse join done`) and one of them answers as the primary.
 async fn wait_for_nodes(context: &Context) -> Result<(), String> {
     use super::plan::{PLAN, Plan};
-    let mut said = None;
+    let (mut said, mut why_said) = (None, String::new());
     loop {
         let plan = Plan::read(Path::new(PLAN))?;
         let waiting: Vec<String> = plan.waiting().into_iter().map(String::from).collect();
@@ -253,8 +253,13 @@ async fn wait_for_nodes(context: &Context) -> Result<(), String> {
                     port: super::steps::PORT_PG,
                 })
                 .collect();
-            if crate::primary::find(&options, &nodes).await.is_some() {
-                return Ok(());
+            match crate::primary::find_why(&options, &nodes).await {
+                Ok(_) => return Ok(()),
+                Err(why) if why != why_said => {
+                    println!("      no primary yet: {why}");
+                    why_said = why;
+                }
+                Err(_) => {}
             }
         }
         if said.as_ref() != Some(&waiting) {

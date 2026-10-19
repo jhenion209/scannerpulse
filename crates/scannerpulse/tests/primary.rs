@@ -51,6 +51,20 @@ async fn the_primary_is_the_node_that_answers_and_is_not_a_standby(pool: PgPool)
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn no_primary_names_why_each_node_did_not_answer(pool: PgPool) {
+    let options = (*pool.connect_options()).clone();
+    let error = primary::find_why(&options, &[node("127.0.0.1", 1)])
+        .await
+        .unwrap_err();
+    assert!(error.contains("127.0.0.1:1"), "{error}");
+    let here = node(options.get_host(), options.get_port());
+    assert_eq!(
+        primary::find_why(&options, &[node("127.0.0.1", 1), here]).await,
+        Ok(1)
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_pool_moves_to_the_primary(pool: PgPool) {
     let options = (*pool.connect_options()).clone();
     let here = node(options.get_host(), options.get_port());

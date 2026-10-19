@@ -1268,7 +1268,21 @@ fn switchover(
     say: impl Fn(&str),
 ) -> Result<String, String> {
     let status = |node: &str| as_status(run(node, "status"));
-    let (p, s) = ready_to_switch(&status(&nodes[0]), &status(&nodes[1]))?;
+    // A machine that does not answer is named with the reason.
+    let answers: Vec<Result<String, String>> = nodes.iter().map(|n| run(n, "status")).collect();
+    let silent: Vec<String> = nodes
+        .iter()
+        .zip(&answers)
+        .filter_map(|(node, answer)| answer.as_ref().err().map(|why| format!("{node}: {why}")))
+        .collect();
+    if !silent.is_empty() {
+        return Err(format!(
+            "both database machines must answer; {}",
+            silent.join("; ")
+        ));
+    }
+    let [first, second] = [&answers[0], &answers[1]].map(|a| as_status(a.clone()));
+    let (p, s) = ready_to_switch(&first, &second)?;
     let (primary, standby) = (nodes[p].as_str(), nodes[s].as_str());
     // The primary, which may be stopped, is started again unchanged.
     let start_again = |why: String| match run(primary, "start") {
@@ -1919,6 +1933,20 @@ mod tests {
         assert!(!asked.contains(&"db1.example.org start".to_string()));
         assert!(error.contains("left stopped"), "{error}");
         assert!(error.contains("db rejoin` on db1.example.org"), "{error}");
+    }
+
+    #[test]
+    fn a_machine_that_does_not_answer_is_named_with_its_reason() {
+        let (result, asked) = switch(|node, command, promoted| match (node, command) {
+            ("db2.example.org", "status") => {
+                Err("ssh: connect to host db2.example.org port 22: Connection refused".into())
+            }
+            _ => healthy(node, command, promoted),
+        });
+        let error = result.unwrap_err();
+        assert!(error.contains("db2.example.org"), "{error}");
+        assert!(error.contains("Connection refused"), "{error}");
+        assert!(!asked.iter().any(|a| a.contains("stop")));
     }
 
     #[test]
