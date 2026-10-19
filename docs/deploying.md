@@ -95,7 +95,12 @@ steps, with the site up throughout:
    missing.
 3. `sudo /usr/local/bin/scannerpulse archive move /srv/shared/archive --switch`
    pauses filing (the recordings wait in their folder), copies the calls filed
-   since your copy, compares again, and points the site at the share.
+   since your copy, checks them, and points the site at the share. Ctrl-C or
+   a closed terminal waits for it to finish, and filing starts again however
+   it ends.
+
+The share's folder may not be the recordings folder or the backups' folder,
+nor sit inside one or hold one: the command refuses it.
 
 The old archive stays as it was until you remove it; the same command the
 other way moves back. The backups' folder (`.scannerpulse-backups`) is not

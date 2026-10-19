@@ -65,16 +65,9 @@ pub fn compare(old: &Path, new: &Path, progress: impl Fn(u64)) -> std::io::Resul
             if kind.is_dir() {
                 folders.push(rel);
             } else if kind.is_file() {
-                let size = entry.metadata()?.len();
-                compared.files += 1;
-                compared.bytes += size;
+                note(&mut compared, new, rel_text, entry.metadata()?.len());
                 if compared.files % 10_000 == 0 {
                     progress(compared.files);
-                }
-                match std::fs::metadata(new.join(&rel)) {
-                    Ok(there) if there.is_file() && there.len() == size => {}
-                    Ok(_) => compared.differ.push(rel_text),
-                    Err(_) => compared.missing.push(rel_text),
                 }
             }
         }
@@ -82,6 +75,32 @@ pub fn compare(old: &Path, new: &Path, progress: impl Fn(u64)) -> std::io::Resul
     compared.missing.sort();
     compared.differ.sort();
     Ok(compared)
+}
+
+/// Counts the old archive's file `rel`, of `size` bytes, in `compared`, and
+/// notes it when the new folder lacks it or holds another size.
+fn note(compared: &mut Compared, new: &Path, rel: String, size: u64) {
+    compared.files += 1;
+    compared.bytes += size;
+    match std::fs::metadata(new.join(&rel)) {
+        Ok(there) if there.is_file() && there.len() == size => {}
+        Ok(_) => compared.differ.push(rel),
+        Err(_) => compared.missing.push(rel),
+    }
+}
+
+/// Compares only the archive's files `rels`, as `compare` does; a file the
+/// old archive no longer holds is left out.
+pub fn compare_these(old: &Path, new: &Path, rels: &[String]) -> Compared {
+    let mut compared = Compared::default();
+    for rel in rels {
+        if let Ok(here) = std::fs::metadata(old.join(rel))
+            && here.is_file()
+        {
+            note(&mut compared, new, rel.clone(), here.len());
+        }
+    }
+    compared
 }
 
 /// The differences in words: how many, and the first few by name.
@@ -116,6 +135,39 @@ pub fn copy_line(old: &Path, new: &Path) -> String {
     )
 }
 
+/// The folders a `RequiresMountsFor=` line names, each as written: quoted
+/// names may hold spaces.
+fn mount_names(folders: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let (mut name, mut quoted, mut escaped) = (String::new(), false, false);
+    for c in folders.chars() {
+        match c {
+            _ if escaped => {
+                name.push(c);
+                escaped = false;
+            }
+            '\\' => {
+                name.push(c);
+                escaped = true;
+            }
+            '"' => {
+                name.push(c);
+                quoted = !quoted;
+            }
+            ' ' if !quoted => {
+                if !name.is_empty() {
+                    names.push(std::mem::take(&mut name));
+                }
+            }
+            _ => name.push(c),
+        }
+    }
+    if !name.is_empty() {
+        names.push(name);
+    }
+    names
+}
+
 /// A unit file's text with the archive's folder `old` in its
 /// `RequiresMountsFor=` line made `new`; none when the line does not name it.
 pub fn moved_unit(text: &str, old: &Path, new: &Path) -> Option<String> {
@@ -124,18 +176,62 @@ pub fn moved_unit(text: &str, old: &Path, new: &Path) -> Option<String> {
     let lines: Vec<String> = text
         .lines()
         .map(|line| match line.strip_prefix("RequiresMountsFor=") {
-            Some(folders) if folders.split(' ').any(|folder| folder == old) => {
+            Some(folders) if mount_names(folders).contains(&old) => {
                 found = true;
-                let folders: Vec<&str> = folders
-                    .split(' ')
-                    .map(|folder| if folder == old { new.as_str() } else { folder })
+                let names: Vec<String> = mount_names(folders)
+                    .into_iter()
+                    .map(|name| if name == old { new.clone() } else { name })
                     .collect();
-                format!("RequiresMountsFor={}", folders.join(" "))
+                format!("RequiresMountsFor={}", names.join(" "))
             }
             _ => line.to_string(),
         })
         .collect();
     found.then(|| lines.join("\n") + "\n")
+}
+
+/// The new folder may not be the recordings folder or the backups' folder,
+/// nor inside one, nor hold one: the watcher would take the archive's files
+/// for new recordings, and the filer delete them as filed.
+pub fn apart_from(new: &Path, sources: &[PathBuf], backups: Option<&Path>) -> Result<(), String> {
+    for other in sources.iter().map(PathBuf::as_path).chain(backups) {
+        if new.starts_with(other) || other.starts_with(new) {
+            return Err(format!(
+                "{} and {} must not be the same folder or inside each other",
+                new.display(),
+                other.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The calls' files of the old archive written at `since` or later. Only
+/// the filer writes there, a new file each time, so a folder unchanged since
+/// `since` gained no file and its files are not read: on a large archive
+/// only the day's folders are.
+pub fn changed_since(old: &Path, since: std::time::SystemTime) -> std::io::Result<Vec<String>> {
+    let mut changed = Vec::new();
+    let mut folders = vec![(PathBuf::new(), true)];
+    while let Some((folder, fresh)) = folders.pop() {
+        for entry in std::fs::read_dir(old.join(&folder))? {
+            let entry = entry?;
+            let rel = folder.join(entry.file_name());
+            let rel_text = rel.to_string_lossy().to_string();
+            if !counted(&rel_text) {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                let fresh = entry.metadata()?.modified()? >= since;
+                folders.push((rel, fresh));
+            } else if fresh && kind.is_file() && entry.metadata()?.modified()? >= since {
+                changed.push(rel_text);
+            }
+        }
+    }
+    changed.sort();
+    Ok(changed)
 }
 
 /// Points the archive (the primary location) at `new`.
@@ -262,7 +358,20 @@ pub async fn run(
             "the new folder may not be inside the archive, nor the archive inside it".into(),
         );
     }
+    let sources: Vec<PathBuf> = sqlx::query_scalar::<_, String>("SELECT path FROM sources")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|path| canonical(PathBuf::from(path)))
+        .collect();
+    let backups = std::env::var_os("SCANNERPULSE_BACKUPS").map(|b| canonical(PathBuf::from(b)));
+    apart_from(&new, &sources, backups.as_deref())?;
     usable(&new, &say)?;
+    // Whatever is filed from here on is looked at again in the pause.
+    // ponytail: a minute's margin for the archive's clock (a share's server);
+    // a larger skew would miss the calls filed during the comparison.
+    let started = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
     say(&format!(
         "Comparing {} with {}...",
         old.display(),
@@ -298,35 +407,71 @@ pub async fn run(
             copy_line(&old, &new)
         ));
     }
+    // Both units are moved in words before anything stops.
+    let mut units = Vec::new();
+    for unit in ["scannerpulse-web.service", "scannerpulse-ingest.service"] {
+        let path = Path::new("/etc/systemd/system").join(unit);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let moved = moved_unit(&text, &old, &new).ok_or_else(|| {
+            format!(
+                "{} does not name {} on its RequiresMountsFor= line, so nothing was changed; put it back as setup wrote it, then try again",
+                path.display(),
+                old.display()
+            )
+        })?;
+        units.push((path, moved));
+    }
     let _lock = crate::update::exclusive(Path::new(crate::update::LOCK))?;
+    // Ctrl-C, a closed terminal or a stop wait for the end of the switch,
+    // and the guard starts filing again however it ends, a panic included.
+    use tokio::signal::unix::{SignalKind, signal};
+    let _held = [
+        SignalKind::interrupt(),
+        SignalKind::hangup(),
+        SignalKind::terminate(),
+    ]
+    .into_iter()
+    .map(signal)
+    .collect::<std::io::Result<Vec<_>>>()
+    .map_err(|error| format!("cannot hold off signals: {error}"))?;
+    let _filing = Filing;
     say("Pausing filing (the recordings wait in their folder)...");
     systemctl(&["stop", "scannerpulse-ingest.service"])?;
     let switched = async {
-        let since = compare(&old, &new, |_| {}).map_err(|error| error.to_string())?;
-        for rel in since.missing.iter().chain(&since.differ) {
-            copy_as_account(&old, &new, rel)?;
-        }
-        if !since.same() {
+        say("Looking for the calls filed since the comparison began...");
+        let mut late: Vec<String> = compared
+            .missing
+            .iter()
+            .chain(&compared.differ)
+            .cloned()
+            .collect();
+        late.extend(changed_since(&old, started).map_err(|error| error.to_string())?);
+        late.sort();
+        late.dedup();
+        let since = compare_these(&old, &new, &late);
+        let copy: Vec<&String> = since.missing.iter().chain(&since.differ).collect();
+        if !copy.is_empty() {
             say(&format!(
-                "Copied {} file(s) filed since the copy.",
-                since.missing.len() + since.differ.len()
+                "Copying {} file(s) filed since the copy...",
+                copy.len()
             ));
         }
-        let last = compare(&old, &new, |_| {}).map_err(|error| error.to_string())?;
+        for rel in &copy {
+            copy_as_account(&old, &new, rel)?;
+        }
+        let last = compare_these(&old, &new, &late);
         if !last.same() {
             return Err(format!(
                 "the new folder still differs, so nothing was switched:\n{}",
                 differences(&last)
             ));
         }
-        for unit in ["scannerpulse-web.service", "scannerpulse-ingest.service"] {
-            let path = Path::new("/etc/systemd/system").join(unit);
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            if let Some(moved) = moved_unit(&text, &old, &new) {
-                std::fs::write(&path, moved)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-            }
+        if !copy.is_empty() {
+            say(&format!("Copied {} file(s).", copy.len()));
+        }
+        for (path, moved) in &units {
+            std::fs::write(path, moved).map_err(|error| format!("{}: {error}", path.display()))?;
         }
         systemctl(&["daemon-reload"])?;
         point_at(conn, &new)
@@ -349,6 +494,21 @@ pub async fn run(
     switched?;
     restarted?;
     Ok(moved_text(&old, &new, old.join(BACKUPS).is_dir()))
+}
+
+/// The path with its links resolved, or as it is when it is not there.
+fn canonical(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
+/// Starts filing when dropped, so that a switch that ends early, by an error
+/// or a panic, does not leave it stopped; a no-op when filing runs.
+struct Filing;
+
+impl Drop for Filing {
+    fn drop(&mut self) {
+        let _ = systemctl(&["start", "scannerpulse-ingest.service"]);
+    }
 }
 
 /// What the person is told once the archive has moved from `old` to `new`;
@@ -450,6 +610,69 @@ mod tests {
     }
 
     #[test]
+    fn the_new_folder_stays_apart_from_the_recordings_and_the_backups() {
+        let sources = vec![PathBuf::from("/srv/recordings")];
+        let backups = Some(PathBuf::from("/srv/backups"));
+        assert!(apart_from(Path::new("/srv/shared"), &sources, backups.as_deref()).is_ok());
+        // Inside the recordings folder, the watcher would take the archive's
+        // files for new recordings, and the filer would delete them.
+        for refused in ["/srv/recordings/archive", "/srv", "/srv/backups/archive"] {
+            let error = apart_from(Path::new(refused), &sources, backups.as_deref()).unwrap_err();
+            assert!(error.contains("inside each other"), "{refused}: {error}");
+        }
+    }
+
+    #[test]
+    fn only_files_changed_since_a_moment_are_looked_at_again() {
+        let old = tempfile::tempdir().unwrap();
+        write(old.path(), "2026-10-18/1-A/before.mp3", b"b");
+        let touched = std::process::Command::new("touch")
+            .args(["-d", "2026-10-18 12:00:00"])
+            .arg(old.path().join("2026-10-18/1-A/before.mp3"))
+            .status()
+            .unwrap();
+        assert!(touched.success());
+        let since = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        write(old.path(), "2026-10-19/Unknown/late.mp3", b"late");
+        write(old.path(), ".scannerpulse-backups/dump/x.sql", b"dump");
+        // A folder unchanged since then gained no file: its files are not
+        // read, so a pause reads only the day's folders.
+        write(old.path(), "2026-10-17/1-A/kept.mp3", b"k");
+        let touched = std::process::Command::new("touch")
+            .args(["-d", "2026-10-17 12:00:00"])
+            .arg(old.path().join("2026-10-17/1-A"))
+            .status()
+            .unwrap();
+        assert!(touched.success());
+        assert_eq!(
+            changed_since(old.path(), since).unwrap(),
+            vec!["2026-10-19/Unknown/late.mp3".to_string()]
+        );
+    }
+
+    #[test]
+    fn only_the_files_named_are_compared_again() {
+        let (old, new) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for rel in ["d/a.mp3", "d/b.mp3", "d/c.mp3"] {
+            write(old.path(), rel, b"abc");
+        }
+        write(new.path(), "d/a.mp3", b"abc");
+        write(new.path(), "d/c.mp3", b"c");
+        let named: Vec<String> = ["d/a.mp3", "d/b.mp3", "d/c.mp3", "d/gone.mp3"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            compare_these(old.path(), new.path(), &named),
+            Compared {
+                files: 3,
+                bytes: 9,
+                missing: vec!["d/b.mp3".into()],
+                differ: vec!["d/c.mp3".into()],
+            }
+        );
+    }
+
+    #[test]
     fn many_differences_are_counted_after_the_first_few() {
         let compared = Compared {
             missing: (0..25).map(|n| format!("2026-10-19/1-A/{n}.mp3")).collect(),
@@ -484,6 +707,17 @@ mod tests {
             "{moved}"
         );
         assert!(moved.contains("User=scannerpulse"), "{moved}");
+        // A folder with a space (setup allows one) is one quoted name.
+        let spaced = "RequiresMountsFor=\"/srv/recordings\" \"/srv/my archive\"\n";
+        assert_eq!(
+            moved_unit(
+                spaced,
+                Path::new("/srv/my archive"),
+                Path::new("/srv/shared")
+            )
+            .unwrap(),
+            "RequiresMountsFor=\"/srv/recordings\" \"/srv/shared\"\n"
+        );
         // A unit that does not name the archive is left alone.
         assert_eq!(
             moved_unit(unit, Path::new("/srv/other"), Path::new("/x")),

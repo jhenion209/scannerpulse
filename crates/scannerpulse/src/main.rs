@@ -990,8 +990,9 @@ async fn run() -> ExitCode {
             let result = match as_root() {
                 Ok(()) => match connect().await {
                     Ok(mut conn) => {
+                        // A terminal gone mid-switch must not panic it.
                         scannerpulse::setup::archive_move::run(&mut conn, &new, switch, |line| {
-                            println!("{line}")
+                            let _ = writeln!(std::io::stdout(), "{line}");
                         })
                         .await
                     }
