@@ -71,6 +71,9 @@ pub struct Pair {
     pub nodes: [String; 2],
     /// This machine's address, as they reach it.
     pub hub: String,
+    /// The referee, which promotes the standby by itself; none when the
+    /// standby is promoted by hand.
+    pub referee: Option<String>,
 }
 
 impl Pair {
@@ -250,6 +253,7 @@ pub enum Action {
         nodes: Vec<String>,
         hub: String,
         password: String,
+        referee: Option<String>,
     },
     /// Waits until both database machines have joined and one is the
     /// primary.
@@ -874,6 +878,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 nodes: pair.nodes.to_vec(),
                 hub: pair.hub.clone(),
                 password: db_password.to_string(),
+                referee: pair.referee.clone(),
             },
         });
         steps.push(Step {
@@ -1732,6 +1737,7 @@ mod tests {
             database: Database::Nodes(super::Pair {
                 nodes: ["db1.example.org".into(), "2001:db8::22".into()],
                 hub: "192.0.2.10".into(),
+                referee: None,
             }),
             ..answers()
         }
@@ -1772,10 +1778,12 @@ mod tests {
             nodes,
             hub,
             password,
+            referee,
         } = &all[at("Write the plan of the database machines")].action
         else {
             panic!()
         };
+        assert_eq!(referee, &None);
         assert_eq!(
             nodes,
             &["db1.example.org".to_string(), "2001:db8::22".to_string()]
@@ -1800,6 +1808,21 @@ mod tests {
             panic!()
         };
         assert_eq!(contents, "*:5432:scannerpulse:scannerpulse:db secret\n");
+        // With a referee, the plan names it.
+        let mut refereed = pair();
+        if let Database::Nodes(p) = &mut refereed.database {
+            p.referee = Some("ref.example.org".into());
+        }
+        let all = steps(
+            &refereed,
+            &detect(DEBIAN, "x86_64").unwrap(),
+            Path::new("/b"),
+            "db secret",
+        );
+        assert!(all.iter().any(|s| matches!(
+            &s.action,
+            Action::Plan { referee: Some(r), .. } if r == "ref.example.org"
+        )));
     }
 
     #[test]

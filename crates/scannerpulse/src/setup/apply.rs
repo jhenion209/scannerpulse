@@ -71,7 +71,8 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 nodes,
                 hub,
                 password,
-            } => write_plan(nodes, hub, password).map_err(fail)?,
+                referee,
+            } => write_plan(nodes, hub, password, referee.as_deref()).map_err(fail)?,
             Action::WaitForNodes => wait_for_nodes(context).await.map_err(fail)?,
         }
     }
@@ -192,16 +193,23 @@ pub async fn first_admin(
 /// Writes the plan of the database machines with this machine's public
 /// key. A plan for the same machines keeps who has joined and the
 /// replication role's password, so setup can run again.
-fn write_plan(nodes: &[String], hub: &str, password: &str) -> Result<(), String> {
+fn write_plan(
+    nodes: &[String],
+    hub: &str,
+    password: &str,
+    referee: Option<&str>,
+) -> Result<(), String> {
     use super::plan::{PLAN, Plan, SSH};
     let key_path = format!("{SSH}/id_ed25519.pub");
     let hub_key = std::fs::read_to_string(&key_path)
         .map_err(|error| format!("{key_path}: {error}"))?
         .trim()
         .to_string();
+    // The machines' passwords, and who has joined, stay while the machines
+    // do.
     let kept = Plan::read(Path::new(PLAN))
         .ok()
-        .filter(|old| old.nodes == nodes);
+        .filter(|old| old.nodes == nodes && old.referee.as_deref() == referee);
     let plan = Plan {
         hub: hub.to_string(),
         hub_key,
@@ -213,6 +221,12 @@ fn write_plan(nodes: &[String], hub: &str, password: &str) -> Result<(), String>
             .as_ref()
             .map(|old| old.replication_password.clone())
             .unwrap_or_else(|| crate::sessions::random_hex(24)),
+        referee: referee.map(str::to_string),
+        monitor_password: match (&kept, referee) {
+            (Some(old), _) => old.monitor_password.clone(),
+            (None, Some(_)) => crate::sessions::random_hex(24),
+            (None, None) => String::new(),
+        },
         joined: kept.map(|old| old.joined).unwrap_or_default(),
     };
     plan.write(Path::new(PLAN))
@@ -246,7 +260,7 @@ async fn wait_for_nodes(context: &Context) -> Result<(), String> {
         }
         if said.as_ref() != Some(&waiting) {
             if waiting.is_empty() {
-                println!("      both have joined; waiting for the primary to answer");
+                println!("      all have joined; waiting for the primary to answer");
             } else {
                 let first = waiting.first().map(String::as_str).unwrap_or("");
                 println!(

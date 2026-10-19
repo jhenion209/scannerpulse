@@ -179,12 +179,16 @@ db          as root, with two database machines: promote, on the standby
             when the primary is gone, makes it the primary (refused while
             the other still answers as one); rejoin, on a former primary,
             makes it the new primary's standby; switchover, on the
-            ScannerPulse machine, swaps the roles while both are healthy
-node        a database machine's own: serve is what the ScannerPulse
-            machine's key may run there (status, stop, promote, follow
-            HOST); backup, from its timer, dumps the database on the primary
-join        on the ScannerPulse machine, as root, for a joining database
-            machine: info gives its place and the plan; done notes it
+            ScannerPulse machine, swaps the roles while both are healthy.
+            With a referee, it promotes and rejoins by itself, and
+            switchover asks it
+node        a database machine's or the referee's own: serve is what the
+            ScannerPulse machine's key may run there (status, stop, start,
+            promote [after LSN], follow HOST, switchover); backup, from its
+            timer, dumps the database on the primary
+join        on the ScannerPulse machine, as root, for a joining machine
+            (a database machine or the referee): info gives its place and
+            the plan; done notes it
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
             the backups stay unless each is named, and each named one is

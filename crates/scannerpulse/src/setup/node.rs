@@ -30,6 +30,9 @@ pub struct NodeFile {
     pub nodes: Vec<String>,
     pub hub: String,
     pub replication_password: String,
+    /// The referee, when it promotes the standby; none by hand.
+    #[serde(default)]
+    pub referee: Option<String>,
 }
 
 /// Never the password.
@@ -130,7 +133,12 @@ fn psql_if_cluster(title: &str, data: &str, sql: String) -> Step {
 
 /// A shell script run as a step, its values as named variables and
 /// `input` on its standard input.
-fn script(title: &str, body: &str, vars: &[(&str, &str)], input: Option<String>) -> Step {
+pub(super) fn script(
+    title: &str,
+    body: &str,
+    vars: &[(&str, &str)],
+    input: Option<String>,
+) -> Step {
     Step {
         title: title.into(),
         action: Action::Run {
@@ -157,9 +165,25 @@ pub fn steps(
     hub: &[IpAddr],
     nodes: &[IpAddr],
 ) -> Vec<Step> {
+    let mut steps = install(system, plan.referee.is_some());
+    match &plan.referee {
+        Some(referee) => steps.extend(by_referee(plan, index, referee, system, hub)),
+        None => steps.extend(by_hand(plan, index, system, binary, hub, nodes)),
+    }
+    steps.push(hub_key_step(plan, hub, binary));
+    steps.extend(tail(plan, index, system, binary));
+    steps
+}
+
+/// PostgreSQL 17 from the PostgreSQL project's repository, with
+/// pg_auto_failover when a referee promotes the standby (`auto`).
+pub(super) fn install(system: &System, auto: bool) -> Vec<Step> {
     let mut steps = Vec::new();
-    let data = system.postgres_data();
-    let service = system.postgres_service();
+    let title = if auto {
+        "Install PostgreSQL 17, pg_auto_failover and SSH"
+    } else {
+        "Install PostgreSQL 17 and SSH"
+    };
     match system.family {
         Family::Apt => {
             let wait = "DPkg::Lock::Timeout=300";
@@ -185,18 +209,18 @@ pub fn steps(
                 "/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh",
                 &["-y"],
             ));
-            steps.push(run(
-                "Install PostgreSQL 17 and SSH",
-                "apt-get",
-                &[
-                    "-o",
-                    wait,
-                    "install",
-                    "-y",
-                    "postgresql-17",
-                    "openssh-server",
-                ],
-            ));
+            let mut args = vec![
+                "-o",
+                wait,
+                "install",
+                "-y",
+                "postgresql-17",
+                "openssh-server",
+            ];
+            if auto {
+                args.push("postgresql-17-auto-failover");
+            }
+            steps.push(run(title, "apt-get", &args));
         }
         Family::Dnf => {
             let rpm = system
@@ -215,11 +239,42 @@ pub fn steps(
                     &["-qy", "module", "disable", "postgresql"],
                 ));
             }
-            steps.push(run(
-                "Install PostgreSQL 17 and SSH",
-                "dnf",
-                &["install", "-y", "postgresql17-server", "openssh-server"],
-            ));
+            let mut args = vec!["install", "-y", "postgresql17-server", "openssh-server"];
+            if auto {
+                args.push("pg_auto_failover_17");
+            }
+            steps.push(run(title, "dnf", &args));
+        }
+    }
+    steps
+}
+
+/// Debian's packages make a cluster (17 main) and start it; with the
+/// referee, pg_autoctl keeps its own: the package's, still empty, goes.
+pub(super) fn drop_debians_cluster() -> Step {
+    script(
+        "Remove the empty cluster Debian's package made, for pg_autoctl's own",
+        "D=/var/lib/postgresql/17/main\n[ -d \"$D/base\" ] || exit 0\nif [ \"$(ls \"$D/base\" | wc -l)\" -gt 3 ]; then\n  echo \"PostgreSQL 17's cluster (17 main) holds databases of its own: setup will not remove it\" >&2; exit 1\nfi\npg_dropcluster --stop 17 main",
+        &[],
+        None,
+    )
+}
+
+/// The steps by hand: the package's own cluster, its access rules, and the
+/// standby's copy.
+fn by_hand(
+    plan: &Plan,
+    index: usize,
+    system: &System,
+    binary: &Path,
+    hub: &[IpAddr],
+    nodes: &[IpAddr],
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let data = system.postgres_data();
+    let service = system.postgres_service();
+    if system.family == Family::Dnf {
+        {
             steps.push(Step {
                 title: "Make PostgreSQL 17's data directory".into(),
                 action: Action::Run {
@@ -323,12 +378,192 @@ pub fn steps(
             None,
         ));
     }
+    steps
+}
+
+/// pg_autoctl's data directory on a database machine.
+pub fn autoctl_data(system: &System) -> String {
+    format!("{}/17/sp", system.postgres_home())
+}
+
+/// `pg_autoctl ARGS` as the postgres account, with PostgreSQL 17's programs
+/// first on its path.
+pub(super) fn autoctl(system: &System, args: &[&str]) -> Vec<String> {
+    let mut all: Vec<String> = [
+        "-u",
+        "postgres",
+        "--",
+        "env",
+        "-u",
+        "XDG_RUNTIME_DIR",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+    ]
+    .map(String::from)
+    .to_vec();
+    all.push(format!("PATH={}:/usr/bin:/bin", system.postgres_bin()));
+    all.push("pg_autoctl".into());
+    all.extend(args.iter().map(|a| a.to_string()));
+    all
+}
+
+/// pg_autoctl's service, as pg_autoctl writes it, started now and at boot.
+pub(super) fn autoctl_service(system: &System, data: &str) -> Vec<Step> {
+    vec![
+        script(
+            "Write pg_autoctl's service",
+            "runuser -u postgres -- env -u XDG_RUNTIME_DIR PATH=\"$BIN:/usr/bin:/bin\" pg_autoctl -q show systemd --pgdata \"$DATA\" > /etc/systemd/system/pgautofailover.service",
+            &[("BIN", system.postgres_bin()), ("DATA", data)],
+            None,
+        ),
+        run("Read the new units", "systemctl", &["daemon-reload"]),
+        run(
+            "Start pg_autoctl, now and at boot",
+            "systemctl",
+            &["enable", "--now", "pgautofailover"],
+        ),
+    ]
+}
+
+/// The steps with a referee: pg_autoctl keeps this machine's cluster,
+/// registered with the referee, which makes the second a copy of the first
+/// and promotes it by itself.
+fn by_referee(
+    plan: &Plan,
+    index: usize,
+    referee: &str,
+    system: &System,
+    hub: &[IpAddr],
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let data = autoctl_data(system);
+    let name = plan.nodes[index].as_str();
+    if system.family == Family::Apt {
+        steps.push(drop_debians_cluster());
+    }
+    steps.push(super::steps::firewall(true, 5432));
+    steps.push(Step {
+        title: "Write the passwords for the copy and the referee, for the postgres account".into(),
+        action: Action::Write {
+            path: Path::new(system.postgres_home()).join(".pgpass"),
+            contents: format!(
+                "*:*:*:pgautofailover_replicator:{}\n*:*:pg_auto_failover:autoctl_node:{}\n",
+                plan.replication_password, plan.monitor_password
+            ),
+            mode: 0o600,
+            owner: "postgres:postgres".into(),
+        },
+    });
+    steps.push(run(
+        "Make pg_autoctl's data directory",
+        "install",
+        &[
+            "-d", "-m", "0700", "-o", "postgres", "-g", "postgres", &data,
+        ],
+    ));
+    let monitor =
+        format!("postgres://autoctl_node@{referee}:5432/pg_auto_failover?sslmode=require");
+    steps.push(Step {
+        title: "Register this machine with the referee".into(),
+        action: Action::Run {
+            program: "runuser".into(),
+            args: autoctl(
+                system,
+                &[
+                    "create",
+                    "postgres",
+                    "--pgdata",
+                    &data,
+                    "--pgport",
+                    "5432",
+                    "--hostname",
+                    name,
+                    "--name",
+                    name,
+                    "--dbname",
+                    "postgres",
+                    "--monitor",
+                    &monitor,
+                    "--auth",
+                    "scram-sha-256",
+                    "--ssl-self-signed",
+                    "--replication-quorum",
+                    "true",
+                    "--candidate-priority",
+                    "50",
+                ],
+            ),
+            input: None,
+            env: Vec::new(),
+            unless: Some(Path::new(&data).join("PG_VERSION")),
+        },
+    });
     steps.push(script(
+        "Let the ScannerPulse machine in",
+        "grep -qxF \"$MARK\" \"$HBA\" || cat >> \"$HBA\"",
+        &[("MARK", HUB_MARK), ("HBA", &format!("{data}/pg_hba.conf"))],
+        Some(hub_hba(hub)),
+    ));
+    steps.extend(autoctl_service(system, &data));
+    // Once its PostgreSQL answers: the access rules read again, and on the
+    // primary the database, its role, and the copying role's password
+    // (which the standby's copy and every rewind sign in with).
+    let wait = "for i in $(seq 120); do runuser -u postgres -- psql -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\nrunuser -u postgres -- psql -qtAXc 'SELECT pg_reload_conf()' >/dev/null";
+    if index == 0 {
+        steps.push(script(
+            "Make the database, its role, and the copying role's password",
+            &format!("{wait}\nif runuser -u postgres -- psql -tAXc 'SELECT pg_is_in_recovery()' | grep -qx t; then\n  echo \"a standby: its roles come from the primary\"; exit 0\nfi\nrunuser -u postgres -- psql -q -v ON_ERROR_STOP=1"),
+            &[],
+            Some(
+                super::steps::database_sql(&plan.password)
+                    + &format!(
+                        "SELECT 'CREATE ROLE pgautofailover_replicator LOGIN REPLICATION' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgautofailover_replicator') \\gexec\nALTER ROLE pgautofailover_replicator PASSWORD '{}';\n",
+                        plan.replication_password.replace('\'', "''")
+                    ),
+            ),
+        ));
+    } else {
+        steps.push(script(
+            "Wait for this machine's PostgreSQL",
+            wait,
+            &[],
+            None,
+        ));
+    }
+    steps
+}
+
+/// The marker of setup's line for the ScannerPulse machine in pg_autoctl's
+/// access rules.
+const HUB_MARK: &str = "# scannerpulse: the ScannerPulse machine";
+
+/// The access rules that let the ScannerPulse machine reach the database.
+fn hub_hba(hub: &[IpAddr]) -> String {
+    let mut text = format!("{HUB_MARK}\n");
+    for ip in hub {
+        let bits = if ip.is_ipv4() { 32 } else { 128 };
+        text.push_str(&format!(
+            "hostssl {} {} {ip}/{bits} scram-sha-256\n",
+            super::steps::DATABASE,
+            super::steps::ACCOUNT
+        ));
+    }
+    text
+}
+
+/// The ScannerPulse machine's key may run this machine's node commands.
+pub(super) fn hub_key_step(plan: &Plan, hub: &[IpAddr], binary: &Path) -> Step {
+    script(
         "Let the ScannerPulse machine run this machine's database commands",
         "install -d -m 0700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && { grep -qF \"$KEY\" /root/.ssh/authorized_keys || cat >> /root/.ssh/authorized_keys; }",
         &[("KEY", plan.hub_key.trim())],
         Some(authorized_line(&plan.hub_key, hub, binary)),
-    ));
+    )
+}
+
+/// The settings folder, this machine's place, and the nightly dump.
+fn tail(plan: &Plan, index: usize, system: &System, binary: &Path) -> Vec<Step> {
+    let mut steps = Vec::new();
     // Open to all, as the nightly dump (postgres) looks in it for a settings
     // file; this machine's file in it is root's alone.
     steps.push(run(
@@ -350,6 +585,7 @@ pub fn steps(
         nodes: plan.nodes.clone(),
         hub: plan.hub.clone(),
         replication_password: plan.replication_password.clone(),
+        referee: plan.referee.clone(),
     };
     steps.push(Step {
         title: "Write this machine's place among the database machines".into(),
@@ -733,6 +969,8 @@ pub enum Asked {
     Status,
     Stop,
     Start,
+    /// On the referee: the referee switches the roles.
+    Switchover,
     Promote,
     /// Promote once replayed past this location (`hex/hex`).
     PromoteAfter(String),
@@ -748,6 +986,7 @@ pub fn asked(command: &str) -> Option<Asked> {
         ["status"] => Some(Asked::Status),
         ["stop"] => Some(Asked::Stop),
         ["start"] => Some(Asked::Start),
+        ["switchover"] => Some(Asked::Switchover),
         ["promote"] => Some(Asked::Promote),
         ["promote", "after", lsn]
             if lsn.split_once('/').is_some_and(|(hi, lo)| {
@@ -774,11 +1013,12 @@ pub fn serve() -> Result<String, String> {
     let command = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
     match asked(&command) {
         None => Err(format!(
-            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN] or follow HOST"
+            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST or switchover"
         )),
         Some(Asked::Status) => serde_json::to_string(&status()).map_err(|e| e.to_string()),
         Some(Asked::Stop) => stop(),
         Some(Asked::Start) => start().map(|()| "started".into()),
+        Some(Asked::Switchover) => super::referee::switchover(&system()?),
         Some(Asked::Promote) => promote().map(|()| "promoted".into()),
         Some(Asked::PromoteAfter(lsn)) => promote_after(&lsn).map(|()| "promoted".into()),
         Some(Asked::Follow(host)) => follow(&host).map(|()| format!("following {host}")),
@@ -808,6 +1048,7 @@ pub fn backup() -> Result<String, String> {
 /// two primaries never write at once.
 pub fn db_promote() -> Result<String, String> {
     let node = NodeFile::read()?;
+    by_hand_only(node.referee.as_deref(), "promote")?;
     if psql("SELECT pg_is_in_recovery()")? != "t" {
         return Err("this machine is the primary already".into());
     }
@@ -829,6 +1070,7 @@ pub fn db_promote() -> Result<String, String> {
 /// or (after the person agrees) copied whole.
 pub fn db_rejoin(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     let node = NodeFile::read()?;
+    by_hand_only(node.referee.as_deref(), "rejoin")?;
     let other = node.other().to_string();
     let system = system()?;
     may_rejoin(my_timeline(&system), other_timeline(&other), &other)?;
@@ -962,7 +1204,38 @@ fn as_status(answer: Result<String, String>) -> Status {
 /// the primary stops cleanly and its standby has everything first.
 pub fn db_switchover(say: impl Fn(&str)) -> Result<String, String> {
     let plan = Plan::read(Path::new(super::plan::PLAN))?;
+    if let Some(referee) = &plan.referee {
+        say(&format!(
+            "Asking the referee, {referee}, to switch the roles"
+        ));
+        return by_the_referee(referee, on_node);
+    }
     switchover(&plan.nodes, on_node, say)
+}
+
+/// The switchover with a referee: it makes the standby the primary and the
+/// primary its standby, through its node command.
+fn by_the_referee(
+    referee: &str,
+    run: impl Fn(&str, &str) -> Result<String, String>,
+) -> Result<String, String> {
+    run(referee, "switchover")
+        .map(|_| {
+            "Switched by the referee: the standby is the primary now, and the primary its standby; the services move to the new primary within seconds."
+                .into()
+        })
+        .map_err(|error| format!("the referee ({referee}) did not switch the roles: {error}"))
+}
+
+/// `db promote` and `db rejoin` are for machines promoted by hand: with a
+/// referee, it promotes the standby, and a former primary rejoins by itself.
+fn by_hand_only(referee: Option<&str>, command: &str) -> Result<(), String> {
+    match referee {
+        Some(referee) => Err(format!(
+            "the referee ({referee}) promotes the standby and rejoins a former primary by itself here, so `db {command}` is not needed; for a planned change of roles, run `sudo scannerpulse db switchover` on the ScannerPulse machine"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The switchover between `nodes`, each asked its node commands through
@@ -1026,8 +1299,126 @@ mod tests {
             role: "scannerpulse".into(),
             password: "app-secret-1".into(),
             replication_password: "copy-secret-2".into(),
+            referee: None,
+            monitor_password: String::new(),
             joined: Vec::new(),
         }
+    }
+
+    /// The same machines, the standby promoted by the referee.
+    fn refereed() -> Plan {
+        Plan {
+            referee: Some("ref.example.org".into()),
+            monitor_password: "referee-secret-3".into(),
+            ..plan()
+        }
+    }
+
+    #[test]
+    fn with_a_referee_pg_autoctl_keeps_the_cluster_and_registers_it() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let binary = Path::new("/usr/local/bin/scannerpulse");
+        let (hub, nodes) = (ips(&["192.0.2.10"]), ips(&["192.0.2.21", "192.0.2.22"]));
+        let first = steps(&refereed(), 0, &debian, binary, &hub, &nodes);
+        let second = steps(&refereed(), 1, &debian, binary, &hub, &nodes);
+        let one = titles(&first);
+        let at = |title: &str| {
+            one.iter()
+                .position(|t| *t == title)
+                .unwrap_or_else(|| panic!("{title}: {one:?}"))
+        };
+        // pg_auto_failover's package; the package's own empty cluster goes.
+        let (_, args, _, _) = ran(&first, "Install PostgreSQL 17, pg_auto_failover and SSH");
+        assert!(args.contains(&"postgresql-17-auto-failover".to_string()));
+        let drop = "Remove the empty cluster Debian's package made, for pg_autoctl's own";
+        let register = "Register this machine with the referee";
+        assert!(at(drop) < at(register));
+        // The passwords reach pg_autoctl through postgres's password file,
+        // never an argument.
+        let Some(Action::Write { contents, mode, .. }) = first
+            .iter()
+            .find(|s| {
+                s.title
+                    == "Write the passwords for the copy and the referee, for the postgres account"
+            })
+            .map(|s| &s.action)
+        else {
+            panic!()
+        };
+        assert_eq!(*mode, 0o600);
+        assert_eq!(
+            contents,
+            "*:*:*:pgautofailover_replicator:copy-secret-2\n*:*:pg_auto_failover:autoctl_node:referee-secret-3\n"
+        );
+        assert!(
+            at("Write the passwords for the copy and the referee, for the postgres account")
+                < at(register)
+        );
+        let (program, args, _, _) = ran(&first, register);
+        assert_eq!(program, "runuser");
+        let line = args.join(" ");
+        for part in [
+            "env -u XDG_RUNTIME_DIR",
+            "pg_autoctl create postgres --pgdata /var/lib/postgresql/17/sp --pgport 5432",
+            "--hostname db1.example.org --name db1.example.org",
+            "--monitor postgres://autoctl_node@ref.example.org:5432/pg_auto_failover?sslmode=require",
+            "--auth scram-sha-256 --ssl-self-signed",
+        ] {
+            assert!(line.contains(part), "{part}: {line}");
+        }
+        assert!(!line.contains("secret"), "{line}");
+        // Run again, a registered machine is left as it is.
+        let Action::Run { unless, .. } = &first[at(register)].action else {
+            panic!()
+        };
+        assert_eq!(
+            unless.as_deref(),
+            Some(Path::new("/var/lib/postgresql/17/sp/PG_VERSION"))
+        );
+        // The ScannerPulse machine's access, then pg_autoctl's service.
+        let hba = "Let the ScannerPulse machine in";
+        let (_, _, _, input) = ran(&first, hba);
+        assert!(
+            input
+                .unwrap()
+                .contains("hostssl scannerpulse scannerpulse 192.0.2.10/32 scram-sha-256"),
+            "{input:?}"
+        );
+        assert!(at(register) < at(hba));
+        assert!(at(hba) < at("Start pg_autoctl, now and at boot"));
+        // The first makes the database and its role, and gives the copying
+        // role its password, on the primary only; the second has nothing
+        // of the kind, and no copy of its own: pg_autoctl makes it.
+        let make = "Make the database, its role, and the copying role's password";
+        assert!(at("Start pg_autoctl, now and at boot") < at(make));
+        let (_, args, _, input) = ran(&first, make);
+        assert!(args[1].contains("pg_is_in_recovery"), "{}", args[1]);
+        let sql = input.unwrap();
+        assert!(
+            sql.starts_with("SET log_min_error_statement = panic;"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ALTER ROLE pgautofailover_replicator PASSWORD 'copy-secret-2'"),
+            "{sql}"
+        );
+        let two = titles(&second);
+        assert!(!two.contains(&make));
+        assert!(!two.contains(&"Copy the primary's data, and follow it"));
+        assert!(two.contains(&register));
+        // Nothing of the machines promoted by hand.
+        assert!(!one.contains(&"Let the ScannerPulse machine and both database machines in"));
+        let file: NodeFile = first
+            .iter()
+            .find_map(|s| match &s.action {
+                Action::Write { path, contents, .. } if path == Path::new(NODE) => {
+                    serde_json::from_str(contents).ok()
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(file.referee.as_deref(), Some("ref.example.org"));
     }
 
     fn ips(list: &[&str]) -> Vec<IpAddr> {
@@ -1065,6 +1456,7 @@ mod tests {
         assert_eq!(asked("status"), Some(Asked::Status));
         assert_eq!(asked("promote"), Some(Asked::Promote));
         assert_eq!(asked("start"), Some(Asked::Start));
+        assert_eq!(asked("switchover"), Some(Asked::Switchover));
         assert_eq!(
             asked("promote after 0/313CE18"),
             Some(Asked::PromoteAfter("0/313CE18".into()))
@@ -1328,6 +1720,33 @@ mod tests {
             (_, "stop") => Ok("0/313CE18".into()),
             _ => Ok("done".into()),
         }
+    }
+
+    #[test]
+    fn with_a_referee_the_switchover_is_the_referees() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let said = by_the_referee("ref.example.org", |node, command| {
+            asked.borrow_mut().push(format!("{node} {command}"));
+            Ok("switched".into())
+        })
+        .unwrap();
+        assert_eq!(asked.into_inner(), ["ref.example.org switchover"]);
+        assert!(said.contains("the referee"), "{said}");
+        let error = by_the_referee("ref.example.org", |_, _| Err("no answer".into())).unwrap_err();
+        assert!(
+            error.contains("ref.example.org") && error.contains("no answer"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn with_a_referee_promote_and_rejoin_are_its_own() {
+        assert!(
+            by_hand_only(Some("ref.example.org"), "promote")
+                .unwrap_err()
+                .contains("the referee (ref.example.org)")
+        );
+        assert_eq!(by_hand_only(None, "promote"), Ok(()));
     }
 
     #[test]

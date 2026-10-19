@@ -8,6 +8,7 @@ pub mod folders;
 pub mod join;
 pub mod node;
 pub mod plan;
+pub mod referee;
 pub mod screen;
 pub mod steps;
 pub mod system;
@@ -255,8 +256,14 @@ pub fn summary(answers: &Answers, system: &system::System, steps: &[Step]) -> St
                 remote.sslmode.name()
             ),
             steps::Database::Nodes(pair) => format!(
-                "two machines of its own: {} (the primary) and {} (its standby, promoted by hand); this machine waits for them to join at {}",
-                pair.nodes[0], pair.nodes[1], pair.hub
+                "two machines of its own: {} (the primary) and {} (its standby, {}); this machine waits for them to join at {}",
+                pair.nodes[0],
+                pair.nodes[1],
+                match &pair.referee {
+                    Some(referee) => format!("promoted by itself, with {referee} as the referee"),
+                    None => "promoted by hand".into(),
+                },
+                pair.hub
             ),
         },
         match steps::backups_folder(answers) {
@@ -345,13 +352,22 @@ fn detail(step: &Step) -> String {
             format!("add the admin {login} in the database, or give it the new password")
         }
         Action::WaitForWeb { port } => format!("wait for https://127.0.0.1:{port}/health"),
-        Action::Plan { nodes, hub, .. } => format!(
-            "write {} (the database machines {} and {}, this machine as {hub}, the database's passwords; root's alone)",
+        Action::Plan {
+            nodes,
+            hub,
+            referee,
+            ..
+        } => format!(
+            "write {} (the database machines {} and {}{}, this machine as {hub}, the passwords; root's alone)",
             plan::PLAN,
             nodes[0],
-            nodes[1]
+            nodes[1],
+            referee
+                .as_ref()
+                .map(|r| format!(", the referee {r}"))
+                .unwrap_or_default()
         ),
-        Action::WaitForNodes => "wait until both database machines have joined".into(),
+        Action::WaitForNodes => "wait until the machines of the plan have joined".into(),
     }
 }
 

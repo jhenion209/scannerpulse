@@ -87,6 +87,14 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
         if pair.hub.is_empty() || pair.hub.contains(char::is_whitespace) {
             return Err("this machine's address, as the database machines reach it, is a name or an address".into());
         }
+        if let Some(referee) = &pair.referee {
+            if referee.is_empty() || referee.contains(char::is_whitespace) {
+                return Err("the referee is a name or an address".into());
+            }
+            if pair.nodes.iter().any(|n| n.eq_ignore_ascii_case(referee)) {
+                return Err("the referee is a third machine, neither database machine".into());
+            }
+        }
     }
     if let Some(backups) = &answers.backups {
         answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
@@ -433,13 +441,24 @@ pub fn from_file(path: &Path, defaults: &Defaults) -> Result<Answers, String> {
             let nodes = <[String; 2]>::try_from(nodes).map_err(|_| {
                 "DB_NODES names the two database machines, with a space between".to_string()
             })?;
+            let referee = match get("FAILOVER").as_deref() {
+                None | Some("hand") => None,
+                Some("auto") => Some(need("REFEREE")?.to_ascii_lowercase()),
+                Some(other) => return Err(format!("FAILOVER is {other:?}: hand or auto")),
+            };
             Database::Nodes(Pair {
                 nodes,
                 hub: get("HUB").unwrap_or_else(|| default_hub(defaults)),
+                referee,
             })
         }
         Some(other) => return Err(format!("DATABASE is {other:?}: here, theirs or nodes")),
     };
+    if !matches!(database, Database::Nodes(_))
+        && (get("FAILOVER").is_some() || get("REFEREE").is_some())
+    {
+        return Err("FAILOVER and REFEREE go with two database machines (DATABASE=nodes)".into());
+    }
     let certificate = match (get("CERT_FILE"), get("KEY_FILE"), get("LETSENCRYPT")) {
         (Some(cert), Some(key), None) => Certificate::Installed {
             cert: PathBuf::from(cert),
@@ -772,7 +791,7 @@ fn ask_database(
 ) -> Result<Database, inquire::InquireError> {
     const HERE: &str = "On this machine";
     const THEIRS: &str = "One I run";
-    const NODES: &str = "Two machines of its own: a primary, and a standby you promote by hand";
+    const NODES: &str = "Two machines of its own: a primary, and its standby";
     let had = match previous {
         Some(Database::Theirs(remote)) => Some(remote),
         _ => None,
@@ -818,6 +837,41 @@ fn ask_database(
                 }
             },
         )?;
+        const HAND: &str = "By hand: when the primary is lost, you run one command on the standby";
+        const AUTO: &str = "By itself: a third, small machine (the referee) decides; a Raspberry Pi or a small VM is enough";
+        println!(
+            "With two machines, neither can tell \"the other died\" from \"the network between us broke\", \
+             so only a third machine can promote the standby safely by itself."
+        );
+        let auto = Select::new(
+            "When the primary is lost, the standby becomes the primary:",
+            vec![HAND, AUTO],
+        )
+        .with_starting_cursor(usize::from(had.is_some_and(|p| p.referee.is_some())))
+        .prompt()?
+            == AUTO;
+        let (first_lower, second_lower) = (first.to_ascii_lowercase(), second.to_ascii_lowercase());
+        let referee = if auto {
+            Some(
+                text(
+                    "The referee (name or address):",
+                    had.and_then(|p| p.referee.as_deref()),
+                    move |n| {
+                        named(n)?;
+                        if n.eq_ignore_ascii_case(&first_lower)
+                            || n.eq_ignore_ascii_case(&second_lower)
+                        {
+                            Err("a third machine".into())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )?
+                .to_ascii_lowercase(),
+            )
+        } else {
+            None
+        };
         let hub = text(
             "This machine's address, as the database machines reach it:",
             Some(&had.map_or_else(|| default_hub(defaults), |p| p.hub.clone())),
@@ -826,6 +880,7 @@ fn ask_database(
         return Ok(Database::Nodes(Pair {
             nodes: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
             hub,
+            referee,
         }));
     }
     let host = text(
@@ -1403,8 +1458,16 @@ mod tests {
             Database::Nodes(crate::setup::steps::Pair {
                 nodes: ["db1.example.org".into(), "2001:db8::22".into()],
                 hub: "192.0.2.10".into(),
+                referee: None,
             })
         );
+        // Promoted by itself: a referee, the third machine.
+        let refereed = format!("{nodes}FAILOVER=auto\nREFEREE=Ref.example.org\n");
+        let answers = from_file(&answers_file(dir.path(), &refereed, 0o600), &defaults()).unwrap();
+        let Database::Nodes(pair) = answers.database else {
+            panic!()
+        };
+        assert_eq!(pair.referee.as_deref(), Some("ref.example.org"));
         let lets_encrypt = format!(
             "{base}LETSENCRYPT=dns-cloudflare\nLETSENCRYPT_NAMES=\"Radio.example.org www.example.org\"\nCLOUDFLARE_TOKEN=cf-token-1\n"
         );
@@ -1473,6 +1536,22 @@ mod tests {
         refused(
             "DATABASE=nodes\nDB_NODES=\"db1.example.org DB1.example.org\"\n",
             "two different machines",
+        );
+        refused(
+            "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nFAILOVER=sometimes\n",
+            "hand or auto",
+        );
+        refused(
+            "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nFAILOVER=auto\n",
+            "REFEREE",
+        );
+        refused(
+            "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nFAILOVER=auto\nREFEREE=DB2.example.org\n",
+            "a third machine",
+        );
+        refused(
+            "DATABASE=here\nREFEREE=ref.example.org\n",
+            "two database machines",
         );
         refused(
             &format!(

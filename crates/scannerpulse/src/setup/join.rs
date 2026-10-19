@@ -7,12 +7,12 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use super::plan::{PLAN, Plan, SSH, resolve};
+use super::plan::{PLAN, Place, Plan, SSH, resolve};
 
 /// What the hub tells a joining machine: its place, and the plan.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Joining {
-    pub index: usize,
+    pub place: Place,
     pub plan: Plan,
 }
 
@@ -29,15 +29,19 @@ fn plain(name: &str) -> bool {
 /// travel over SSH, to root on the joining machine).
 pub fn info(names: &[String]) -> Result<String, String> {
     let plan = Plan::read(Path::new(PLAN))?;
-    let index = plan.place(names, resolve).ok_or_else(|| {
+    let place = plan.place(names, resolve).ok_or_else(|| {
         format!(
-            "this machine ({}) is not one of the install's database machines: they are {} and {}",
+            "this machine ({}) is not one of the install's machines: they are {}",
             names.join(", "),
-            plan.nodes[0],
-            plan.nodes[1]
+            plan.referee
+                .iter()
+                .chain(&plan.nodes)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })?;
-    serde_json::to_string(&Joining { index, plan }).map_err(|error| error.to_string())
+    serde_json::to_string(&Joining { place, plan }).map_err(|error| error.to_string())
 }
 
 /// The known_hosts lines for `node` from its public host keys (one
@@ -61,10 +65,8 @@ pub fn done(node: &str, host_keys: &str) -> Result<String, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut plan = Plan::read(Path::new(PLAN))?;
-    if !plan.nodes.iter().any(|n| n == node) {
-        return Err(format!(
-            "{node} is not one of the install's database machines"
-        ));
+    if !plan.nodes.iter().chain(&plan.referee).any(|n| n == node) {
+        return Err(format!("{node} is not one of the install's machines"));
     }
     let lines = known_lines(node, host_keys);
     if lines.is_empty() {
@@ -186,58 +188,63 @@ impl Hub {
     }
 }
 
-/// Sets this machine up as the database machine the hub's plan names it,
-/// once the first one has joined (for the second), and says so to the hub.
-/// `yes` asks the person to go ahead (an answers file says yes).
+/// Sets this machine up as the machine the hub's plan names it (the
+/// referee, or a database machine), once the machines before it have
+/// joined, and says so to the hub. `yes` asks the person to go ahead (an
+/// answers file says yes).
 pub async fn run(hub: Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<(), String> {
     let names = my_names(&hub.address);
     let mut joining = hub.info(&names)?;
-    if joining.index == 1 {
-        let first = joining.plan.nodes[0].clone();
-        let mut said = false;
-        while !joining.plan.joined.contains(&first) {
-            if !said {
-                println!("Waiting for {first}, the first database machine, to join first.");
-                said = true;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            joining = hub.info(&names)?;
+    let mut said = None;
+    while let Some(first) = joining.plan.awaited_before(joining.place) {
+        if said.as_deref() != Some(first) {
+            println!("Waiting for {first} to join first.");
+            said = Some(first.to_string());
         }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        joining = hub.info(&names)?;
     }
-    let Joining { index, plan } = joining;
+    let Joining { place, plan } = joining;
     let hub_ips = resolve(&plan.hub);
     if hub_ips.is_empty() {
         return Err(format!("{} does not resolve to an address here", plan.hub));
     }
     let mut node_ips = Vec::new();
-    for node in &plan.nodes {
+    for node in plan.nodes.iter().chain(&plan.referee) {
         let found = resolve(node);
         if found.is_empty() {
             return Err(format!("{node} does not resolve to an address here"));
         }
-        node_ips.extend(found);
+        if plan.nodes.contains(node) {
+            node_ips.extend(found);
+        }
     }
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
-    let steps = super::node::steps(
-        &plan,
-        index,
-        &system,
-        Path::new(super::BINARY),
-        &hub_ips,
-        &node_ips,
-    );
-    let role = if index == 0 {
-        "it starts as the primary"
-    } else {
-        "the standby of the first, promoted by hand"
+    let binary = Path::new(super::BINARY);
+    let (steps, what) = match place {
+        Place::Referee => (
+            super::referee::steps(&plan, &system, binary, &hub_ips, &node_ips),
+            "the referee, which decides which database machine is the primary".to_string(),
+        ),
+        Place::Node(index) => (
+            super::node::steps(&plan, index, &system, binary, &hub_ips, &node_ips),
+            format!(
+                "database machine {}: {}",
+                index + 1,
+                match (index, plan.referee.is_some()) {
+                    (0, _) => "it starts as the primary",
+                    (_, true) => "the standby of the first, promoted by the referee",
+                    (_, false) => "the standby of the first, promoted by hand",
+                }
+            ),
+        ),
     };
+    let name = plan.name(place).to_string();
     println!(
-        "\nThis machine is database machine {} of the install at {}: {} ({role}).",
-        index + 1,
-        plan.hub,
-        plan.nodes[index]
+        "\nThis machine is {name}, {what}, of the install at {}.",
+        plan.hub
     );
     println!("Setup will:");
     for (n, step) in steps.iter().enumerate() {
@@ -256,11 +263,9 @@ pub async fn run(hub: Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<
         db_password: String::new(),
     };
     super::apply::apply(&steps, &context, true).await?;
-    hub.done(&plan.nodes[index], &host_keys())?;
+    hub.done(&name, &host_keys())?;
     println!(
-        "\nJoined: {} is database machine {} of the install at {}.",
-        plan.nodes[index],
-        index + 1,
+        "\nJoined: {name} is {what}, of the install at {}.",
         plan.hub
     );
     Ok(())

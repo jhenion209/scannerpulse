@@ -24,9 +24,25 @@ pub struct Plan {
     pub role: String,
     pub password: String,
     pub replication_password: String,
-    /// The nodes that have joined.
+    /// The referee, when the standby is promoted by itself (pg_auto_failover's
+    /// monitor); none when it is promoted by hand.
+    #[serde(default)]
+    pub referee: Option<String>,
+    /// The password the database machines reach the referee with.
+    #[serde(default)]
+    pub monitor_password: String,
+    /// The machines that have joined.
     #[serde(default)]
     pub joined: Vec<String>,
+}
+
+/// A machine's place in the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Place {
+    /// Database machine N (0 starts as the primary).
+    Node(usize),
+    Referee,
 }
 
 /// Never a password.
@@ -35,6 +51,7 @@ impl std::fmt::Debug for Plan {
         f.debug_struct("Plan")
             .field("hub", &self.hub)
             .field("nodes", &self.nodes)
+            .field("referee", &self.referee)
             .field("joined", &self.joined)
             .finish_non_exhaustive()
     }
@@ -68,15 +85,31 @@ impl Plan {
             .map_err(|error| format!("cannot write {}: {error}", path.display()))
     }
 
-    /// Which node a machine is, by its own names and addresses (`mine`):
-    /// a node named as one of them, or whose name `resolve`s to one.
-    pub fn place(&self, mine: &[String], resolve: impl Fn(&str) -> Vec<IpAddr>) -> Option<usize> {
+    /// Which machine of the plan a machine is, by its own names and
+    /// addresses (`mine`): one named as one of them, or whose name
+    /// `resolve`s to one.
+    pub fn place(&self, mine: &[String], resolve: impl Fn(&str) -> Vec<IpAddr>) -> Option<Place> {
         let mine_lower: Vec<String> = mine.iter().map(|m| m.to_ascii_lowercase()).collect();
         let addresses: Vec<IpAddr> = mine.iter().filter_map(|m| m.parse().ok()).collect();
-        self.nodes.iter().position(|node| {
-            mine_lower.contains(&node.to_ascii_lowercase())
-                || resolve(node).iter().any(|ip| addresses.contains(ip))
-        })
+        let is = |name: &String| {
+            mine_lower.contains(&name.to_ascii_lowercase())
+                || resolve(name).iter().any(|ip| addresses.contains(ip))
+        };
+        if let Some(i) = self.nodes.iter().position(is) {
+            return Some(Place::Node(i));
+        }
+        self.referee
+            .as_ref()
+            .filter(|r| is(r))
+            .map(|_| Place::Referee)
+    }
+
+    /// The machine at `place`.
+    pub fn name(&self, place: Place) -> &str {
+        match place {
+            Place::Node(i) => &self.nodes[i],
+            Place::Referee => self.referee.as_deref().unwrap_or_default(),
+        }
     }
 
     /// Notes that `node` has joined.
@@ -86,10 +119,24 @@ impl Plan {
         }
     }
 
-    /// The nodes not yet joined, in order.
-    pub fn waiting(&self) -> Vec<&str> {
-        self.nodes
+    /// The first machine that joins before the one at `place` and has not
+    /// yet: the referee comes first, then database machine 1, then 2.
+    pub fn awaited_before(&self, place: Place) -> Option<&str> {
+        let mine = self.name(place);
+        self.referee
             .iter()
+            .chain(&self.nodes)
+            .take_while(|n| n.as_str() != mine)
+            .find(|n| !self.joined.contains(n))
+            .map(String::as_str)
+    }
+
+    /// The machines not yet joined, in the order they join: the referee,
+    /// then the database machines.
+    pub fn waiting(&self) -> Vec<&str> {
+        self.referee
+            .iter()
+            .chain(&self.nodes)
             .filter(|n| !self.joined.contains(n))
             .map(String::as_str)
             .collect()
@@ -122,7 +169,7 @@ pub fn plan_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::Plan;
+    use super::{Place, Plan};
     use std::net::IpAddr;
 
     fn plan() -> Plan {
@@ -134,7 +181,18 @@ mod tests {
             role: "scannerpulse".into(),
             password: "app-secret-1".into(),
             replication_password: "copy-secret-2".into(),
+            referee: None,
+            monitor_password: String::new(),
             joined: Vec::new(),
+        }
+    }
+
+    /// The same machines, the standby promoted by a referee.
+    fn refereed() -> Plan {
+        Plan {
+            referee: Some("ref.example.org".into()),
+            monitor_password: "referee-secret-3".into(),
+            ..plan()
         }
     }
 
@@ -142,10 +200,13 @@ mod tests {
     fn a_machine_finds_its_place_by_name_or_address() {
         let none = |_: &str| Vec::<IpAddr>::new();
         let plan = plan();
-        assert_eq!(plan.place(&["DB1.example.org".into()], none), Some(0));
+        assert_eq!(
+            plan.place(&["DB1.example.org".into()], none),
+            Some(Place::Node(0))
+        );
         assert_eq!(
             plan.place(&["db2".into(), "192.0.2.22".into()], none),
-            Some(1)
+            Some(Place::Node(1))
         );
         // A node named by its name, the machine knowing only its address.
         let dns = |name: &str| {
@@ -155,8 +216,17 @@ mod tests {
                 Vec::new()
             }
         };
-        assert_eq!(plan.place(&["192.0.2.21".into()], dns), Some(0));
+        assert_eq!(
+            plan.place(&["192.0.2.21".into()], dns),
+            Some(Place::Node(0))
+        );
         assert_eq!(plan.place(&["web.example.org".into()], none), None);
+        // The referee, only in a plan that has one.
+        assert_eq!(plan.place(&["ref.example.org".into()], none), None);
+        assert_eq!(
+            refereed().place(&["REF.example.org".into()], none),
+            Some(Place::Referee)
+        );
     }
 
     #[test]
@@ -180,6 +250,31 @@ mod tests {
         plan.mark_joined("db1.example.org");
         assert_eq!(plan.joined, ["db1.example.org"]);
         assert_eq!(plan.waiting(), ["192.0.2.22"]);
+        // The referee comes first, then the database machines.
+        let mut plan = refereed();
+        assert_eq!(
+            plan.waiting(),
+            ["ref.example.org", "db1.example.org", "192.0.2.22"]
+        );
+        plan.mark_joined("ref.example.org");
+        assert_eq!(plan.waiting(), ["db1.example.org", "192.0.2.22"]);
+    }
+
+    #[test]
+    fn a_machine_waits_for_the_ones_that_join_before_it() {
+        let mut plan = refereed();
+        assert_eq!(plan.awaited_before(Place::Referee), None);
+        assert_eq!(plan.awaited_before(Place::Node(0)), Some("ref.example.org"));
+        assert_eq!(plan.awaited_before(Place::Node(1)), Some("ref.example.org"));
+        plan.mark_joined("ref.example.org");
+        assert_eq!(plan.awaited_before(Place::Node(0)), None);
+        assert_eq!(plan.awaited_before(Place::Node(1)), Some("db1.example.org"));
+        // Promoted by hand: the second waits for the first only.
+        assert_eq!(super::tests::plan().awaited_before(Place::Node(0)), None);
+        assert_eq!(
+            super::tests::plan().awaited_before(Place::Node(1)),
+            Some("db1.example.org")
+        );
     }
 
     #[test]
@@ -191,7 +286,11 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(Plan::read(&path).unwrap(), plan());
-        let shown = format!("{:?}", plan());
+        let shown = format!("{:?}", refereed());
         assert!(!shown.contains("secret"), "{shown}");
+        // A plan written before the referee reads as one promoted by hand.
+        let old = r#"{"hub":"h","hub_key":"k","nodes":["a","b"],"database":"d","role":"r","password":"p","replication_password":"q"}"#;
+        let old: Plan = serde_json::from_str(old).unwrap();
+        assert_eq!((old.referee, old.monitor_password.as_str()), (None, ""));
     }
 }
