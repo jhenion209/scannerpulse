@@ -14,6 +14,8 @@ pub mod screen;
 pub mod second;
 pub mod steps;
 pub mod system;
+#[cfg(test)]
+pub(crate) mod test_script;
 pub mod uninstall;
 
 use std::path::Path;

@@ -280,17 +280,7 @@ pub(super) fn may_replan(
 fn mark_archive(plan: &super::plan::Plan) -> Result<(), String> {
     let mark = Path::new(&plan.archive).join(super::second::MARK);
     let output = std::process::Command::new("runuser")
-        .args([
-            "-u",
-            super::steps::ACCOUNT,
-            "--",
-            "sh",
-            "-c",
-            "printf %s \"$1\" > \"$2\"",
-            "mark",
-        ])
-        .arg(&plan.install_id)
-        .arg(&mark)
+        .args(mark_args(plan))
         .output()
         .map_err(|error| format!("cannot run runuser: {error}"))?;
     if output.status.success() {
@@ -302,6 +292,24 @@ fn mark_archive(plan: &super::plan::Plan) -> Result<(), String> {
             said(&output)
         ))
     }
+}
+
+/// runuser's arguments that write the mark as the service account.
+fn mark_args(plan: &super::plan::Plan) -> Vec<String> {
+    let mark = Path::new(&plan.archive).join(super::second::MARK);
+    [
+        "-u",
+        super::steps::ACCOUNT,
+        "--",
+        "sh",
+        "-c",
+        "printf %s \"$1\" > \"$2\"",
+        "mark",
+        &plan.install_id,
+        &mark.display().to_string(),
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// The plan made again from `fresh` (this run's answers), keeping from the
@@ -520,6 +528,23 @@ mod tests {
             !again.ready,
             "the first machine is ready only at the end of its setup"
         );
+    }
+
+    #[test]
+    fn the_mark_holds_the_install_id_written_as_the_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = make(None, &nodes(), "192.0.2.10", None, Some("web2.example.org"));
+        plan.archive = dir.path().display().to_string();
+        let args = super::mark_args(&plan);
+        assert_eq!(args[..4], ["-u", "scannerpulse", "--", "sh"]);
+        // The command after runuser's, run here as this user.
+        let status = std::process::Command::new(&args[3])
+            .args(&args[4..])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let written = std::fs::read_to_string(dir.path().join(crate::setup::second::MARK)).unwrap();
+        assert_eq!(written, plan.install_id);
     }
 
     #[test]

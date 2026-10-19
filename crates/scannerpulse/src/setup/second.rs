@@ -158,7 +158,21 @@ pub fn steps(
 ) -> Result<Vec<Step>, String> {
     let port = port_of(&files.settings)?;
     let (recordings, archive) = (Path::new(&plan.recordings), Path::new(&plan.archive));
-    let mut steps = Vec::new();
+    // Checked before anything is installed or written: a refusal leaves
+    // nothing behind. The mark is read as root, which a share that squashes
+    // root reads as nobody.
+    let mut steps = vec![super::node::script(
+        "Check that the archive is the first machine's share",
+        &format!(
+            "{SHARE_CHECK}\nmark=$(cat \"$ARCHIVE/$MARK\" 2>/dev/null) || {{ echo \"cannot read $ARCHIVE/$MARK here as root: mount the first machine's archive share at that path (a share that squashes root must let others read the archive's top folder)\" >&2; exit 1; }}\n[ \"$mark\" = \"$ID\" ] || {{ echo \"the archive $ARCHIVE is another install's (its mark is not this install's): mount the first machine's archive share at that path\" >&2; exit 1; }}"
+        ),
+        &[
+            ("ARCHIVE", &plan.archive),
+            ("MARK", MARK),
+            ("ID", &plan.install_id),
+        ],
+        None,
+    )];
     match system.family {
         Family::Apt => {
             let wait = "DPkg::Lock::Timeout=300";
@@ -179,18 +193,6 @@ pub fn steps(
             &["install", "-y", "acl", "/usr/bin/curl"],
         )),
     }
-    steps.push(super::node::script(
-        "Check that the archive is the first machine's share",
-        &format!(
-            "{SHARE_CHECK}\n[ \"$(cat \"$ARCHIVE/$MARK\" 2>/dev/null)\" = \"$ID\" ] || {{ echo \"the archive $ARCHIVE is not the first machine's: mount the first machine's archive share at that path\" >&2; exit 1; }}"
-        ),
-        &[
-            ("ARCHIVE", &plan.archive),
-            ("MARK", MARK),
-            ("ID", &plan.install_id),
-        ],
-        None,
-    ));
     steps.push(account_step());
     steps.extend(folder_steps(recordings, archive));
     steps.extend(settings_folder_steps());
@@ -418,5 +420,43 @@ pub(super) mod tests {
             ..plan()
         })));
         assert!(!dropped(&second(&plan())));
+    }
+
+    #[test]
+    fn the_second_checks_the_archive_and_its_mark_before_anything_else() {
+        use crate::setup::system::detect;
+        use crate::setup::test_script::run;
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let all = steps(
+            &plan(),
+            &files(),
+            &system,
+            Path::new("/b"),
+            "web2.example.org",
+        )
+        .unwrap();
+        // Before any package or account: a refusal leaves nothing behind.
+        let check = &all[0];
+        assert_eq!(
+            check.title,
+            "Check that the archive is the first machine's share"
+        );
+        let share = ("stat", "echo smb2");
+        for (mark, ok, said) in [
+            (Some("0123456789abcdef"), true, ""),
+            (Some("fedcba9876543210"), false, "another install's"),
+            (None, false, "cannot read"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join("archive");
+            std::fs::create_dir(&archive).unwrap();
+            if let Some(mark) = mark {
+                std::fs::write(archive.join(MARK), mark).unwrap();
+            }
+            let archive = archive.display().to_string();
+            let ran = run(check, &[share], &[("ARCHIVE", &archive)], dir.path(), "");
+            assert_eq!(ran.ok, ok, "{:?}: {}", mark, ran.stderr);
+            assert!(ran.stderr.contains(said), "{:?}: {}", mark, ran.stderr);
+        }
     }
 }

@@ -199,65 +199,18 @@ mod tests {
         );
     }
 
-    /// Runs a step's script with `stubs` (name, script) first on the path,
-    /// returning the calls the stubs logged.
-    fn run_script(
-        step: &Step,
-        stubs: &[(&str, &str)],
-        dir: &std::path::Path,
-        input: &str,
-    ) -> String {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        let Action::Run { args, env, .. } = &step.action else {
-            panic!()
-        };
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        for (name, body) in stubs {
-            let path = bin.join(name);
-            std::fs::write(
-                &path,
-                format!("#!/bin/sh\necho \"{name} $*\" >> \"$LOG\"\n{body}\n"),
-            )
-            .unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let log = dir.join("calls");
-        let mut child = std::process::Command::new("/bin/sh")
-            .args(&args[..])
-            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("LOG", &log)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        assert!(child.wait().unwrap().success(), "{}", step.title);
-        std::fs::read_to_string(&log).unwrap_or_default()
-    }
-
     #[test]
     fn the_other_machine_is_reached_over_ipv4_even_when_its_name_gives_ipv6_first() {
         let dir = tempfile::tempdir().unwrap();
         let conf_path = dir.path().join("keepalived.conf");
         let system =
             crate::setup::system::detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
-        let mut step = steps(&system, "192.0.2.50/24", "web2.example.org", true, 7, 443).remove(1);
-        let Action::Run { env, input, .. } = &mut step.action else {
+        let step = steps(&system, "192.0.2.50/24", "web2.example.org", true, 7, 443).remove(1);
+        let Action::Run { input, .. } = &step.action else {
             panic!()
         };
-        let text = input.take().unwrap();
-        for (k, v) in env.iter_mut() {
-            if k == "CONF" {
-                *v = conf_path.display().to_string();
-            }
-        }
+        let text = input.clone().unwrap();
+        let conf_env = conf_path.display().to_string();
         let stubs = [
             (
                 "getent",
@@ -268,7 +221,14 @@ mod tests {
                 "case \"$4\" in *:*) echo \"$4 from :: dev eth0 src 2001:db8::10\" ;; *) echo \"$4 dev eth0 src 192.0.2.10 uid 0\" ;; esac",
             ),
         ];
-        run_script(&step, &stubs, dir.path(), &text);
+        let ran = crate::setup::test_script::run(
+            &step,
+            &stubs,
+            &[("CONF", &conf_env)],
+            dir.path(),
+            &text,
+        );
+        assert!(ran.ok, "{}", ran.stderr);
         let written = std::fs::read_to_string(&conf_path).unwrap();
         assert!(written.contains("unicast_src_ip 192.0.2.10\n"), "{written}");
         assert!(written.contains("        192.0.2.11\n"), "{written}");
@@ -285,16 +245,16 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let conf_path = dir.path().join("keepalived.conf");
             std::fs::write(&conf_path, &text).unwrap();
-            let mut step = drop_step();
-            let Action::Run { env, .. } = &mut step.action else {
-                panic!()
-            };
-            for (k, v) in env.iter_mut() {
-                if k == "CONF" {
-                    *v = conf_path.display().to_string();
-                }
-            }
-            let calls = run_script(&step, &stubs, dir.path(), "");
+            let conf_env = conf_path.display().to_string();
+            let ran = crate::setup::test_script::run(
+                &drop_step(),
+                &stubs,
+                &[("CONF", &conf_env)],
+                dir.path(),
+                "",
+            );
+            assert!(ran.ok, "{}", ran.stderr);
+            let calls = ran.calls;
             assert_eq!(
                 calls.contains("systemctl disable --now keepalived"),
                 ours,
@@ -320,7 +280,11 @@ mod tests {
             "web2.example.org",
         )
         .unwrap();
-        for step in [&first, &second[0]] {
+        let tools = second
+            .iter()
+            .find(|s| s.title == "Install the tool for folders' access lists")
+            .unwrap();
+        for step in [&first, tools] {
             let Action::Run { program, args, .. } = &step.action else {
                 panic!()
             };
