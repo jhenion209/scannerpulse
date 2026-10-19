@@ -320,6 +320,17 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
         body["switchover"],
         "sudo /usr/local/bin/scannerpulse db switchover"
     );
+    // Status warns of the referee too, from the same answer.
+    let status = send(
+        &app,
+        "GET",
+        "/api/admin/status",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(status.body["referee"]["host"], "192.0.2.1");
+    assert_eq!(status.body["referee"]["answers"], false);
     // A second that has never said it is up is listed as down, not left
     // out; a machine not heard from for a week is forgotten.
     let silent = dir.path().join("silent.json");
@@ -401,6 +412,15 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
         None,
     )
     .await;
+    let status = send(
+        &app,
+        "GET",
+        "/api/admin/status",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert!(status.body["referee"].is_null());
     assert_eq!(one.body["mode"], "one");
     assert!(one.body["switchover"].is_null());
 }

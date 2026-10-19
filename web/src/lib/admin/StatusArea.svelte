@@ -3,7 +3,7 @@
   import { callTime } from '../format';
   import { durationText } from '../status';
   import { siteZone } from '../status.svelte';
-  import { about, failoverChecks, leaseText, STATUS_EVERY_MS, transcriptState, type AdminStatus } from './health';
+  import { about, failoverChecks, leaseText, refereeWarning, STATUS_EVERY_MS, transcriptState, type AdminStatus } from './health';
   import { admin, why } from './session.svelte';
 
   let data = $state<AdminStatus | null>(null);
@@ -50,6 +50,8 @@
   {#if problem}<p class="problem" role="alert">The status could not be read: {problem}</p>{/if}
 
   {#if data}
+    {@const warning = refereeWarning(data.referee)}
+    {#if warning}<p class="problem" role="alert">{warning.text}{#if warning.reason} <span class="muted">({warning.reason})</span>{/if}</p>{/if}
     <h2>Processing</h2>
     <dl class="facts">
       <dt>Lease</dt>
@@ -190,6 +192,7 @@
 </section>
 
 <style>
+  .muted { color: var(--muted); }
   .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
   .ok { display: inline-block; min-width: 1.4rem; text-align: center; color: var(--accent); font-weight: 700; }
   .checks .flag { min-width: 1.4rem; text-align: center; font-weight: 700; }

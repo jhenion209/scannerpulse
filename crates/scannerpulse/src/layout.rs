@@ -213,6 +213,18 @@ async fn ask_referee(host: &str) -> Result<(), String> {
     }
 }
 
+/// Whether the referee the layout names answers, for the layout and the
+/// status alike; null when there is none.
+pub(crate) async fn referee(layout: Option<&Layout>) -> Value {
+    match layout.and_then(|l| l.referee.as_deref()) {
+        None => Value::Null,
+        Some(host) => match ask_referee(host).await {
+            Ok(()) => json!({"host": host, "answers": true}),
+            Err(why) => json!({"host": host, "answers": false, "error": why}),
+        },
+    }
+}
+
 /// The layout as the admin page shows it, from `layout` (the file setup
 /// writes), `nodes` (the database machines the settings name) and the
 /// database's word on each ScannerPulse machine and the lease.
@@ -286,13 +298,7 @@ pub async fn report(
             (Err(why), _) => json!({"host": node.host, "role": null, "error": why}),
         })
         .collect();
-    let referee = match layout.and_then(|l| l.referee.as_deref()) {
-        None => Value::Null,
-        Some(host) => match ask_referee(host).await {
-            Ok(()) => json!({"host": host, "answers": true}),
-            Err(why) => json!({"host": host, "answers": false, "error": why}),
-        },
-    };
+    let referee = referee(layout).await;
     let mode = match layout {
         Some(layout) => layout.mode(),
         None if nodes.is_empty() => "one",

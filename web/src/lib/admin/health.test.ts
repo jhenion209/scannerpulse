@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { about, failoverChecks, leaseText, transcriptState } from './health';
+import { about, failoverChecks, refereeWarning, leaseText, transcriptState } from './health';
 
 describe('the lease', () => {
   it('says who holds it and for how long', () => {
@@ -46,5 +46,16 @@ describe('words for the figures', () => {
     expect(transcriptState('something new')).toBe('something new');
     expect(about(16000000)).toBe('about 16,000,000');
     expect(about(null)).toBe('—');
+  });
+});
+
+describe('the referee warning', () => {
+  it('warns only of a referee that does not answer', () => {
+    expect(refereeWarning(null)).toBeNull();
+    expect(refereeWarning({ host: 'ref.example.org', answers: true })).toBeNull();
+    expect(refereeWarning({ host: 'ref.example.org', answers: false, error: 'no answer within 3 s' })).toEqual({
+      text: 'Referee unreachable: automatic failover is off until it returns',
+      reason: 'no answer within 3 s',
+    });
   });
 });

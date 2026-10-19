@@ -38,6 +38,8 @@ export interface AdminStatus {
     port: number | null;
     standbys: { name: string | null; address: string | null; state: string | null; sync_state: string | null; replay_lag_seconds: number | null }[];
   };
+  /** Null when there is no referee. */
+  referee: { host: string; answers: boolean; error?: string } | null;
   failover: {
     lease_held: boolean;
     jobs_running: number;
@@ -83,3 +85,9 @@ export const transcriptState = (state: string) =>
 
 /** An estimate's number, or a dash when the planner has none. */
 export const about = (n: number | null) => (n === null ? '—' : `about ${n.toLocaleString('en-US')}`);
+
+/** The warning when the referee does not answer; none when it does or there is none. */
+export function refereeWarning(referee: AdminStatus['referee']): { text: string; reason: string | undefined } | null {
+  if (referee === null || referee.answers) return null;
+  return { text: 'Referee unreachable: automatic failover is off until it returns', reason: referee.error };
+}

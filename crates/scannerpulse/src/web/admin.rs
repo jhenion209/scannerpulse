@@ -120,7 +120,14 @@ impl From<crate::settings::SettingsError> for ApiError {
 
 /// `GET /api/admin/status`: the Status tab.
 pub async fn status(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(crate::status::read(&state.pool).await?))
+    let mut status = crate::status::read(&state.pool).await?;
+    let found = state
+        .machine
+        .layout
+        .as_deref()
+        .and_then(crate::layout::Layout::read);
+    status["referee"] = crate::layout::referee(found.as_ref()).await;
+    Ok(Json(status))
 }
 
 /// How long a traffic report is kept before it is made again.
