@@ -71,6 +71,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse db promote | db rejoin | db switchover
        scannerpulse update [--check | --yes]
        scannerpulse agent | agent install
+       scannerpulse archive move FOLDER [--switch]
        scannerpulse node serve | node status | node backup
        scannerpulse join info NAME... | join done NODE
        scannerpulse --version
@@ -204,6 +205,12 @@ update      as root, on the first ScannerPulse machine (or one machine
             database machines, the second ScannerPulse machine and this one,
             one at a time, each answering before the next; --check only says
             what is newest and what each machine runs; --yes asks nothing
+archive     as root, on an install without a second machine: move FOLDER
+            compares the archive with FOLDER (a network share, usually, for
+            a second machine) after the person copied it there, and says what
+            is missing and the copy to run; with --switch it pauses filing,
+            copies the calls filed since, compares again, points the install
+            at FOLDER and files again (the old archive stays as it was)
 agent       as root, the first ScannerPulse machine's root helper (its unit
             runs it): it carries out an update or a switchover an admin asks
             for on the admin page, and looks for a newer release once a day
@@ -277,6 +284,11 @@ enum Command {
     Join(Joined),
     Node(NodeCommand),
     Db(DbCommand),
+    /// `archive move NEW [--switch]`: the archive compared with NEW, or moved there.
+    ArchiveMove {
+        new: PathBuf,
+        switch: bool,
+    },
     /// `agent`: the root helper; `agent install` writes and starts its unit.
     Agent {
         install: bool,
@@ -634,6 +646,14 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db", "promote"] => Some(Command::Db(DbCommand::Promote)),
         ["db", "rejoin"] => Some(Command::Db(DbCommand::Rejoin)),
         ["db", "switchover"] => Some(Command::Db(DbCommand::Switchover)),
+        ["archive", "move", new] => Some(Command::ArchiveMove {
+            new: PathBuf::from(new),
+            switch: false,
+        }),
+        ["archive", "move", new, "--switch"] => Some(Command::ArchiveMove {
+            new: PathBuf::from(new),
+            switch: true,
+        }),
         ["agent"] => Some(Command::Agent { install: false }),
         ["agent", "install"] => Some(Command::Agent { install: true }),
         ["update"] => Some(Command::Update {
@@ -966,6 +986,21 @@ async fn run() -> ExitCode {
                 scannerpulse::setup::node::db_switchover(|line| println!("{line}"))
             }
         })),
+        Some(Command::ArchiveMove { new, switch }) => {
+            let result = match as_root() {
+                Ok(()) => match connect().await {
+                    Ok(mut conn) => {
+                        scannerpulse::setup::archive_move::run(&mut conn, &new, switch, |line| {
+                            println!("{line}")
+                        })
+                        .await
+                    }
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error),
+            };
+            node_answer(result.map_err(|error| format!("archive move: {error}")))
+        }
         Some(Command::Agent { install: true }) => {
             node_answer(as_root().and_then(|()| scannerpulse::agent::install()))
         }
@@ -2317,6 +2352,21 @@ mod tests {
             Some(Command::Agent { install: true })
         );
         assert_eq!(parse(&["agent", "now"]), None);
+        assert_eq!(
+            parse(&["archive", "move", "/srv/shared"]),
+            Some(Command::ArchiveMove {
+                new: std::path::PathBuf::from("/srv/shared"),
+                switch: false
+            })
+        );
+        assert_eq!(
+            parse(&["archive", "move", "/srv/shared", "--switch"]),
+            Some(Command::ArchiveMove {
+                new: std::path::PathBuf::from("/srv/shared"),
+                switch: true
+            })
+        );
+        assert_eq!(parse(&["archive", "move"]), None);
         assert_eq!(parse(&["update", "now"]), None);
     }
 

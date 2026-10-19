@@ -470,18 +470,19 @@ pub fn pgbackrest_conf(backups: &Path, system: &System) -> String {
 /// A unit's line that makes it wait for the mounts `folders` are on (a
 /// share mounted late at boot), each path quoted as systemd reads it.
 fn requires_mounts(folders: &[&Path]) -> String {
-    let quoted: Vec<String> = folders
-        .iter()
-        .map(|folder| {
-            let path = folder.display().to_string();
-            let escaped = path
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('%', "%%");
-            format!("\"{escaped}\"")
-        })
-        .collect();
+    let quoted: Vec<String> = folders.iter().map(|folder| quoted(folder)).collect();
     format!("RequiresMountsFor={}\n", quoted.join(" "))
+}
+
+/// A folder as a unit's `RequiresMountsFor=` line names it: quoted, with
+/// systemd's escapes.
+pub(super) fn quoted(folder: &Path) -> String {
+    let path = folder.display().to_string();
+    let escaped = path
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
 }
 
 /// The nightly backup's service and timer, in that order; the backups are
@@ -609,7 +610,7 @@ pub fn unit(
 /// Run as `account` with a folder as `$1`: fails, saying why and what to
 /// do, unless the account can enter the folder and write a file in it (a
 /// share that squashes the account can say it may write, then refuse).
-fn reach(account: &str) -> String {
+pub(super) fn reach(account: &str) -> String {
     format!(
         "cd -- \"$1\" 2>/dev/null && touch .scannerpulse-reach 2>/dev/null && rm -f .scannerpulse-reach || {{ echo \"the {account} account cannot reach or write $1: a folder above it may be closed to other accounts, as a home folder often is, or a network share may not let the account write. Open each such folder to the account (setfacl -m u:{account}:x FOLDER), let the account write on the share, or choose another folder, then run setup again.\"; exit 1; }}"
     )

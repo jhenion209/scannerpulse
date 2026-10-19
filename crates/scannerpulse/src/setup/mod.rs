@@ -2,6 +2,7 @@
 //! build a working site on this machine.
 
 pub mod apply;
+pub mod archive_move;
 pub mod ask;
 pub mod change;
 pub mod folders;
