@@ -169,7 +169,7 @@ impl Hub {
             "-o",
             &control,
             "-o",
-            "ControlPersist=300",
+            "ControlPersist=30",
             "-o",
             "StrictHostKeyChecking=accept-new",
         ]
@@ -456,6 +456,8 @@ mod tests {
         let command = hub.command(&["info", "db2", "192.0.2.22"]);
         assert_eq!(command[0], "ssh");
         assert!(command.contains(&"ControlMaster=auto".to_string()));
+        // A join cut short keeps the person's login open for seconds only.
+        assert!(command.contains(&"ControlPersist=30".to_string()));
         assert!(!command.contains(&"BatchMode=yes".to_string()));
         assert_eq!(command[command.len() - 3], "chief@192.0.2.10");
         assert_eq!(

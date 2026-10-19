@@ -108,8 +108,9 @@ pub fn authorized_line(hub_key: &str, hub: &[IpAddr], binary: &Path) -> String {
 /// signs in as.
 fn replicator_sql(password: &str) -> String {
     let quoted = password.replace('\'', "''");
+    const QUIET: &str = super::steps::QUIET_SQL;
     format!(
-        "SET log_min_error_statement = panic;\n\
+        "{QUIET}\
          SELECT format('CREATE ROLE {REPLICATOR} REPLICATION LOGIN PASSWORD %L', '{quoted}') \
          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{REPLICATOR}') \\gexec\n\
          ALTER ROLE {REPLICATOR} PASSWORD '{quoted}';\n\
@@ -381,6 +382,16 @@ fn by_hand(
     steps
 }
 
+/// The referee's monitor, as pg_autoctl and psql reach it.
+pub fn monitor_uri(referee: &str) -> String {
+    let host = if referee.contains(':') {
+        format!("[{referee}]")
+    } else {
+        referee.to_string()
+    };
+    format!("postgres://autoctl_node@{host}:5432/pg_auto_failover?sslmode=require")
+}
+
 /// pg_autoctl's data directory on a database machine.
 pub fn autoctl_data(system: &System) -> String {
     format!("{}/17/sp", system.postgres_home())
@@ -474,8 +485,7 @@ fn by_referee(
         },
     });
     steps.push(autoctl_folder("Make pg_autoctl's data directory", &data));
-    let monitor =
-        format!("postgres://autoctl_node@{referee}:5432/pg_auto_failover?sslmode=require");
+    let monitor = monitor_uri(referee);
     steps.push(Step {
         title: "Register this machine with the referee".into(),
         action: Action::Run {
@@ -541,6 +551,7 @@ fn by_referee(
             &[],
             Some(
                 super::steps::database_sql(&plan.password)
+                    + super::steps::QUIET_SQL
                     + &format!(
                         "SELECT 'CREATE ROLE pgautofailover_replicator LOGIN REPLICATION' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgautofailover_replicator') \\gexec\nALTER ROLE pgautofailover_replicator PASSWORD '{}';\n",
                         plan.replication_password.replace('\'', "''")
@@ -1060,6 +1071,14 @@ pub fn asked(command: &str) -> Option<Asked> {
 /// `scannerpulse node serve`: the forced command of the hub's key.
 pub fn serve() -> Result<String, String> {
     let command = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
+    let refereed = NodeFile::read().is_ok_and(|node| node.referee.is_some());
+    if let Some(asked) = asked(&command)
+        && refused_with_referee(refereed, &asked)
+    {
+        return Err(format!(
+            "{command:?} is not for this machine: the referee changes the roles here"
+        ));
+    }
     match asked(&command) {
         None => Err(format!(
             "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST or switchover"
@@ -1072,6 +1091,16 @@ pub fn serve() -> Result<String, String> {
         Some(Asked::PromoteAfter(lsn)) => promote_after(&lsn).map(|()| "promoted".into()),
         Some(Asked::Follow(host)) => follow(&host).map(|()| format!("following {host}")),
     }
+}
+
+/// The commands that change the roles by hand, which a machine with a
+/// referee leaves to it.
+fn refused_with_referee(referee: bool, asked: &Asked) -> bool {
+    referee
+        && matches!(
+            asked,
+            Asked::Stop | Asked::Start | Asked::Promote | Asked::PromoteAfter(_) | Asked::Follow(_)
+        )
 }
 
 /// `scannerpulse node backup`, as the postgres account from its timer: a
@@ -1591,10 +1620,7 @@ mod tests {
         let (_, args, _, input) = ran(&first, make);
         assert!(args[1].contains("pg_is_in_recovery"), "{}", args[1]);
         let sql = input.unwrap();
-        assert!(
-            sql.starts_with("SET log_min_error_statement = panic;"),
-            "{sql}"
-        );
+        assert!(sql.starts_with(super::super::steps::QUIET_SQL), "{sql}");
         assert!(
             sql.contains("ALTER ROLE pgautofailover_replicator PASSWORD 'copy-secret-2'"),
             "{sql}"
@@ -1752,9 +1778,7 @@ mod tests {
             "{body}"
         );
         assert!(
-            input
-                .unwrap()
-                .starts_with("SET log_min_error_statement = panic;\n"),
+            input.unwrap().starts_with(super::super::steps::QUIET_SQL),
             "{input:?}"
         );
         // Machine 2, the primary since a change of roles, is left as it is;
@@ -1915,6 +1939,35 @@ mod tests {
             ("db2.example.org", "status") => Ok(STANDBY.into()),
             (_, "stop") => Ok("0/313CE18".into()),
             _ => Ok("done".into()),
+        }
+    }
+
+    #[test]
+    fn the_referees_address_is_a_uri_host() {
+        assert_eq!(
+            monitor_uri("ref.example.org"),
+            "postgres://autoctl_node@ref.example.org:5432/pg_auto_failover?sslmode=require"
+        );
+        assert_eq!(
+            monitor_uri("2001:db8::31"),
+            "postgres://autoctl_node@[2001:db8::31]:5432/pg_auto_failover?sslmode=require"
+        );
+    }
+
+    #[test]
+    fn with_a_referee_the_hubs_key_may_not_change_the_roles_by_hand() {
+        for asked in [
+            Asked::Stop,
+            Asked::Start,
+            Asked::Promote,
+            Asked::PromoteAfter("0/3".into()),
+            Asked::Follow("db2.example.org".into()),
+        ] {
+            assert!(refused_with_referee(true, &asked), "{asked:?}");
+            assert!(!refused_with_referee(false, &asked), "{asked:?}");
+        }
+        for asked in [Asked::Status, Asked::Switchover] {
+            assert!(!refused_with_referee(true, &asked), "{asked:?}");
         }
     }
 

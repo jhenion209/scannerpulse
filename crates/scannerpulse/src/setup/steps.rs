@@ -611,12 +611,15 @@ pub(super) fn setfacl(title: &str, args: &[&str]) -> Step {
 
 /// The SQL that makes the role and the database, run by the `postgres`
 /// account; it does nothing that is already done.
+/// What starts SQL that sets a password: neither the statement nor, if it
+/// fails, its text reaches PostgreSQL's log.
+pub(super) const QUIET_SQL: &str =
+    "SET log_statement = none;\nSET log_min_error_statement = panic;\n";
+
 pub(super) fn database_sql(password: &str) -> String {
     let quoted = password.replace('\'', "''");
-    // A statement that fails is not written to PostgreSQL's log with its
-    // password.
     format!(
-        "SET log_min_error_statement = panic;\n\
+        "{QUIET_SQL}\
          SELECT format('CREATE ROLE {ACCOUNT} LOGIN PASSWORD %L', '{quoted}') \
          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ACCOUNT}') \\gexec\n\
          ALTER ROLE {ACCOUNT} PASSWORD '{quoted}';\n\
@@ -1826,6 +1829,15 @@ mod tests {
                 .iter()
                 .any(|s| s.title.contains("PostgreSQL") || s.title.contains("EPEL"))
         );
+    }
+
+    #[test]
+    fn a_password_set_by_sql_is_kept_out_of_postgresqls_log() {
+        assert_eq!(
+            super::QUIET_SQL,
+            "SET log_statement = none;\nSET log_min_error_statement = panic;\n"
+        );
+        assert!(super::database_sql("pw").starts_with(super::QUIET_SQL));
     }
 
     #[test]

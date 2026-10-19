@@ -91,7 +91,8 @@ pub fn steps(
         "for i in $(seq 120); do runuser -u postgres -- psql -d pg_auto_failover -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\nrunuser -u postgres -- psql -d pg_auto_failover -q -v ON_ERROR_STOP=1",
         &[],
         Some(format!(
-            "SET log_min_error_statement = panic;\nALTER USER autoctl_node PASSWORD '{}';\nSELECT pg_reload_conf();\n",
+            "{}ALTER USER autoctl_node PASSWORD '{}';\nSELECT pg_reload_conf();\n",
+            super::steps::QUIET_SQL,
             plan.monitor_password.replace('\'', "''")
         )),
     ));
@@ -211,7 +212,7 @@ mod tests {
             panic!()
         };
         assert!(!args.join(" ").contains("secret"));
-        assert!(input.as_deref().unwrap().starts_with("SET log_min_error_statement = panic;\nALTER USER autoctl_node PASSWORD 'referee-secret-3';"));
+        assert!(input.as_deref().unwrap().starts_with("SET log_statement = none;\nSET log_min_error_statement = panic;\nALTER USER autoctl_node PASSWORD 'referee-secret-3';"));
         assert!(titles.contains(&"Open port 5432 in the firewall, if firewalld runs"));
         assert!(
             titles.contains(&"Let the ScannerPulse machine run this machine's database commands")
