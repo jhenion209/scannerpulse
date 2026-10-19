@@ -200,13 +200,15 @@ for the first). The joining machine reads its place over SSH, installs
 PostgreSQL 17, lets in only this machine and the other database machine
 (TLS and a password), and the second copies the first and follows it. Each
 lets this machine's key run only `scannerpulse node serve` (status, stop,
-start, promote, promote after, follow, and on the referee
-switchover). Then this machine makes the tables and starts. Its
-services are given both machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on
-the one that is the primary, moving to the other within seconds after a
-change of roles; a former primary that comes back still a primary is
-ignored, as the promoted machine is on a newer timeline. The primary keeps a nightly dump in
-`/var/backups/scannerpulse` (the newest 14).
+start, promote, promote after, follow, and on the referee switchover).
+Then this machine makes the tables and starts. Its services are given both
+machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on the one that is the
+primary, moving to the other within seconds after a change of roles; a
+former primary that comes back still a primary is ignored, as the promoted
+machine is on a newer timeline. The primary keeps a nightly dump in
+`/var/backups/scannerpulse` (the newest 14). Uninstall on a database
+machine or the referee takes off setup's own parts there and leaves
+PostgreSQL and its data.
 
 - If the primary dies, run `sudo /usr/local/bin/scannerpulse db promote` on the standby. It
   is refused while the other machine still answers as the primary, so two
