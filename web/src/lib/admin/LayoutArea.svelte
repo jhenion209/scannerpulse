@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { machineText, modeText, standbyText, type LayoutInfo } from './layout';
+  import { formerPrimaryText, machineText, modeText, standbyText, type LayoutInfo } from './layout';
   import { admin, why } from './session.svelte';
 
   /** How often the layout is read again while the area is open. */
@@ -67,6 +67,8 @@
               <span class="flag">does not answer: {node.error}</span>
             {:else if node.role === 'primary'}
               the primary
+            {:else if node.role === 'former_primary'}
+              <span class="flag">{formerPrimaryText}</span>
             {:else}
               {@const behind = standbyText(node)}
               the standby, <span class={behind.ok ? '' : 'flag'}>{behind.text}</span>

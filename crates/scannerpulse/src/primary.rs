@@ -121,7 +121,7 @@ pub async fn find_why(options: &PgConnectOptions, nodes: &[Node]) -> Result<usiz
 /// Which of the nodes' timelines (`None` for a standby or no answer) is
 /// the primary's: the newest, so a former primary back after a failover
 /// is never taken for it.
-fn newest(timelines: &[Option<u32>]) -> Option<usize> {
+pub(crate) fn newest(timelines: &[Option<u32>]) -> Option<usize> {
     newest_from(timelines, 0)
 }
 

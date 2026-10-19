@@ -130,12 +130,15 @@ pub fn spawn_beat(pool: PgPool, host: String, layout: Option<PathBuf>) {
     });
 }
 
-/// One database machine as it answers: its role and WAL position, and for
-/// a standby the time since its last replayed write.
+/// One database machine as it answers: whether it is a standby, its WAL
+/// position, for a standby the time since its last replayed write, and for
+/// a primary its timeline.
+type Answer = Result<(bool, String, Option<f64>, Option<u32>), String>;
+
 async fn ask_node(
     options: &sqlx::postgres::PgConnectOptions,
     node: &crate::primary::Node,
-) -> Result<(bool, String, Option<f64>), String> {
+) -> Answer {
     let options = options.clone().host(&node.host).port(node.port);
     let ask = async {
         let mut conn = PgConnection::connect_with(&options).await?;
@@ -147,14 +150,46 @@ async fn ask_node(
         )
         .fetch_one(&mut conn)
         .await?;
+        let wal: Option<String> = sqlx::query_scalar(crate::primary::CURRENT_WAL)
+            .fetch_one(&mut conn)
+            .await?;
         let _ = conn.close().await;
-        Ok::<_, sqlx::Error>(answer)
+        let timeline = wal.as_deref().and_then(crate::primary::timeline_of);
+        Ok::<_, sqlx::Error>((answer.0, answer.1, answer.2, timeline))
     };
     match tokio::time::timeout(ASK_LIMIT, ask).await {
         Err(_) => Err(format!("no answer within {} s", ASK_LIMIT.as_secs())),
         Ok(Err(error)) => Err(error.to_string()),
         Ok(Ok(answer)) => Ok(answer),
     }
+}
+
+/// Each machine's role (none when it did not answer) and the position of
+/// the primary: the one on the newest timeline. Any other machine that
+/// answers as a primary is a former one, back after a hand promotion and
+/// waiting for `db rejoin`.
+fn roles(answers: &[Answer]) -> (Vec<Option<&'static str>>, Option<String>) {
+    let timelines: Vec<Option<u32>> = answers
+        .iter()
+        .map(|answer| match answer {
+            Ok((false, _, _, timeline)) => *timeline,
+            _ => None,
+        })
+        .collect();
+    let primary = crate::primary::newest(&timelines)
+        .or_else(|| answers.iter().position(|a| matches!(a, Ok((false, ..)))));
+    let roles = answers
+        .iter()
+        .enumerate()
+        .map(|(i, answer)| match answer {
+            Ok((false, ..)) if Some(i) == primary => Some("primary"),
+            Ok((false, ..)) => Some("former_primary"),
+            Ok((true, ..)) => Some("standby"),
+            Err(_) => None,
+        })
+        .collect();
+    let at = primary.and_then(|i| answers[i].as_ref().ok().map(|a| a.1.clone()));
+    (roles, at)
 }
 
 /// The referee answers on its port.
@@ -208,23 +243,21 @@ pub async fn report(
     for node in nodes {
         answers.push(ask_node(&options, node).await);
     }
-    let primary_at = answers.iter().find_map(|answer| match answer {
-        Ok((false, at, _)) => Some(at.clone()),
-        _ => None,
-    });
+    let (roles, primary_at) = roles(&answers);
     let database: Vec<Value> = nodes
         .iter()
         .zip(answers)
-        .map(|(node, answer)| match answer {
-            Ok((false, at, _)) => json!({"host": node.host, "role": "primary", "at": at}),
-            Ok((true, at, replayed)) => json!({
+        .zip(roles)
+        .map(|((node, answer), role)| match (answer, role) {
+            (Ok((false, at, ..)), Some(role)) => json!({"host": node.host, "role": role, "at": at}),
+            (Ok((_, at, replayed, _)), _) => json!({
                 "host": node.host,
                 "role": "standby",
                 "at": at,
                 "behind_bytes": primary_at.as_deref().and_then(|p| behind(p, &at)),
                 "replayed_seconds_ago": replayed.map(f64::round),
             }),
-            Err(why) => json!({"host": node.host, "role": null, "error": why}),
+            (Err(why), _) => json!({"host": node.host, "role": null, "error": why}),
         })
         .collect();
     let referee = match layout.and_then(|l| l.referee.as_deref()) {
@@ -304,5 +337,22 @@ mod tests {
         assert_eq!(behind("16/B374D848", "16/B374D000"), Some(0x848));
         // A standby ahead of a primary read a moment earlier is not behind.
         assert_eq!(behind("16/B374D000", "16/B374D848"), Some(0));
+    }
+
+    #[test]
+    fn a_former_primary_is_told_from_the_primary_by_its_timeline() {
+        let primary = |at: &str, timeline| Ok((false, at.to_string(), None, Some(timeline)));
+        let standby = |at: &str| Ok((true, at.to_string(), Some(2.0), None));
+        // The old primary is back on timeline 1; the promoted one is on 2.
+        let (got, at) = roles(&[primary("0/5000000", 1), primary("0/9000000", 2)]);
+        assert_eq!(got, [Some("former_primary"), Some("primary")]);
+        assert_eq!(at.as_deref(), Some("0/9000000"));
+        // One primary and one standby, either way round, and a silent one.
+        let (got, at) = roles(&[standby("0/8FFF000"), primary("0/9000000", 2)]);
+        assert_eq!(got, [Some("standby"), Some("primary")]);
+        assert_eq!(at.as_deref(), Some("0/9000000"));
+        let (got, at) = roles(&[Err("down".into()), standby("0/1")]);
+        assert_eq!(got, [None, Some("standby")]);
+        assert_eq!(at, None);
     }
 }

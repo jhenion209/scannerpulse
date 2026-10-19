@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bytesText, machineText, modeText, standbyText } from './layout';
+import { bytesText, formerPrimaryText, machineText, modeText, standbyText } from './layout';
 
 describe('the layout in words', () => {
   it('names the failover mode', () => {
@@ -37,5 +37,11 @@ describe('the layout in words', () => {
       text: 'not heard from for 2 min',
       ok: false,
     });
+  });
+
+  it('tells what to do with a former primary', () => {
+    expect(formerPrimaryText).toBe(
+      'answers as a primary on an older timeline: run sudo /usr/local/bin/scannerpulse db rejoin there',
+    );
   });
 });

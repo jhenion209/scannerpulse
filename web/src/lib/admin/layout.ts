@@ -19,7 +19,7 @@ export interface LayoutMachine {
 export interface DatabaseMachine {
   host: string;
   /** Null when it does not answer (`error` says why). */
-  role: 'primary' | 'standby' | null;
+  role: 'primary' | 'former_primary' | 'standby' | null;
   error?: string;
   behind_bytes?: number | null;
   replayed_seconds_ago?: number | null;
@@ -38,6 +38,10 @@ export interface LayoutInfo {
   /** Run on the first machine; null on one machine alone. */
   switchover: string | null;
 }
+
+/** A machine that answers as a primary on an older timeline, back after a hand promotion. */
+export const formerPrimaryText =
+  'answers as a primary on an older timeline: run sudo /usr/local/bin/scannerpulse db rejoin there';
 
 /** A standby this far behind needs a look. */
 export const BEHIND_FLAG_BYTES = 16 * 1024 ** 2;
