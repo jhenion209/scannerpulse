@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bytesText, formerPrimaryText, machineText, modeText, standbyText } from './layout';
+import { bytesText, firstMachine, formerPrimaryText, machineLabel, machineText, modeText, standbyText } from './layout';
 
 describe('the layout in words', () => {
   it('names the failover mode', () => {
@@ -50,5 +50,14 @@ describe('the layout in words', () => {
       text: 'never heard from (a version before 0.7.0, or its web has not started)',
       ok: false,
     });
+  });
+
+  // A space at the start of an {#if} block is dropped: the words carry their own.
+  it('names the second machine and the first, each with a space before', () => {
+    expect(machineLabel('radio-b', 'radio-b')).toBe('radio-b (the second)');
+    expect(machineLabel('radio-a', 'radio-b')).toBe('radio-a');
+    expect(machineLabel('radio-a', null)).toBe('radio-a');
+    expect(firstMachine('192.0.2.10')).toBe('the first ScannerPulse machine (192.0.2.10)');
+    expect(firstMachine(null)).toBe('the first ScannerPulse machine');
   });
 });

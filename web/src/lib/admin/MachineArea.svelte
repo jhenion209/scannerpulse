@@ -86,7 +86,7 @@
           {@const age = backupAge(info.newest, now())}
           <dt>{kindName(kind)}</dt>
           <dd>
-            <span class={age.ok ? '' : 'flag'}>{age.text}</span>{#if info.newest} ({when(info.newest)}){/if};
+            <span class={age.ok ? '' : 'flag'}>{age.text}</span>{#if info.newest}{` (${when(info.newest)})`}{/if};
             {info.push ? 'a push address is set' : 'no push address'}
           </dd>
         {/each}

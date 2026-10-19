@@ -4,6 +4,7 @@
 export const AREAS = [
   { id: 'status', label: 'Status' },
   { id: 'layout', label: 'Layout' },
+  { id: 'updates', label: 'Updates' },
   { id: 'machine', label: 'This machine' },
   { id: 'maintenance', label: 'Maintenance' },
   { id: 'transcription', label: 'Transcription' },

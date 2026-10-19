@@ -97,3 +97,11 @@ export function machineText(machine: Pick<LayoutMachine, 'up' | 'version' | 'see
   if (machine.up) return { text: `answering (version ${machine.version})`, ok: true };
   return { text: `not heard from for ${durationText(machine.seen_seconds_ago * 1000)}`, ok: false };
 }
+
+/** A ScannerPulse machine's name, with "(the second)" for the second. */
+export const machineLabel = (host: string, second: string | null) =>
+  host === second ? `${host} (the second)` : host;
+
+/** The first ScannerPulse machine, by the address the plan gives it. */
+export const firstMachine = (first: string | null) =>
+  first ? `the first ScannerPulse machine (${first})` : 'the first ScannerPulse machine';

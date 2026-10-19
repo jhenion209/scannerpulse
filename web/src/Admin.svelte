@@ -21,10 +21,11 @@
   import Logo from './lib/Logo.svelte';
   import ThemeSwitch from './lib/ThemeSwitch.svelte';
   import TranscriptionArea from './lib/admin/TranscriptionArea.svelte';
+  import UpdatesArea from './lib/admin/UpdatesArea.svelte';
   import ViewersArea from './lib/admin/ViewersArea.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, layout: LayoutArea, machine: MachineArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, data: DataArea, accounts: AccountsArea, settings: SettingsArea,
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, layout: LayoutArea, updates: UpdatesArea, machine: MachineArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, data: DataArea, accounts: AccountsArea, settings: SettingsArea,
     favorites: FavoritesArea, viewers: ViewersArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());

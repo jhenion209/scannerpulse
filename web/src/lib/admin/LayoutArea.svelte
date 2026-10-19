@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { callTime } from '../format';
-  import { formerPrimaryText, machineText, modeText, standbyText, type LayoutInfo } from './layout';
+  import HelperAction from './HelperAction.svelte';
+  import { firstMachine, formerPrimaryText, machineLabel, machineText, modeText, standbyText, type LayoutInfo } from './layout';
   import { admin, why } from './session.svelte';
   import { siteZone } from '../status.svelte';
 
@@ -51,7 +52,7 @@
         {#each data.machines as machine (machine.host)}
           {@const state = machineText(machine)}
           <!-- The plan names the second machine by its name. -->
-          <dt>{machine.host}{#if machine.host === data.second} (the second){/if}</dt>
+          <dt>{machineLabel(machine.host, data.second)}</dt>
           <dd>
             <span class={state.ok ? '' : 'flag'}>{state.text}</span>{#if machine.holds_shared}; holds the shared address{/if}{#if machine.holds_lease}; files and transcribes the calls{/if}
           </dd>
@@ -100,9 +101,15 @@
       <h2>Switchover</h2>
       <p>
         To swap the database machines' roles while both are healthy (writes pause for seconds; nothing is lost), run
-        this on the first ScannerPulse machine{#if data.first} ({data.first}){/if}:
+        this on {firstMachine(data.first)}:
       </p>
       <pre><code>{data.switchover}</code></pre>
+      <p>Or ask the root helper there to do it now:</p>
+      <HelperAction
+        kind="switchover"
+        label="Switch the roles now"
+        question="Make the standby the primary, and the primary its standby, now? Writes pause for seconds."
+      />
     {/if}
   {/if}
 </section>
