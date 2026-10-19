@@ -44,6 +44,20 @@ pub fn info(names: &[String]) -> Result<String, String> {
     serde_json::to_string(&Joining { place, plan }).map_err(|error| error.to_string())
 }
 
+/// The hub's known_hosts, `kept`, with `node`'s lines replaced by `lines`.
+pub fn known_hosts_with(kept: &str, node: &str, lines: &[String]) -> String {
+    let mut text: String = kept
+        .lines()
+        .filter(|line| line.split_whitespace().next() != Some(node))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
 /// The known_hosts lines for `node` from its public host keys (one
 /// `type key [comment]` a line).
 pub fn known_lines(node: &str, host_keys: &str) -> Vec<String> {
@@ -64,7 +78,7 @@ pub fn known_lines(node: &str, host_keys: &str) -> Vec<String> {
 pub fn done(node: &str, host_keys: &str) -> Result<String, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut plan = Plan::read(Path::new(PLAN))?;
+    let plan = Plan::read(Path::new(PLAN))?;
     if !plan.nodes.iter().chain(&plan.referee).any(|n| n == node) {
         return Err(format!("{node} is not one of the install's machines"));
     }
@@ -72,24 +86,25 @@ pub fn done(node: &str, host_keys: &str) -> Result<String, String> {
     if lines.is_empty() {
         return Err("no SSH host key came with it".into());
     }
+    // A machine set up again has new host keys: its old ones go.
     let path = Path::new(SSH).join("known_hosts");
     let kept = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
+    let new = path.with_extension("new");
+    std::fs::OpenOptions::new()
+        .write(true)
         .create(true)
+        .truncate(true)
         .mode(0o600)
-        .open(&path)
+        .open(&new)
+        .and_then(|mut file| file.write_all(known_hosts_with(&kept, node, &lines).as_bytes()))
+        .and_then(|()| std::fs::rename(&new, &path))
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    for line in lines
-        .iter()
-        .filter(|l| !kept.lines().any(|k| k == l.as_str()))
-    {
-        writeln!(file, "{line}").map_err(|error| format!("{}: {error}", path.display()))?;
-    }
-    plan.mark_joined(node);
-    plan.write(Path::new(PLAN))?;
+    Plan::update(Path::new(PLAN), |plan| plan.mark_joined(node))?;
     Ok(format!("{node} has joined"))
 }
+
+/// Where the connection to the hub is kept for the join's commands.
+const CONTROL_PATH: &str = "/run/scannerpulse-join-%C";
 
 /// How setup on a database machine reaches the hub.
 pub struct Hub {
@@ -104,6 +119,28 @@ pub struct Hub {
 impl Hub {
     /// The ssh command line that runs `scannerpulse join ARGS` on the hub
     /// as root, over one connection kept for the session.
+    /// Closes the connection `command` keeps open.
+    pub fn close_command(&self) -> Vec<String> {
+        vec![
+            "ssh".into(),
+            "-o".into(),
+            format!("ControlPath={CONTROL_PATH}"),
+            "-O".into(),
+            "exit".into(),
+            format!("{}@{}", self.login, self.address),
+        ]
+    }
+
+    pub fn close(&self) {
+        let command = self.close_command();
+        let _ = Command::new(&command[0])
+            .args(&command[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
     pub fn command(&self, args: &[&str]) -> Vec<String> {
         let mut remote = String::new();
         if self.login != "root" {
@@ -115,12 +152,13 @@ impl Hub {
             remote.push(' ');
             remote.push_str(arg);
         }
+        let control = format!("ControlPath={CONTROL_PATH}");
         let mut command: Vec<String> = [
             "ssh",
             "-o",
             "ControlMaster=auto",
             "-o",
-            "ControlPath=/run/scannerpulse-join-%C",
+            &control,
             "-o",
             "ControlPersist=300",
             "-o",
@@ -193,6 +231,14 @@ impl Hub {
 /// joined, and says so to the hub. `yes` asks the person to go ahead (an
 /// answers file says yes).
 pub async fn run(hub: Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<(), String> {
+    // The kept connection to the hub, the person's login, closes however
+    // the join ends.
+    let joined = join(&hub, dry_run, yes).await;
+    hub.close();
+    joined
+}
+
+async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<(), String> {
     let names = my_names(&hub.address);
     let mut joining = hub.info(&names)?;
     let mut said = None;
@@ -322,6 +368,42 @@ pub fn host_keys() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kept_connection_is_closed_at_the_end() {
+        let hub = Hub {
+            address: "192.0.2.10".into(),
+            login: "chief".into(),
+            sudo_password: None,
+            batch: true,
+        };
+        let close = hub.close_command();
+        assert_eq!(
+            close,
+            [
+                "ssh",
+                "-o",
+                "ControlPath=/run/scannerpulse-join-%C",
+                "-O",
+                "exit",
+                "chief@192.0.2.10"
+            ]
+        );
+        assert!(
+            hub.command(&["info"])
+                .contains(&"ControlPath=/run/scannerpulse-join-%C".to_string())
+        );
+    }
+
+    #[test]
+    fn a_nodes_new_host_keys_replace_its_old_ones() {
+        let kept = "db1.example.org ssh-ed25519 AAAAold\ndb2.example.org ssh-ed25519 AAAAtwo\n";
+        let lines = vec!["db1.example.org ssh-ed25519 AAAAnew".to_string()];
+        assert_eq!(
+            known_hosts_with(kept, "db1.example.org", &lines),
+            "db2.example.org ssh-ed25519 AAAAtwo\ndb1.example.org ssh-ed25519 AAAAnew\n"
+        );
+    }
 
     #[test]
     fn the_hub_is_asked_as_root_over_one_kept_connection() {

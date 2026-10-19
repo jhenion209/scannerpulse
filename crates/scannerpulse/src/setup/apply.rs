@@ -206,30 +206,29 @@ fn write_plan(
         .trim()
         .to_string();
     // The machines' passwords, and who has joined, stay while the machines
-    // do.
-    let kept = Plan::read(Path::new(PLAN))
-        .ok()
-        .filter(|old| old.nodes == nodes && old.referee.as_deref() == referee);
-    let plan = Plan {
-        hub: hub.to_string(),
-        hub_key,
-        nodes: nodes.to_vec(),
-        database: super::steps::DATABASE.into(),
-        role: super::steps::ACCOUNT.into(),
-        password: password.to_string(),
-        replication_password: kept
-            .as_ref()
-            .map(|old| old.replication_password.clone())
-            .unwrap_or_else(|| crate::sessions::random_hex(24)),
-        referee: referee.map(str::to_string),
-        monitor_password: match (&kept, referee) {
-            (Some(old), _) => old.monitor_password.clone(),
-            (None, Some(_)) => crate::sessions::random_hex(24),
-            (None, None) => String::new(),
-        },
-        joined: kept.map(|old| old.joined).unwrap_or_default(),
-    };
-    plan.write(Path::new(PLAN))
+    // do; a machine joining meanwhile waits for the plan's lock.
+    Plan::replace(Path::new(PLAN), |kept| {
+        let kept = kept.filter(|old| old.nodes == nodes && old.referee.as_deref() == referee);
+        Ok(Plan {
+            hub: hub.to_string(),
+            hub_key,
+            nodes: nodes.to_vec(),
+            database: super::steps::DATABASE.into(),
+            role: super::steps::ACCOUNT.into(),
+            password: password.to_string(),
+            replication_password: kept
+                .as_ref()
+                .map(|old| old.replication_password.clone())
+                .unwrap_or_else(|| crate::sessions::random_hex(24)),
+            referee: referee.map(str::to_string),
+            monitor_password: match (&kept, referee) {
+                (Some(old), _) => old.monitor_password.clone(),
+                (None, Some(_)) => crate::sessions::random_hex(24),
+                (None, None) => String::new(),
+            },
+            joined: kept.map(|old| old.joined).unwrap_or_default(),
+        })
+    })
 }
 
 /// Waits until both database machines have joined (each says so through

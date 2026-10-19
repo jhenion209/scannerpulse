@@ -321,7 +321,7 @@ fn by_hand(
     ));
     steps.push(script(
         "Let the ScannerPulse machine and both database machines in",
-        "grep -qxF \"$MARK\" \"$HBA\" || cat >> \"$HBA\"",
+        REPLACE_BLOCK,
         &[("MARK", MARK), ("HBA", system.postgres_hba())],
         Some(hba(plan, hub, nodes)),
     ));
@@ -513,7 +513,7 @@ fn by_referee(
     });
     steps.push(script(
         "Let the ScannerPulse machine in",
-        "grep -qxF \"$MARK\" \"$HBA\" || cat >> \"$HBA\"",
+        REPLACE_BLOCK,
         &[("MARK", HUB_MARK), ("HBA", &format!("{data}/pg_hba.conf"))],
         Some(hub_hba(hub)),
     ));
@@ -546,6 +546,11 @@ fn by_referee(
     steps
 }
 
+/// Setup's block in an access-rules file (`$HBA`), its first line `$MARK`
+/// and the rest `hostssl` lines, made anew from standard input: an old
+/// block goes, and the file keeps its owner and mode.
+pub(super) const REPLACE_BLOCK: &str = "T=$(mktemp) && awk -v m=\"$MARK\" '$0 == m { skip = 1; next } skip && /^hostssl / { next } { skip = 0; print }' \"$HBA\" > \"$T\" && cat >> \"$T\" && cat \"$T\" > \"$HBA\" && rm -f \"$T\"";
+
 /// The marker of setup's line for the ScannerPulse machine in pg_autoctl's
 /// access rules.
 const HUB_MARK: &str = "# scannerpulse: the ScannerPulse machine";
@@ -568,8 +573,11 @@ fn hub_hba(hub: &[IpAddr]) -> String {
 pub(super) fn hub_key_step(plan: &Plan, hub: &[IpAddr], binary: &Path) -> Step {
     script(
         "Let the ScannerPulse machine run this machine's database commands",
-        "install -d -m 0700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && { grep -qF \"$KEY\" /root/.ssh/authorized_keys || cat >> /root/.ssh/authorized_keys; }",
-        &[("KEY", plan.hub_key.trim())],
+        "install -d -m 0700 \"$(dirname \"$AK\")\" && touch \"$AK\" && chmod 600 \"$AK\" && T=$(mktemp) && { grep -vF \"$KEY\" \"$AK\" || true; } > \"$T\" && cat >> \"$T\" && cat \"$T\" > \"$AK\" && rm -f \"$T\"",
+        &[
+            ("KEY", plan.hub_key.trim()),
+            ("AK", "/root/.ssh/authorized_keys"),
+        ],
         Some(authorized_line(&plan.hub_key, hub, binary)),
     )
 }
@@ -1325,6 +1333,90 @@ mod tests {
             monitor_password: "referee-secret-3".into(),
             ..plan()
         }
+    }
+
+    /// Runs a step's script with `/bin/sh`, its values in the environment
+    /// with `extra` added, and its input on standard input.
+    fn run_script(step: &Step, extra: &[(&str, &str)]) {
+        use std::io::Write;
+        let Action::Run {
+            program,
+            args,
+            env,
+            input,
+            ..
+        } = &step.action
+        else {
+            panic!("{}", step.title)
+        };
+        assert_eq!(program, "/bin/sh", "{}", step.title);
+        let mut child = Command::new(program)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .envs(extra.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_deref().unwrap_or("").as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "{}", step.title);
+    }
+
+    #[test]
+    fn joining_again_replaces_the_rules_and_the_key_line() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let binary = Path::new("/usr/local/bin/scannerpulse");
+        let dir = tempfile::tempdir().unwrap();
+        // The access rules: another rule, then setup's block for an old
+        // address of the hub.
+        let rules = dir.path().join("pg_hba.conf");
+        let old = steps(
+            &plan(),
+            0,
+            &debian,
+            binary,
+            &ips(&["192.0.2.9"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        let step =
+            |all: &[Step], title: &str| all.iter().find(|s| s.title == title).unwrap().clone();
+        let hba_title = "Let the ScannerPulse machine and both database machines in";
+        std::fs::write(&rules, "local all postgres peer\n").unwrap();
+        let path = rules.display().to_string();
+        run_script(&step(&old, hba_title), &[("HBA", &path)]);
+        let new = steps(
+            &plan(),
+            0,
+            &debian,
+            binary,
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        run_script(&step(&new, hba_title), &[("HBA", &path)]);
+        let text = std::fs::read_to_string(&rules).unwrap();
+        assert!(text.starts_with("local all postgres peer\n"), "{text}");
+        assert!(!text.contains("192.0.2.9/"), "{text}");
+        assert_eq!(text.matches("192.0.2.10/32").count(), 1, "{text}");
+        assert_eq!(text.matches(MARK).count(), 1, "{text}");
+        // The key: its old line (an old address) gives way to the new one.
+        let keys = dir.path().join("authorized_keys");
+        std::fs::write(&keys, "ssh-ed25519 AAAAother someone\n").unwrap();
+        let key_title = "Let the ScannerPulse machine run this machine's database commands";
+        let path = keys.display().to_string();
+        run_script(&step(&old, key_title), &[("AK", &path)]);
+        run_script(&step(&new, key_title), &[("AK", &path)]);
+        let text = std::fs::read_to_string(&keys).unwrap();
+        assert!(
+            text.starts_with("ssh-ed25519 AAAAother someone\n"),
+            "{text}"
+        );
+        assert!(!text.contains("192.0.2.9"), "{text}");
+        assert_eq!(text.matches("AAAAhub").count(), 1, "{text}");
     }
 
     #[test]

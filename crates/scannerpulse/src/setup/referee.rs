@@ -80,7 +80,7 @@ pub fn steps(
     });
     steps.push(super::node::script(
         "Let both database machines in",
-        "grep -qxF \"$MARK\" \"$HBA\" || cat >> \"$HBA\"",
+        super::node::REPLACE_BLOCK,
         &[("MARK", MARK), ("HBA", &format!("{data}/pg_hba.conf"))],
         Some(hba(nodes)),
     ));

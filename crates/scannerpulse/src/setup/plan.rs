@@ -68,21 +68,65 @@ impl Plan {
         serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
     }
 
-    /// Writes the plan whole, root's alone.
+    /// Writes the plan whole, root's alone, and on disk before it is
+    /// named.
     pub fn write(&self, path: &Path) -> Result<(), String> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
         let new = path.with_extension("new");
         let text = serde_json::to_string_pretty(self).map_err(|error| error.to_string())?;
-        std::fs::OpenOptions::new()
+        // A file left by an earlier write could have another mode.
+        match std::fs::remove_file(&new) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(fail(error)),
+            _ => {}
+        }
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&new)
-            .and_then(|mut file| file.write_all(text.as_bytes()))
-            .and_then(|()| std::fs::rename(&new, path))
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))
+            .map_err(fail)?;
+        file.write_all(text.as_bytes()).map_err(fail)?;
+        file.sync_all().map_err(fail)?;
+        std::fs::rename(&new, path).map_err(fail)?;
+        if let Some(folder) = path.parent() {
+            std::fs::File::open(folder)
+                .and_then(|f| f.sync_all())
+                .map_err(fail)?;
+        }
+        Ok(())
+    }
+
+    /// Changes the plan at `path` with `change`, under its lock, so that
+    /// two machines joining at once each keep their mark.
+    pub fn update(path: &Path, change: impl FnOnce(&mut Plan)) -> Result<(), String> {
+        Plan::replace(path, |kept| {
+            let mut plan = kept.ok_or_else(|| Plan::read(path).unwrap_err())?;
+            change(&mut plan);
+            Ok(plan)
+        })
+    }
+
+    /// Writes the plan `make` gives from the plan at `path`, if any, under
+    /// its lock.
+    pub fn replace(
+        path: &Path,
+        make: impl FnOnce(Option<Plan>) -> Result<Plan, String>,
+    ) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock_path = path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|error| format!("{}: {error}", lock_path.display()))?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|error| format!("{}: {error}", lock_path.display()))?;
+        let kept = path.exists().then(|| Plan::read(path)).transpose()?;
+        make(kept)?.write(path)
     }
 
     /// Which machine of the plan a machine is, by its own names and
@@ -275,6 +319,26 @@ mod tests {
             super::tests::plan().awaited_before(Place::Node(1)),
             Some("db1.example.org")
         );
+    }
+
+    #[test]
+    fn a_plan_is_changed_under_a_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.json");
+        plan().write(&path).unwrap();
+        // A stale file of another mode where the new one is written.
+        std::fs::write(path.with_extension("new"), "stale").unwrap();
+        std::fs::set_permissions(
+            path.with_extension("new"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        Plan::update(&path, |plan| plan.mark_joined("db1.example.org")).unwrap();
+        assert_eq!(Plan::read(&path).unwrap().joined, ["db1.example.org"]);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(path.with_extension("lock").exists());
     }
 
     #[test]
