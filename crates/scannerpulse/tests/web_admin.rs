@@ -540,3 +540,69 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     assert!(body["acme"]["renewed"].is_null());
     assert!(!body.to_string().contains("cf-token-1"), "{body}");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_asks_the_root_helper_and_sees_what_it_said(pool: PgPool) {
+    let app = app(&pool);
+    assert_eq!(
+        send(&app, "GET", "/api/admin/updates", &[], None)
+            .await
+            .status,
+        401
+    );
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let got = send(&app, "GET", "/api/admin/updates", &h, None).await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    assert_eq!(got.body["running"], scannerpulse::update::VERSION);
+    assert!(got.body["newest"].is_null());
+    assert_eq!(got.body["check"], true);
+    assert!(got.body["helper"].is_null());
+    assert!(got.body["requests"]["update"].is_null());
+    assert_eq!(got.body["open"], false);
+    let ask = |kind: &str| {
+        send(
+            &app,
+            "POST",
+            "/api/admin/helper",
+            &h,
+            Some(json!({"kind": kind})),
+        )
+    };
+    // No helper is up: the admin is told to install it.
+    let none = ask("update").await;
+    assert_eq!(none.status, 503, "{:?}", none.body);
+    assert!(
+        none.body.to_string().contains("agent install"),
+        "{:?}",
+        none.body
+    );
+    scannerpulse::agent::beat(&pool, "radio-a").await.unwrap();
+    scannerpulse::agent::remember(
+        &pool,
+        &scannerpulse::update::Release {
+            tag: "v99.0.0".into(),
+            version: "99.0.0".into(),
+            notes: "Later.".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ask("reboot").await.status, 400);
+    assert_eq!(ask("update").await.status, 202);
+    assert_eq!(ask("switchover").await.status, 409);
+    let got = send(&app, "GET", "/api/admin/updates", &h, None).await;
+    let body = got.body;
+    assert_eq!(body["newest"]["version"], "99.0.0");
+    assert_eq!(body["newest"]["newer"], true);
+    assert_eq!(body["newest"]["notes"], "Later.");
+    assert_eq!(body["helper"]["host"], "radio-a");
+    assert_eq!(body["helper"]["up"], true);
+    assert_eq!(body["open"], true);
+    let asked = &body["requests"]["update"];
+    assert_eq!(asked["kind"], "update");
+    assert_eq!(asked["requested_by"], "ann");
+    assert!(asked["started_at"].is_null());
+    assert_eq!(asked["said"], "");
+    assert!(body["requests"]["switchover"].is_null());
+}

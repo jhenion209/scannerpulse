@@ -339,3 +339,83 @@ pub async fn favorites_remove(
     record(&admin, format!("removed the favorites {name:?}"));
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// `GET /api/admin/updates`: the version this web runs and each
+/// ScannerPulse machine's, the newest release the root helper's daily check
+/// found (and whether the check is on), the helper itself, the newest
+/// request of each kind an admin made of it, with what it said, and whether
+/// one waits or runs.
+pub async fn updates(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let newest: Option<(String, String, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT version, notes, checked_at FROM newest_release")
+            .fetch_optional(&state.pool)
+            .await?;
+    let helper: Option<(String, String, f64)> = sqlx::query_as(
+        "SELECT host, version, extract(epoch FROM now() - seen_at)::float8 FROM agents \
+         ORDER BY seen_at DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+    let machines: Vec<(String, String)> =
+        sqlx::query_as("SELECT host, version FROM machines ORDER BY host")
+            .fetch_all(&state.pool)
+            .await?;
+    let running = crate::update::VERSION;
+    Ok(Json(json!({
+        "running": running,
+        "machines": machines
+            .into_iter()
+            .map(|(host, version)| json!({"host": host, "version": version}))
+            .collect::<Vec<_>>(),
+        "newest": newest.map(|(version, notes, checked_at)| json!({
+            "version": version,
+            "newer": crate::update::newer(running, &version),
+            "notes": notes,
+            "checked_at": checked_at,
+        })),
+        "check": crate::agent::checks(&state.pool).await?,
+        "helper": helper.map(|(host, version, ago)| json!({
+            "host": host,
+            "version": version,
+            "seen_seconds_ago": ago.round(),
+            "up": ago < crate::agent::SILENT_AFTER as f64,
+        })),
+        "requests": {
+            "update": crate::agent::last(&state.pool, crate::agent::Kind::Update).await?,
+            "switchover": crate::agent::last(&state.pool, crate::agent::Kind::Switchover).await?,
+        },
+        "open": crate::agent::open(&state.pool).await?,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct HelperRequest {
+    kind: String,
+}
+
+/// `POST /api/admin/helper`: asks the root helper for an update of every
+/// machine (`update`) or a switchover of the database machines
+/// (`switchover`). Refused while another request waits or runs, or when no
+/// helper is up.
+pub async fn helper(
+    admin: Admin,
+    State(state): State<AppState>,
+    Json(body): Json<HelperRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use crate::agent::{Kind, Refused};
+    let kind = Kind::parse(&body.kind)
+        .ok_or_else(|| ApiError::BadRequest("ask for update or switchover".into()))?;
+    match crate::agent::ask(&state.pool, kind, &admin.0.login).await {
+        Ok(id) => {
+            record(&admin, format!("asked the root helper for request {id}: {}", kind.name()));
+            Ok((StatusCode::ACCEPTED, Json(json!({"id": id}))))
+        }
+        Err(Refused::Busy) => Err(ApiError::Conflict(
+            "the root helper is busy with another request: wait for it to finish".into(),
+        )),
+        Err(Refused::NoHelper) => Err(ApiError::Unavailable(
+            "the root helper is not running on the first ScannerPulse machine: run `sudo /usr/local/bin/scannerpulse agent install` there once".into(),
+        )),
+        Err(Refused::Database(error)) => Err(error.into()),
+    }
+}
