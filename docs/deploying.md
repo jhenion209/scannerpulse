@@ -119,8 +119,8 @@ In the examples below, the two ScannerPulse machines are `192.0.2.11` and
 `192.0.2.12`, serving on port 443. The proxy's own certificate is
 `/etc/ssl/sp/site.crt` and its key `/etc/ssl/sp/site.key`; for HAProxy the two
 are in one file, `/etc/ssl/sp/site.pem`. HAProxy, nginx and Caddy were each
-tried this way, with one machine stopped: the site kept answering. Nginx Proxy
-Manager was not tried.
+tried this way, with one machine's web stopped and with the machine cut off
+from the network: the site kept answering. Nginx Proxy Manager was not tried.
 
 ### HAProxy
 
@@ -143,6 +143,7 @@ backend scannerpulse
     # A machine that stopped is retried on the other before its check fails.
     option redispatch
     retries 2
+    timeout connect 3s
     retry-on conn-failure empty-response response-timeout
     option httpchk GET /healthz
     http-check expect status 200
@@ -154,7 +155,9 @@ backend scannerpulse
 
 Open-source nginx does not check `/healthz` by itself. It sets a machine aside
 when connecting to it fails (`max_fails`), and it tries the other machine for
-that request (`proxy_next_upstream`).
+that request (`proxy_next_upstream`). Without `proxy_connect_timeout`, a
+request sent to a machine that has vanished waits up to a minute before nginx
+tries the other.
 
 ```
 map $http_upgrade $connection_upgrade {
@@ -182,6 +185,7 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+        proxy_connect_timeout 3s;
         proxy_read_timeout 1h;
         proxy_next_upstream error timeout http_502 http_503;
     }
