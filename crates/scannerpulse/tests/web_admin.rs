@@ -320,6 +320,29 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
         body["switchover"],
         "sudo /usr/local/bin/scannerpulse db switchover"
     );
+    // Database machines whose plan this machine has not been given (an
+    // install from before the layout file): said so, the machines shown.
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
+    state.machine = scannerpulse::web::Machine {
+        layout: Some(dir.path().join("none.json")),
+        nodes: vec![primary.clone()],
+        ..Default::default()
+    };
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let (cookie, _) = signed(&pool, &app).await;
+    let unknown = send(
+        &app,
+        "GET",
+        "/api/admin/layout",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(unknown.body["mode"], "unknown");
+    assert_eq!(unknown.body["database"][0]["role"], "primary");
+    assert!(unknown.body["referee"].is_null());
     // One machine: no layout file and no database machines.
     let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.machine = scannerpulse::web::Machine::default();
