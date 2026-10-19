@@ -249,6 +249,97 @@ async fn a_new_system_order_shows_in_the_filter_choices_at_once(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn an_admin_sees_the_installs_layout(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = dir.path().join("layout.json");
+    scannerpulse::layout::Layout {
+        hub: "192.0.2.10".into(),
+        nodes: vec!["db1.example.org".into(), "db2.example.org".into()],
+        // A documentation address: it never answers.
+        referee: Some("192.0.2.1".into()),
+        second: Some("radio-b".into()),
+        shared: Some("192.0.2.50/24".into()),
+        install_id: "0123456789abcdef".into(),
+    }
+    .write(&layout)
+    .unwrap();
+    // The test's own database stands for the primary.
+    let options = pool.connect_options();
+    let primary = scannerpulse::primary::Node {
+        host: options.get_host().to_string(),
+        port: options.get_port(),
+    };
+    sqlx::query(
+        "INSERT INTO machines (host, version, holds_shared, seen_at) VALUES \
+         ('radio-a', '0.7.0', true, now()), ('radio-b', '0.7.0', true, now() - interval '2 minutes')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
+    state.host = "radio-a".into();
+    state.machine = scannerpulse::web::Machine {
+        layout: Some(layout),
+        nodes: vec![primary.clone()],
+        ..Default::default()
+    };
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    assert_eq!(
+        send(&app, "GET", "/api/admin/layout", &[], None)
+            .await
+            .status,
+        401
+    );
+    let (cookie, _) = signed(&pool, &app).await;
+    let got = send(
+        &app,
+        "GET",
+        "/api/admin/layout",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    let body = got.body;
+    assert_eq!(body["mode"], "referee");
+    assert_eq!(body["second"], "radio-b");
+    assert_eq!(body["shared"], "192.0.2.50/24");
+    assert_eq!(body["machines"][0]["host"], "radio-a");
+    assert_eq!(body["machines"][0]["up"], true);
+    assert_eq!(body["machines"][0]["holds_shared"], true);
+    // Not heard from for two minutes: down, and holding nothing.
+    assert_eq!(body["machines"][1]["up"], false);
+    assert_eq!(body["machines"][1]["holds_shared"], false);
+    assert_eq!(body["database"][0]["host"], primary.host);
+    assert_eq!(body["database"][0]["role"], "primary");
+    assert_eq!(body["referee"]["host"], "192.0.2.1");
+    assert_eq!(body["referee"]["answers"], false);
+    assert_eq!(
+        body["switchover"],
+        "sudo /usr/local/bin/scannerpulse db switchover"
+    );
+    // One machine: no layout file and no database machines.
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
+    state.machine = scannerpulse::web::Machine::default();
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let (cookie, _) = signed(&pool, &app).await;
+    let one = send(
+        &app,
+        "GET",
+        "/api/admin/layout",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(one.body["mode"], "one");
+    assert!(one.body["switchover"].is_null());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
     let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
@@ -256,6 +347,8 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
     let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.host = "radio-a".into();
     state.machine = scannerpulse::web::Machine {
+        layout: None,
+        nodes: Vec::new(),
         cert: Some(cert.clone()),
         backups: Some("/srv/backups".into()),
         pushes: vec!["dump"],
@@ -326,6 +419,8 @@ async fn an_admin_sees_this_machines_certificate_and_backups(pool: PgPool) {
         std::sync::Arc::new(scannerpulse::cert::certified(&c, &k).unwrap()),
     )));
     state.machine = scannerpulse::web::Machine {
+        layout: None,
+        nodes: Vec::new(),
         cert: Some(cert),
         acme: Some(scannerpulse::acme::Settings {
             proof: scannerpulse::acme::Proof::Cloudflare {

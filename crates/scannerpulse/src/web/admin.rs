@@ -186,6 +186,19 @@ pub async fn machine(_: Admin, State(state): State<AppState>) -> Result<Json<Val
     })))
 }
 
+/// `GET /api/admin/layout`: the install's machines, their roles and how
+/// they answer (`layout::report`).
+pub async fn layout(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let found = state
+        .machine
+        .layout
+        .as_deref()
+        .and_then(crate::layout::Layout::read);
+    Ok(Json(
+        crate::layout::report(&state.pool, found.as_ref(), &state.machine.nodes).await?,
+    ))
+}
+
 /// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
 /// minutes on each host, since it reads months of calls; a changed time zone
 /// makes it again.

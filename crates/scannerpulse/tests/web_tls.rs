@@ -153,6 +153,8 @@ async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
         host: "tls-test".into(),
         oidc_secret: None,
         machine: web::Machine {
+            layout: None,
+            nodes: Vec::new(),
             acme: Some(Settings {
                 proof: Proof::Web,
                 names: vec!["radio.example.org".into()],

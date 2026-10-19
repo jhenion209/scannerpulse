@@ -84,6 +84,11 @@ pub struct Machine {
     pub pushes: Vec<&'static str>,
     /// Let's Encrypt, when it gives the certificate.
     pub acme: Option<crate::acme::Settings>,
+    /// The install's layout file (setup's, beside its plan); none on one
+    /// machine alone.
+    pub layout: Option<PathBuf>,
+    /// The database machines the settings name (SCANNERPULSE_DATABASE_HOSTS).
+    pub nodes: Vec<crate::primary::Node>,
 }
 
 /// A certificate and its private key, as PEM files.
@@ -179,6 +184,8 @@ impl Config {
                         .is_some_and(|url| !url.is_empty())
                 })
                 .collect(),
+            layout: Some(PathBuf::from(crate::layout::PATH)),
+            nodes: crate::primary::from_env()?,
         };
         Ok(Config {
             database,
@@ -298,6 +305,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/rescan", post(admin::rescan))
         .route("/api/admin/status", get(admin::status))
         .route("/api/admin/machine", get(admin::machine))
+        .route("/api/admin/layout", get(admin::layout))
         .route("/api/admin/reports/traffic", get(admin::traffic))
         .route("/api/admin/talkgroups", get(transcription::talkgroups))
         .route(
@@ -434,6 +442,11 @@ pub async fn run(
         state.certs = Some(certs);
     }
     state.machine = config.machine;
+    crate::layout::spawn_beat(
+        state.pool.clone(),
+        state.host.clone(),
+        state.machine.layout.clone(),
+    );
     live::spawn(state.pool.clone(), state.live.clone());
     viewers::spawn(state.clone());
     let stop_live = state.shutdown.clone();
