@@ -95,20 +95,26 @@ pub fn done(node: &str, host_keys: &str) -> Result<String, String> {
     if lines.is_empty() {
         return Err("no SSH host key came with it".into());
     }
-    // A machine set up again has new host keys: its old ones go.
-    let path = Path::new(SSH).join("known_hosts");
-    let kept = std::fs::read_to_string(&path).unwrap_or_default();
-    let new = path.with_extension("new");
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&new)
-        .and_then(|mut file| file.write_all(known_hosts_with(&kept, node, &lines).as_bytes()))
-        .and_then(|()| std::fs::rename(&new, &path))
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    Plan::update(Path::new(PLAN), |plan| plan.mark_joined(node))?;
+    // Under the plan's lock, so that two machines joining at once each keep
+    // their host keys and their mark. A machine set up again has new host
+    // keys: its old ones go.
+    Plan::replace(Path::new(PLAN), |kept_plan| {
+        let mut plan = kept_plan.ok_or_else(|| Plan::read(Path::new(PLAN)).unwrap_err())?;
+        let path = Path::new(SSH).join("known_hosts");
+        let kept = std::fs::read_to_string(&path).unwrap_or_default();
+        let new = path.with_extension("new");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&new)
+            .and_then(|mut file| file.write_all(known_hosts_with(&kept, node, &lines).as_bytes()))
+            .and_then(|()| std::fs::rename(&new, &path))
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        plan.mark_joined(node);
+        Ok(plan)
+    })?;
     Ok(format!("{node} has joined"))
 }
 
@@ -278,7 +284,7 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
     // Another PostgreSQL here would take port 5432 from the one setup makes.
-    super::system::other_postgres(&system.seen())?;
+    super::system::other_postgres_joining(&system.seen())?;
     let binary = Path::new(super::BINARY);
     let (steps, what) = match place {
         Place::Referee => (

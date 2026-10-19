@@ -199,17 +199,35 @@ pub struct Seen {
 
 /// Refuses a machine that already runs a PostgreSQL other than the 17 setup
 /// installs: setup would turn on archiving in it and restart it.
-pub fn other_postgres(seen: &Seen) -> Result<(), String> {
+/// Another PostgreSQL, or a program on its port, that this machine has.
+fn other_found(seen: &Seen) -> Option<String> {
     let other = |v: &&String| *v != "17";
-    let found = if let Some(v) = seen.etc_versions.iter().find(other) {
-        format!("PostgreSQL {v} (/etc/postgresql/{v})")
+    if let Some(v) = seen.etc_versions.iter().find(other) {
+        Some(format!("PostgreSQL {v} (/etc/postgresql/{v})"))
     } else if let Some(v) = &seen.system_data {
-        format!("PostgreSQL {v} (/var/lib/pgsql/data)")
+        Some(format!("PostgreSQL {v} (/var/lib/pgsql/data)"))
     } else if let Some(v) = seen.pgsql_versions.iter().find(other) {
-        format!("PostgreSQL {v} (/var/lib/pgsql/{v}/data)")
+        Some(format!("PostgreSQL {v} (/var/lib/pgsql/{v}/data)"))
     } else if seen.port_taken && !seen.ours {
-        "a program on port 5432".into()
+        Some("a program on port 5432".into())
     } else {
+        None
+    }
+}
+
+/// `other_postgres` for a machine joining as a database machine or the
+/// referee.
+pub fn other_postgres_joining(seen: &Seen) -> Result<(), String> {
+    match other_found(seen) {
+        None => Ok(()),
+        Some(found) => Err(format!(
+            "this machine already has {found}, which would clash with the PostgreSQL 17 it needs on port 5432: remove it, or join another machine"
+        )),
+    }
+}
+
+pub fn other_postgres(seen: &Seen) -> Result<(), String> {
+    let Some(found) = other_found(seen) else {
         return Ok(());
     };
     Err(format!(
@@ -219,7 +237,7 @@ pub fn other_postgres(seen: &Seen) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Family, Seen, detect, other_postgres};
+    use super::{Family, Seen, detect, other_postgres, other_postgres_joining};
 
     const DEBIAN: &str = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"13\"\nID=debian\n";
     const ROCKY: &str = "NAME=\"Rocky Linux\"\nVERSION=\"9.6 (Blue Onyx)\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.6\"\n";
@@ -332,6 +350,14 @@ mod tests {
         );
         // Nothing there; only 17; a second run, with 17's data and port.
         assert_eq!(other_postgres(&Seen::default()), Ok(()));
+        // A joining machine is told in its own words.
+        let error = other_postgres_joining(&Seen {
+            port_taken: true,
+            ..Seen::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("a program on port 5432"), "{error}");
+        assert!(!error.contains("Simple setup"), "{error}");
         let only_17 = Seen {
             etc_versions: vec!["17".into()],
             ours: true,

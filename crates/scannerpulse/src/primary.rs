@@ -173,12 +173,7 @@ pub fn pool(options: &PgConnectOptions, nodes: &[Node], settings: PgPoolOptions)
                 let standby: bool = sqlx::query_scalar("SELECT pg_is_in_recovery()")
                     .fetch_one(&mut *conn)
                     .await?;
-                if standby {
-                    return Err(sqlx::Error::Protocol(
-                        "a standby: the primary has moved".into(),
-                    ));
-                }
-                Ok(())
+                refuse_standby(standby)
             })
         })
         .connect_lazy_with(options.clone());
@@ -198,7 +193,7 @@ pub fn pool(options: &PgConnectOptions, nodes: &[Node], settings: PgPoolOptions)
                 && let Some(i) = stale
             {
                 crate::log::warn(format!(
-                    "database: {} answers as a primary on an older timeline: run `sudo /usr/local/bin/scannerpulse db rejoin` there",
+                    "database: {} answers as a primary on an older timeline: make it the standby (`sudo /usr/local/bin/scannerpulse db rejoin` there; a referee does it by itself)",
                     nodes[i].host
                 ));
             }
@@ -255,6 +250,16 @@ pub async fn listened(
     }
 }
 
+/// A new connection that landed on a standby is refused.
+fn refuse_standby(standby: bool) -> sqlx::Result<()> {
+    if standby {
+        return Err(sqlx::Error::Protocol(
+            "a standby: the primary has moved".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// DATABASE_URL's options, on the node that is the primary when the
 /// settings name more than one.
 pub async fn options(url: &str) -> Result<PgConnectOptions, String> {
@@ -295,6 +300,12 @@ pub async fn connect(url: &str, limit: Duration) -> Result<PgConnection, String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_connection_to_a_standby_is_refused() {
+        assert!(super::refuse_standby(true).is_err());
+        assert!(super::refuse_standby(false).is_ok());
+    }
+
     use super::{newest, newest_from};
 
     #[test]

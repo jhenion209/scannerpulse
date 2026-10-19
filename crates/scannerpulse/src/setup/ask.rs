@@ -102,6 +102,15 @@ fn checked(mut answers: Answers) -> Result<Answers, String> {
                 return Err("the referee is a third machine, neither database machine".into());
             }
         }
+        // By address too: a name and an address may be the same machine.
+        let mut machines = vec![
+            ("database machine 1", pair.nodes[0].as_str()),
+            ("database machine 2", pair.nodes[1].as_str()),
+        ];
+        if let Some(referee) = &pair.referee {
+            machines.push(("the referee", referee.as_str()));
+        }
+        distinct_machines(&machines, super::plan::resolve)?;
     }
     if let Some(backups) = &answers.backups {
         answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
@@ -332,7 +341,7 @@ pub fn join_from_file(path: &Path) -> Result<Option<super::join::Hub>, String> {
 /// as a database machine.
 pub fn ask_join() -> Result<Option<super::join::Hub>, inquire::InquireError> {
     const NEW: &str = "A new install";
-    const JOIN: &str = "Join an existing install, as one of its database machines";
+    const JOIN: &str = "Join an existing install, as one of its other machines (a database machine or the referee)";
     say(
         "Advanced: a new install, or a database machine joining an install whose first ScannerPulse machine planned it (that machine's setup waits for it). Joining needs that machine's address and a login there that may use sudo; nothing here keeps the login.",
     );
@@ -623,7 +632,7 @@ pub fn interactive(
         let port = match previous {
             _ if advanced => {
                 say(
-                    "Advanced 1 of 4. Where the database runs: PostgreSQL 17 on this machine, installed and backed up by setup; a PostgreSQL 17 database you run elsewhere, whose failover and backups stay yours; or two machines of its own, a primary and a standby that keeps a live copy (if the primary dies, you promote the standby with one command). Each of the two runs the install and setup itself, joining this machine, which waits for them. ScannerPulse needs a database and a role that may make tables in it.",
+                    "Advanced 1 of 4. Where the database runs: PostgreSQL 17 on this machine, installed and backed up by setup; a PostgreSQL 17 database you run elsewhere, whose failover and backups stay yours; or two machines of its own, a primary and a standby that keeps a live copy (if the primary dies, you promote the standby with one command, or a third small machine, the referee, promotes it by itself). Each of the two runs the install and setup itself, joining this machine, which waits for them. ScannerPulse needs a database and a role that may make tables in it.",
                 );
                 database = ask_database(previous.map(|a| &a.database), defaults)?;
                 say(
@@ -1259,6 +1268,26 @@ pub fn default_hub(defaults: &Defaults) -> String {
         .unwrap_or_else(|| defaults.host.clone())
 }
 
+/// The machines of a plan are each a machine of their own, by name or by
+/// the addresses their names give.
+fn distinct_machines(
+    machines: &[(&str, &str)],
+    resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
+) -> Result<(), String> {
+    let found: Vec<Vec<std::net::IpAddr>> =
+        machines.iter().map(|(_, name)| resolve(name)).collect();
+    for (i, (role_a, a)) in machines.iter().enumerate() {
+        for (j, (role_b, b)) in machines.iter().enumerate().skip(i + 1) {
+            if a.eq_ignore_ascii_case(b) || found[i].iter().any(|ip| found[j].contains(ip)) {
+                return Err(format!(
+                    "{role_a} ({a}) and {role_b} ({b}) are the same machine"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The address this machine reaches the network from; the route is only
 /// looked up, nothing is sent (192.0.2.1 is a documentation address).
 fn outward_address() -> Option<String> {
@@ -1289,7 +1318,7 @@ fn free(port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Defaults, free_port, from_file, program_in, zone_from_link};
+    use super::{Defaults, distinct_machines, free_port, from_file, program_in, zone_from_link};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -1559,6 +1588,37 @@ mod tests {
         refused(
             "DATABASE=here\nREFEREE=ref.example.org\n",
             "two database machines",
+        );
+        // The same machine by name and by address.
+        let dns = |name: &str| -> Vec<std::net::IpAddr> {
+            match name {
+                "db2.example.org" | "192.0.2.22" => vec!["192.0.2.22".parse().unwrap()],
+                "db1.example.org" => vec!["192.0.2.21".parse().unwrap()],
+                _ => Vec::new(),
+            }
+        };
+        let error = distinct_machines(
+            &[
+                ("database machine 1", "db1.example.org"),
+                ("database machine 2", "db2.example.org"),
+                ("the referee", "192.0.2.22"),
+            ],
+            dns,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("database machine 2") && error.contains("the referee"),
+            "{error}"
+        );
+        assert_eq!(
+            distinct_machines(
+                &[
+                    ("database machine 1", "db1.example.org"),
+                    ("the referee", "ref.example.org")
+                ],
+                dns
+            ),
+            Ok(())
         );
         for (extra, name) in [
             (

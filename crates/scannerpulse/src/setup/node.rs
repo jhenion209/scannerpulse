@@ -255,7 +255,7 @@ pub(super) fn install(system: &System, auto: bool) -> Vec<Step> {
 pub(super) fn drop_debians_cluster() -> Step {
     script(
         "Remove the empty cluster Debian's package made, for pg_autoctl's own",
-        "D=/var/lib/postgresql/17/main\n[ -d \"$D/base\" ] || exit 0\nif [ \"$(ls \"$D/base\" | wc -l)\" -gt 3 ]; then\n  echo \"PostgreSQL 17's cluster (17 main) holds databases of its own: setup will not remove it\" >&2; exit 1\nfi\npg_dropcluster --stop 17 main",
+        "D=/var/lib/postgresql/17/main\n[ -d \"$D/base\" ] || exit 0\ntables=$(runuser -u postgres -- psql -d postgres -tAXc \"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema')\") || { echo \"PostgreSQL 17's cluster (17 main) does not answer, so setup cannot see that it is empty: start it, or remove it yourself\" >&2; exit 1; }\nif [ \"$(ls \"$D/base\" | wc -l)\" -gt 3 ] || [ \"$tables\" != 0 ]; then\n  echo \"PostgreSQL 17's cluster (17 main) holds databases or tables of its own: setup will not remove it\" >&2; exit 1\nfi\npg_dropcluster --stop 17 main",
         &[],
         None,
     )
@@ -332,16 +332,12 @@ fn by_hand(
         &[("DATA", data), ("SERVICE", system.postgres_cluster())],
         None,
     ));
-    let pgpass = Path::new(system.postgres_home()).join(".pgpass");
-    steps.push(Step {
-        title: "Write the copying role's password file, for the postgres account".into(),
-        action: Action::Write {
-            path: pgpass,
-            contents: format!("*:*:*:{REPLICATOR}:{}\n", plan.replication_password),
-            mode: 0o600,
-            owner: "postgres:postgres".into(),
-        },
-    });
+    steps.push(pgpass_step(
+        "Write the copying role's password file, for the postgres account",
+        system,
+        &[REPLICATOR],
+        format!("*:*:*:{REPLICATOR}:{}\n", plan.replication_password),
+    ));
     // The copy's values: it copies the other machine.
     let other = &plan.nodes[1 - index];
     let copy_vars = [
@@ -472,18 +468,15 @@ fn by_referee(
         steps.push(drop_debians_cluster());
     }
     steps.push(super::steps::firewall(true, 5432));
-    steps.push(Step {
-        title: "Write the passwords for the copy and the referee, for the postgres account".into(),
-        action: Action::Write {
-            path: Path::new(system.postgres_home()).join(".pgpass"),
-            contents: format!(
-                "*:*:*:pgautofailover_replicator:{}\n*:*:pg_auto_failover:autoctl_node:{}\n",
-                plan.replication_password, plan.monitor_password
-            ),
-            mode: 0o600,
-            owner: "postgres:postgres".into(),
-        },
-    });
+    steps.push(pgpass_step(
+        "Write the passwords for the copy and the referee, for the postgres account",
+        system,
+        &["pgautofailover_replicator", "autoctl_node"],
+        format!(
+            "*:*:*:pgautofailover_replicator:{}\n*:*:pg_auto_failover:autoctl_node:{}\n",
+            plan.replication_password, plan.monitor_password
+        ),
+    ));
     steps.push(autoctl_folder("Make pg_autoctl's data directory", &data));
     let monitor = monitor_uri(referee);
     steps.push(Step {
@@ -608,6 +601,25 @@ fn hub_hba(hub: &[IpAddr]) -> String {
     text
 }
 
+/// postgres's password file with `lines` for `roles`: the file's lines for
+/// other roles stay; the file is postgres's alone.
+fn pgpass_step(title: &str, system: &System, roles: &[&str], lines: String) -> Step {
+    let path = Path::new(system.postgres_home())
+        .join(".pgpass")
+        .display()
+        .to_string();
+    script(
+        title,
+        "umask 077\nT=$(mktemp) && { [ -f \"$PGPASS\" ] && awk -F: -v roles=\" $ROLES \" 'index(roles, \" \" $4 \" \") == 0' \"$PGPASS\"; cat; } > \"$T\" && cat \"$T\" > \"$PGPASS\" && rm -f \"$T\" && chmod 600 \"$PGPASS\" && { [ -z \"$OWNER\" ] || chown \"$OWNER\" \"$PGPASS\"; }",
+        &[
+            ("PGPASS", &path),
+            ("ROLES", &roles.join(" ")),
+            ("OWNER", "postgres:postgres"),
+        ],
+        Some(lines),
+    )
+}
+
 /// The ScannerPulse machine's key may run this machine's node commands.
 pub(super) fn hub_key_step(plan: &Plan, hub: &[IpAddr], binary: &Path) -> Step {
     script(
@@ -663,7 +675,7 @@ fn tail(plan: &Plan, index: usize, system: &System, binary: &Path) -> Vec<Step> 
             "-d", "-m", "0700", "-o", "postgres", "-g", "postgres", DUMPS,
         ],
     ));
-    let (service_unit, timer) = dump_units(binary, system);
+    let (service_unit, timer) = dump_units(binary, system, plan.referee.is_some());
     for (name, contents) in [
         ("scannerpulse-node-backup.service", service_unit),
         ("scannerpulse-node-backup.timer", timer),
@@ -712,7 +724,7 @@ systemctl start "$SERVICE"
 
 /// The nightly dump on a database machine: it runs on both, and dumps on
 /// the one that is the primary.
-pub fn dump_units(binary: &Path, system: &System) -> (String, String) {
+pub fn dump_units(binary: &Path, system: &System, autoctl: bool) -> (String, String) {
     (
         format!(
             "# Written by `scannerpulse setup`.\n\
@@ -724,7 +736,11 @@ pub fn dump_units(binary: &Path, system: &System) -> (String, String) {
              Type=oneshot\n\
              User=postgres\n\
              ExecStart={binary} node backup\n",
-            pg = system.postgres_service(),
+            pg = if autoctl {
+                "pgautofailover"
+            } else {
+                system.postgres_service()
+            },
             binary = binary.display(),
         ),
         "# Written by `scannerpulse setup`.\n\
@@ -1532,22 +1548,48 @@ mod tests {
         let register = "Register this machine with the referee";
         assert!(at(drop) < at(register));
         // The passwords reach pg_autoctl through postgres's password file,
-        // never an argument.
-        let Some(Action::Write { contents, mode, .. }) = first
-            .iter()
-            .find(|s| {
-                s.title
-                    == "Write the passwords for the copy and the referee, for the postgres account"
-            })
-            .map(|s| &s.action)
-        else {
-            panic!()
-        };
-        assert_eq!(*mode, 0o600);
+        // never an argument; the file's other lines stay.
+        let passwords =
+            "Write the passwords for the copy and the referee, for the postgres account";
+        let (_, args, _, input) = ran(&first, passwords);
         assert_eq!(
-            contents,
-            "*:*:*:pgautofailover_replicator:copy-secret-2\n*:*:pg_auto_failover:autoctl_node:referee-secret-3\n"
+            input,
+            Some(
+                "*:*:*:pgautofailover_replicator:copy-secret-2\n*:*:pg_auto_failover:autoctl_node:referee-secret-3\n"
+            )
         );
+        assert!(!args.join(" ").contains("secret"));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".pgpass");
+        std::fs::write(
+            &file,
+            "*:*:*:replicator:kept-1\nh:5432:db:pgautofailover_replicator:old-2\n",
+        )
+        .unwrap();
+        let path = file.display().to_string();
+        run_script(
+            &first.iter().find(|s| s.title == passwords).unwrap().clone(),
+            &[("PGPASS", &path), ("OWNER", "")],
+        );
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("*:*:*:replicator:kept-1\n"), "{text}");
+        assert!(!text.contains("old-2"), "{text}");
+        assert!(
+            text.contains("pgautofailover_replicator:copy-secret-2"),
+            "{text}"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Debian's cluster is dropped only if it holds no table of the
+        // person's, in any database.
+        let (_, args, _, _) = ran(&first, drop);
+        assert!(args[1].contains("pg_class"), "{}", args[1]);
+        // The nightly dump follows pg_autoctl's service.
+        let (unit, _) = dump_units(binary, &debian, true);
+        assert!(unit.contains("After=pgautofailover.service"), "{unit}");
         assert!(
             at("Write the passwords for the copy and the referee, for the postgres account")
                 < at(register)
