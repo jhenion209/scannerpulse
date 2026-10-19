@@ -107,6 +107,10 @@ pub fn first_steps(
         title: "Let the second ScannerPulse machine join".into(),
         action: Action::Ready,
     });
+    steps.push(Step {
+        title: "Wait for the second ScannerPulse machine to join".into(),
+        action: Action::WaitForSecond,
+    });
     steps
 }
 
@@ -388,6 +392,7 @@ mod tests {
             titles.contains(&"Write keepalived's settings for the shared address"),
             "{titles:?}"
         );
-        assert!(matches!(all.last().unwrap().action, Action::Ready));
+        assert!(matches!(all[all.len() - 2].action, Action::Ready));
+        assert!(matches!(all.last().unwrap().action, Action::WaitForSecond));
     }
 }

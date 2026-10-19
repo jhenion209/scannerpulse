@@ -210,6 +210,18 @@ impl Plan {
             .map(String::as_str)
     }
 
+    /// `waiting`, then the second ScannerPulse machine if it has not
+    /// joined: the first machine's screen ticks off each.
+    pub fn waiting_all(&self) -> Vec<&str> {
+        let mut left = self.waiting();
+        left.extend(
+            self.second
+                .as_deref()
+                .filter(|second| !self.joined.iter().any(|j| j == second)),
+        );
+        left
+    }
+
     /// The machines not yet joined, in the order they join: the referee,
     /// then the database machines.
     pub fn waiting(&self) -> Vec<&str> {
@@ -369,6 +381,10 @@ mod tests {
         assert_eq!(plan.awaited_before(Place::Second), Some("192.0.2.10"));
         plan.ready = true;
         assert_eq!(plan.awaited_before(Place::Second), None);
+        // The first machine's screen ticks the second off last.
+        assert_eq!(plan.waiting_all(), ["web2.example.org"]);
+        plan.mark_joined("web2.example.org");
+        assert!(plan.waiting_all().is_empty());
         // A plan from before reads as one without a second.
         let old = r#"{"hub":"h","hub_key":"k","nodes":["a","b"],"database":"d","role":"r","password":"p","replication_password":"q"}"#;
         let old: Plan = serde_json::from_str(old).unwrap();

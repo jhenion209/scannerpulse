@@ -104,6 +104,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
             })
             .map_err(fail)?,
             Action::WaitForNodes => wait_for_nodes(context).await.map_err(fail)?,
+            Action::WaitForSecond => wait_for_second().await.map_err(fail)?,
         }
     }
     Ok(())
@@ -393,6 +394,29 @@ async fn wait_for_nodes(context: &Context) -> Result<(), String> {
         if said.as_ref() != Some(&waiting) {
             println!("{}", waiting_line(&plan));
             said = Some(waiting);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Waits until every machine of the plan has joined, the second
+/// ScannerPulse machine last, saying who is left when that changes.
+async fn wait_for_second() -> Result<(), String> {
+    use super::plan::{PLAN, Plan};
+    let mut said = None;
+    loop {
+        let plan = Plan::read(Path::new(PLAN))?;
+        let left: Vec<String> = plan.waiting_all().into_iter().map(String::from).collect();
+        if left.is_empty() {
+            return Ok(());
+        }
+        if said.as_ref() != Some(&left) {
+            println!(
+                "      waiting for: {}. On each, run the install line, then `sudo /usr/local/bin/scannerpulse setup`, choose Advanced, then \"join an existing install\", and give this machine's address ({}). Setup is done here: Ctrl-C leaves this wait.",
+                left.join(", "),
+                plan.hub
+            );
+            said = Some(left);
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }

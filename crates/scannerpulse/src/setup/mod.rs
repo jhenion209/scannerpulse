@@ -392,6 +392,9 @@ fn detail(step: &Step) -> String {
                 .unwrap_or_default()
         ),
         Action::WaitForNodes => "wait until the machines of the plan have joined".into(),
+        Action::WaitForSecond => {
+            "wait until the second ScannerPulse machine has joined (Ctrl-C leaves the wait; it still joins)".into()
+        }
         Action::Ready => format!(
             "mark {} ready: the second ScannerPulse machine may join",
             plan::PLAN

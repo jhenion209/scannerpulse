@@ -389,7 +389,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                     port,
                 ),
                 format!(
-                    "{name} is the second ScannerPulse machine{}. Join each database machine again (`sudo /usr/local/bin/scannerpulse setup` there, Advanced, then \"join an existing install\"), then {name} the same way, after the install line.",
+                    "{name} has joined as the second ScannerPulse machine{}.",
                     shared
                         .as_ref()
                         .map(|s| format!(", sharing {s} with this one"))

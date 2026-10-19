@@ -267,6 +267,9 @@ pub enum Action {
     /// Waits until both database machines have joined and one is the
     /// primary.
     WaitForNodes,
+    /// Wait until every machine of the plan has joined, the second
+    /// ScannerPulse machine last.
+    WaitForSecond,
 }
 
 /// Never a password, a password file's contents, or what a step feeds a
@@ -328,6 +331,7 @@ impl std::fmt::Debug for Action {
                 .finish_non_exhaustive(),
             Action::Ready => f.write_str("Ready"),
             Action::WaitForNodes => f.write_str("WaitForNodes"),
+            Action::WaitForSecond => f.write_str("WaitForSecond"),
         }
     }
 }
@@ -2051,11 +2055,16 @@ mod tests {
             at("Wait for the web interface")
                 < at("Write keepalived's settings for the shared address")
         );
+        // It lets the second join, then shows it waited for and joined.
         assert_eq!(
-            titles.last(),
-            Some(&"Let the second ScannerPulse machine join")
+            &titles[titles.len() - 2..],
+            [
+                "Let the second ScannerPulse machine join",
+                "Wait for the second ScannerPulse machine to join"
+            ]
         );
-        assert!(matches!(all.last().unwrap().action, Action::Ready));
+        assert!(matches!(all[all.len() - 2].action, Action::Ready));
+        assert!(matches!(all.last().unwrap().action, Action::WaitForSecond));
         // The second machine serves this certificate too: it covers the
         // shared address and the second's name.
         let Action::Run { args, .. } = &all[at("Make this machine's certificate")].action else {
