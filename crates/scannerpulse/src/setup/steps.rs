@@ -1068,6 +1068,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         &answers.archive,
         answers.database == Database::Here,
         backups.is_some(),
+        true,
         answers.port,
     ));
     // The second ScannerPulse machine joins once this one has finished.
@@ -1190,8 +1191,10 @@ pub(super) fn settings_folder_steps() -> Vec<Step> {
 }
 
 /// The web and ingest services written, started at boot and now (with the
-/// nightly backup's timer when `backups`), the site's port opened, and the
-/// web waited for. `local_db` orders them after this machine's PostgreSQL.
+/// nightly backup's timer when `backups`, and the root helper on the first
+/// machine or one alone when `helper`), the site's port opened, and the web
+/// waited for. `local_db` orders them after this machine's PostgreSQL.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_steps(
     binary: &Path,
     system: &System,
@@ -1199,6 +1202,7 @@ pub(super) fn start_steps(
     archive: &Path,
     local_db: bool,
     backups: bool,
+    helper: bool,
     port: u16,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
@@ -1215,6 +1219,19 @@ pub(super) fn start_steps(
             },
         });
     }
+    if helper {
+        steps.push(Step {
+            title:
+                "Write the root helper's service, for updates and switchovers from the admin page"
+                    .into(),
+            action: Action::Write {
+                path: PathBuf::from(crate::agent::UNIT),
+                contents: crate::agent::unit(binary),
+                mode: 0o644,
+                owner: "root:root".into(),
+            },
+        });
+    }
     steps.push(run(
         "Read the new services",
         "systemctl",
@@ -1223,6 +1240,9 @@ pub(super) fn start_steps(
     let mut units = vec!["scannerpulse-web", "scannerpulse-ingest"];
     if backups {
         units.push("scannerpulse-backup.timer");
+    }
+    if helper {
+        units.push("scannerpulse-agent");
     }
     steps.push(run(
         "Start ScannerPulse at boot",
@@ -1863,11 +1883,20 @@ mod tests {
             "db secret",
         );
         let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+        // The root helper too, on the first machine or one alone.
         let units = [
             "scannerpulse-web",
             "scannerpulse-ingest",
             "scannerpulse-backup.timer",
+            "scannerpulse-agent",
         ];
+        assert!(all.iter().any(|s| matches!(
+            &s.action,
+            Action::Write { path, contents, mode: 0o644, .. }
+                if path == Path::new(crate::agent::UNIT)
+                    && contents.contains("ExecStart=/usr/local/bin/scannerpulse agent")
+                    && !contents.contains("User=")
+        )));
         for (title, verb) in [
             ("Start ScannerPulse at boot", "enable"),
             (
@@ -1952,7 +1981,15 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(args, &["enable", "scannerpulse-web", "scannerpulse-ingest"]);
+        assert_eq!(
+            args,
+            &[
+                "enable",
+                "scannerpulse-web",
+                "scannerpulse-ingest",
+                "scannerpulse-agent"
+            ]
+        );
         let rocky = steps(
             &theirs(),
             &detect(ROCKY, "x86_64").unwrap(),

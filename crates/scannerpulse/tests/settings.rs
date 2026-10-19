@@ -421,6 +421,15 @@ fn the_syslog_server_is_udp_or_tcp_with_a_host() {
     assert!(!refused("logs.syslog", None, &[]));
 }
 
+#[test]
+fn the_daily_release_check_is_on_or_off() {
+    assert!(!refused("updates.check", Some(json!(false)), &[]));
+    assert!(!refused("updates.check", Some(json!(true)), &[]));
+    assert!(!refused("updates.check", None, &[]));
+    assert!(refused("updates.check", Some(json!("no")), &[]));
+    assert!(settings::known().any(|key| key == "updates.check"));
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn a_service_follows_the_syslog_setting(pool: PgPool) -> sqlx::Result<()> {
     let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

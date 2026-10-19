@@ -624,10 +624,12 @@ async fn healthy(host: &str, port: u16) -> Result<(), String> {
 }
 
 /// `scannerpulse update [--check] [--yes]`, as root on the first ScannerPulse
-/// machine (or on one machine alone): `say` prints each step, `confirm`
-/// asks before anything changes.
+/// machine (or on one machine alone), or the root helper's update
+/// (`from_helper`): `say` gives each step, `confirm` asks before anything
+/// changes.
 pub async fn run(
     check_only: bool,
+    from_helper: bool,
     say: impl Fn(&str),
     confirm: impl Fn(&str) -> bool,
 ) -> Result<String, String> {
@@ -814,6 +816,13 @@ pub async fn run(
             restart()?;
             healthy("127.0.0.1", port).await?;
             say("  This machine answers again.");
+            // The root helper runs the old program until it restarts; when it
+            // is the one updating, it restarts itself once it has finished.
+            if !from_helper && Path::new(crate::agent::UNIT).exists() {
+                let _ = Command::new("systemctl")
+                    .args(["try-restart", "scannerpulse-agent.service"])
+                    .status();
+            }
         }
         Ok(if others.is_empty() {
             format!("ScannerPulse {target} runs here.")

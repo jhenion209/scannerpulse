@@ -278,8 +278,9 @@ pub fn steps(
     let mut key = super::node::hub_key_step(plan, hub, binary);
     key.title = "Let the first machine update this machine's program".into();
     steps.push(key);
+    // The root helper runs on the first machine only, which holds the plan.
     steps.extend(start_steps(
-        binary, system, recordings, archive, false, false, port,
+        binary, system, recordings, archive, false, false, false, port,
     ));
     match &plan.shared {
         Some(shared) => steps.extend(super::keepalived::steps(
@@ -370,6 +371,11 @@ pub(super) mod tests {
         assert!(at(check) < at("Make the scannerpulse account"));
         // The first machine's key may then run `node serve` here, from its
         // own address only: `scannerpulse update` reaches this machine so.
+        // The root helper runs on the first machine, never here.
+        assert!(
+            !all.iter().any(|s| matches!(&s.action, Action::Write { path, .. } if path == Path::new(crate::agent::UNIT))),
+            "{titles:?}"
+        );
         let key = at("Let the first machine update this machine's program");
         let Action::Run { input, .. } = &all[key].action else {
             panic!()

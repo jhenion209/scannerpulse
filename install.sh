@@ -76,6 +76,13 @@ main() {
         $as_root "$BIN_DIR/scannerpulse" db-update --quiet ||
             fail "the database's tables could not be brought up to date: fix the cause above, then run: sudo $BIN_DIR/scannerpulse db-update"
     fi
+    # Since 0.9.0 the first ScannerPulse machine (or one alone) runs a root
+    # helper, for the admin page's Update now; one set up before has none.
+    if [ -e /etc/systemd/system/scannerpulse-web.service ] &&
+        [ ! -e /etc/systemd/system/scannerpulse-agent.service ]; then
+        $as_root "$BIN_DIR/scannerpulse" agent install ||
+            echo "The root helper did not start: run sudo $BIN_DIR/scannerpulse agent install once the cause above is fixed."
+    fi
     if [ -e /etc/systemd/system/scannerpulse-web.service ] &&
         systemctl is-active --quiet scannerpulse-web.service 2>/dev/null; then
         echo "This machine is set up already: restart its services to run this version:"

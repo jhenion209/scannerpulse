@@ -70,6 +70,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse db promote | db rejoin | db switchover
        scannerpulse update [--check | --yes]
+       scannerpulse agent | agent install
        scannerpulse node serve | node status | node backup
        scannerpulse join info NAME... | join done NODE
        scannerpulse --version
@@ -203,6 +204,11 @@ update      as root, on the first ScannerPulse machine (or one machine
             database machines, the second ScannerPulse machine and this one,
             one at a time, each answering before the next; --check only says
             what is newest and what each machine runs; --yes asks nothing
+agent       as root, the first ScannerPulse machine's root helper (its unit
+            runs it): it carries out an update or a switchover an admin asks
+            for on the admin page, and looks for a newer release once a day
+            unless updates.check is false; install writes and starts its unit
+            (setup does; an install from before 0.9.0 needs it once)
 uninstall   undo setup, as root: the services, their units, the settings,
             the account and the program go; the archive, the database and
             the backups stay unless each is named, and each named one is
@@ -271,6 +277,10 @@ enum Command {
     Join(Joined),
     Node(NodeCommand),
     Db(DbCommand),
+    /// `agent`: the root helper; `agent install` writes and starts its unit.
+    Agent {
+        install: bool,
+    },
     /// `update`: `check` only reads the newest release; `yes` asks nothing.
     Update {
         check: bool,
@@ -624,6 +634,8 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db", "promote"] => Some(Command::Db(DbCommand::Promote)),
         ["db", "rejoin"] => Some(Command::Db(DbCommand::Rejoin)),
         ["db", "switchover"] => Some(Command::Db(DbCommand::Switchover)),
+        ["agent"] => Some(Command::Agent { install: false }),
+        ["agent", "install"] => Some(Command::Agent { install: true }),
         ["update"] => Some(Command::Update {
             check: false,
             yes: false,
@@ -954,11 +966,28 @@ async fn run() -> ExitCode {
                 scannerpulse::setup::node::db_switchover(|line| println!("{line}"))
             }
         })),
+        Some(Command::Agent { install: true }) => {
+            node_answer(as_root().and_then(|()| scannerpulse::agent::install()))
+        }
+        Some(Command::Agent { install: false }) => match as_root() {
+            Ok(()) => match scannerpulse::agent::serve(shutdown()).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    scannerpulse::log::error(format!("agent cannot run: {error}"));
+                    ExitCode::FAILURE
+                }
+            },
+            Err(error) => {
+                eprintln!("agent: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Some(Command::Update { check, yes }) => {
             let result = match as_root() {
                 Ok(()) => {
                     scannerpulse::update::run(
                         check,
+                        false,
                         |line| println!("{line}"),
                         |question| {
                             yes || inquire::Confirm::new(question)
@@ -2282,6 +2311,12 @@ mod tests {
             })
         );
         assert_eq!(parse(&["update", "--check", "--yes"]), None);
+        assert_eq!(parse(&["agent"]), Some(Command::Agent { install: false }));
+        assert_eq!(
+            parse(&["agent", "install"]),
+            Some(Command::Agent { install: true })
+        );
+        assert_eq!(parse(&["agent", "now"]), None);
         assert_eq!(parse(&["update", "now"]), None);
     }
 

@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod accuracy;
 pub mod acme;
+pub mod agent;
 pub mod archive;
 pub mod asr;
 pub mod backfill;

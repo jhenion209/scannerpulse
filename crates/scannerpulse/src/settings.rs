@@ -404,6 +404,10 @@ pub const WEB_KEYS: [&str; 9] = [
 /// to (`udp://host:port` or `tcp://host:port`; unset, the journal only).
 pub const LOG_KEYS: [&str; 1] = ["logs.syslog"];
 
+/// The root helper's daily look for a newer release: true (the default) or
+/// false.
+pub const UPDATE_KEYS: [&str; 1] = ["updates.check"];
+
 /// Keeps this process's syslog server in step with `logs.syslog`, read now
 /// and each minute after; a database that does not answer leaves it as it
 /// was.
@@ -429,6 +433,7 @@ pub fn known() -> impl Iterator<Item = &'static str> {
         .chain(&IMPROVEMENT_KEYS)
         .chain(&WEB_KEYS)
         .chain(&LOG_KEYS)
+        .chain(&UPDATE_KEYS)
         .copied()
 }
 
@@ -499,6 +504,16 @@ pub fn check(
             Some(value) => Err(invalid(
                 "logs.syslog",
                 format!("{value} is not udp://host:port or tcp://host:port"),
+            )),
+        };
+    }
+    if UPDATE_KEYS.contains(&key) {
+        return match after.get(key) {
+            None => Ok(()),
+            Some(value) if value.is_boolean() => Ok(()),
+            Some(value) => Err(invalid(
+                "updates.check",
+                format!("{value} is not true or false"),
             )),
         };
     }

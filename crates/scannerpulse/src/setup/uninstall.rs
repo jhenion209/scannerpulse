@@ -12,11 +12,12 @@ use super::system::System;
 use crate::backup::PGBACKREST_CONF;
 
 /// The units setup writes.
-pub const UNITS: [&str; 4] = [
+pub const UNITS: [&str; 5] = [
     "scannerpulse-web.service",
     "scannerpulse-ingest.service",
     "scannerpulse-backup.timer",
     "scannerpulse-backup.service",
+    "scannerpulse-agent.service",
 ];
 
 /// What the person asked to go besides the services.
