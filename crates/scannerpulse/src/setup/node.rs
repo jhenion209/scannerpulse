@@ -780,12 +780,12 @@ fn my_timeline(system: &System) -> Option<u32> {
 fn may_rejoin(mine: Option<u32>, theirs: Option<u32>, other: &str) -> Result<(), String> {
     let Some(theirs) = theirs else {
         return Err(format!(
-            "{other} must be the primary first: `sudo scannerpulse db promote` there"
+            "{other} must be the primary first: `sudo /usr/local/bin/scannerpulse db promote` there"
         ));
     };
     match mine {
         Some(mine) if mine >= theirs => Err(format!(
-            "this machine is the newest primary (timeline {mine}; {other} is on {theirs}): run `sudo scannerpulse db rejoin` on {other} instead"
+            "this machine is the newest primary (timeline {mine}; {other} is on {theirs}): run `sudo /usr/local/bin/scannerpulse db rejoin` on {other} instead"
         )),
         _ => Ok(()),
     }
@@ -1081,7 +1081,7 @@ pub fn db_promote() -> Result<String, String> {
     }
     promote()?;
     Ok(format!(
-        "This machine is the primary now; the ScannerPulse machines move to it within seconds. When {} is back, run `sudo scannerpulse db rejoin` there.",
+        "This machine is the primary now; the ScannerPulse machines move to it within seconds. When {} is back, run `sudo /usr/local/bin/scannerpulse db rejoin` there.",
         node.other()
     ))
 }
@@ -1253,7 +1253,7 @@ fn by_the_referee(
 fn by_hand_only(referee: Option<&str>, command: &str) -> Result<(), String> {
     match referee {
         Some(referee) => Err(format!(
-            "the referee ({referee}) promotes the standby and rejoins a former primary by itself here, so `db {command}` is not needed; for a planned change of roles, run `sudo scannerpulse db switchover` on the ScannerPulse machine"
+            "the referee ({referee}) promotes the standby and rejoins a former primary by itself here, so `db {command}` is not needed; for a planned change of roles, run `sudo /usr/local/bin/scannerpulse db switchover` on the ScannerPulse machine"
         )),
         None => Ok(()),
     }
@@ -1307,13 +1307,13 @@ fn switchover(
             )));
         }
         return Err(format!(
-            "{standby} may be the primary now ({error}), so {primary} was left stopped: once {standby} answers as the primary, run `sudo scannerpulse db rejoin` on {primary}"
+            "{standby} may be the primary now ({error}), so {primary} was left stopped: once {standby} answers as the primary, run `sudo /usr/local/bin/scannerpulse db rejoin` on {primary}"
         ));
     }
     say(&format!("Making {primary} its standby"));
     run(primary, &format!("follow {standby}")).map_err(|error| {
         format!(
-            "{standby} is the primary now, but {primary} did not follow it ({error}): run `sudo scannerpulse db rejoin` on {primary}"
+            "{standby} is the primary now, but {primary} did not follow it ({error}): run `sudo /usr/local/bin/scannerpulse db rejoin` on {primary}"
         )
     })?;
     Ok(format!(

@@ -28,7 +28,16 @@ pub(super) fn plain(name: &str) -> bool {
 /// machine with these names and addresses, and the plan (its passwords
 /// travel over SSH, to root on the joining machine).
 pub fn info(names: &[String]) -> Result<String, String> {
-    let plan = Plan::read(Path::new(PLAN))?;
+    info_from(Path::new(PLAN), names, resolve)
+}
+
+/// `info`, from the plan at `path`, the names resolved by `resolve`.
+pub fn info_from(
+    path: &Path,
+    names: &[String],
+    resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
+) -> Result<String, String> {
+    let plan = Plan::read(path)?;
     let place = plan.place(names, resolve).ok_or_else(|| {
         format!(
             "this machine ({}) is not one of the install's machines: they are {}",
@@ -394,6 +403,36 @@ mod tests {
             hub.command(&["info"])
                 .contains(&"ControlPath=/run/scannerpulse-join-%C".to_string())
         );
+    }
+
+    #[test]
+    fn a_machine_not_in_the_plan_is_told_the_plans_machines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.json");
+        let plan = Plan {
+            hub: "192.0.2.10".into(),
+            hub_key: "ssh-ed25519 AAAA hub".into(),
+            nodes: vec!["db1.example.org".into(), "db2.example.org".into()],
+            database: "scannerpulse".into(),
+            role: "scannerpulse".into(),
+            password: "app-secret-1".into(),
+            replication_password: "copy-secret-2".into(),
+            referee: Some("ref.example.org".into()),
+            monitor_password: "referee-secret-3".into(),
+            joined: Vec::new(),
+        };
+        plan.write(&path).unwrap();
+        let none = |_: &str| Vec::new();
+        let error = info_from(&path, &["web.example.org".into()], none).unwrap_err();
+        assert!(
+            error.contains("web.example.org")
+                && error.contains("ref.example.org, db1.example.org, db2.example.org"),
+            "{error}"
+        );
+        let told: Joining =
+            serde_json::from_str(&info_from(&path, &["db2.example.org".into()], none).unwrap())
+                .unwrap();
+        assert_eq!(told.place, Place::Node(1));
     }
 
     #[test]

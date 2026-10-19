@@ -200,20 +200,21 @@ for the first). The joining machine reads its place over SSH, installs
 PostgreSQL 17, lets in only this machine and the other database machine
 (TLS and a password), and the second copies the first and follows it. Each
 lets this machine's key run only `scannerpulse node serve` (status, stop,
-start, promote, follow, and on the referee switchover). Then this machine makes the tables and starts. Its
+start, promote, promote after, follow, and on the referee
+switchover). Then this machine makes the tables and starts. Its
 services are given both machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on
 the one that is the primary, moving to the other within seconds after a
 change of roles; a former primary that comes back still a primary is
 ignored, as the promoted machine is on a newer timeline. The primary keeps a nightly dump in
 `/var/backups/scannerpulse` (the newest 14).
 
-- If the primary dies, run `sudo scannerpulse db promote` on the standby. It
+- If the primary dies, run `sudo /usr/local/bin/scannerpulse db promote` on the standby. It
   is refused while the other machine still answers as the primary, so two
   primaries never write at once.
-- When the old primary is back, `sudo scannerpulse db rejoin` there makes it
+- When the old primary is back, `sudo /usr/local/bin/scannerpulse db rejoin` there makes it
   the new primary's standby (so does a standby that has stopped receiving): rewound to where their histories split, or,
   if that fails and you agree, copied whole.
-- `sudo scannerpulse db switchover` on this machine swaps the roles while
+- `sudo /usr/local/bin/scannerpulse db switchover` on this machine swaps the roles while
   both are healthy and the standby is caught up: writes pause for seconds,
   and nothing is lost. The standby is promoted only once it has everything
   the stopped primary wrote; otherwise the primary starts again unchanged.
@@ -261,7 +262,7 @@ that one included. ScannerPulse itself is one program: running the install
 script again installs the latest release and brings the database's tables up
 to date, and `sudo systemctl restart scannerpulse-web scannerpulse-ingest`
 puts it to work. A program copied in by hand needs
-`sudo scannerpulse db-update` before that restart.
+`sudo /usr/local/bin/scannerpulse db-update` before that restart.
 
 ## Commands
 

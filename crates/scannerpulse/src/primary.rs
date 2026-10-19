@@ -198,7 +198,7 @@ pub fn pool(options: &PgConnectOptions, nodes: &[Node], settings: PgPoolOptions)
                 && let Some(i) = stale
             {
                 crate::log::warn(format!(
-                    "database: {} answers as a primary on an older timeline: run `sudo scannerpulse db rejoin` there",
+                    "database: {} answers as a primary on an older timeline: run `sudo /usr/local/bin/scannerpulse db rejoin` there",
                     nodes[i].host
                 ));
             }

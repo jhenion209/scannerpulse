@@ -214,30 +214,57 @@ fn write_plan(
         .map_err(|error| format!("{key_path}: {error}"))?
         .trim()
         .to_string();
-    // The machines' passwords, and who has joined, stay while the machines
-    // do; a machine joining meanwhile waits for the plan's lock.
+    // A machine joining meanwhile waits for the plan's lock.
     Plan::replace(Path::new(PLAN), |kept| {
-        let kept = kept.filter(|old| old.nodes == nodes && old.referee.as_deref() == referee);
-        Ok(Plan {
-            hub: hub.to_string(),
-            hub_key,
-            nodes: nodes.to_vec(),
-            database: super::steps::DATABASE.into(),
-            role: super::steps::ACCOUNT.into(),
-            password: password.to_string(),
-            replication_password: kept
-                .as_ref()
-                .map(|old| old.replication_password.clone())
-                .unwrap_or_else(|| crate::sessions::random_hex(24)),
-            referee: referee.map(str::to_string),
-            monitor_password: match (&kept, referee) {
-                (Some(old), _) => old.monitor_password.clone(),
-                (None, Some(_)) => crate::sessions::random_hex(24),
-                (None, None) => String::new(),
-            },
-            joined: kept.map(|old| old.joined).unwrap_or_default(),
-        })
+        Ok(next_plan(kept, nodes, hub, &hub_key, password, referee))
     })
+}
+
+/// The plan for `nodes` and `referee`, from the one `kept`: the machines'
+/// passwords, and who has joined, stay while the machines and the referee
+/// do; otherwise they are made anew.
+pub(super) fn next_plan(
+    kept: Option<super::plan::Plan>,
+    nodes: &[String],
+    hub: &str,
+    hub_key: &str,
+    password: &str,
+    referee: Option<&str>,
+) -> super::plan::Plan {
+    let kept = kept.filter(|old| old.nodes == nodes && old.referee.as_deref() == referee);
+    super::plan::Plan {
+        hub: hub.to_string(),
+        hub_key: hub_key.to_string(),
+        nodes: nodes.to_vec(),
+        database: super::steps::DATABASE.into(),
+        role: super::steps::ACCOUNT.into(),
+        password: password.to_string(),
+        replication_password: kept
+            .as_ref()
+            .map(|old| old.replication_password.clone())
+            .unwrap_or_else(|| crate::sessions::random_hex(24)),
+        referee: referee.map(str::to_string),
+        monitor_password: match (&kept, referee) {
+            (Some(old), _) => old.monitor_password.clone(),
+            (None, Some(_)) => crate::sessions::random_hex(24),
+            (None, None) => String::new(),
+        },
+        joined: kept.map(|old| old.joined).unwrap_or_default(),
+    }
+}
+
+/// What the first machine says while it waits: who it waits for, and how
+/// each joins, the first of them first.
+pub(super) fn waiting_line(plan: &super::plan::Plan) -> String {
+    let waiting = plan.waiting();
+    match waiting.first() {
+        None => "      all have joined; waiting for the primary to answer".into(),
+        Some(first) => format!(
+            "      waiting for: {}. On each, run the install line, then `sudo /usr/local/bin/scannerpulse setup`, choose Advanced, then \"join an existing install\", and give this machine's address ({}). {first} goes first.",
+            waiting.join(", "),
+            plan.hub
+        ),
+    }
 }
 
 /// Waits until both database machines have joined (each says so through
@@ -272,16 +299,7 @@ async fn wait_for_nodes(context: &Context) -> Result<(), String> {
             }
         }
         if said.as_ref() != Some(&waiting) {
-            if waiting.is_empty() {
-                println!("      all have joined; waiting for the primary to answer");
-            } else {
-                let first = waiting.first().map(String::as_str).unwrap_or("");
-                println!(
-                    "      waiting for: {}. On each, run the install line, then `sudo /usr/local/bin/scannerpulse setup`, choose Advanced, then \"join an existing install\", and give this machine's address ({}). {first} goes first.",
-                    waiting.join(", "),
-                    plan.hub
-                );
-            }
+            println!("{}", waiting_line(&plan));
             said = Some(waiting);
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -318,8 +336,88 @@ async fn wait_for_web(port: u16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{Context, apply};
+    use crate::setup::plan::Plan;
     use crate::setup::steps::{Action, Step};
     use std::os::unix::fs::PermissionsExt;
+
+    fn nodes() -> Vec<String> {
+        vec!["db1.example.org".into(), "192.0.2.22".into()]
+    }
+
+    #[test]
+    fn a_plan_made_again_keeps_what_its_machines_hold() {
+        let first = super::next_plan(
+            None,
+            &nodes(),
+            "192.0.2.10",
+            "key",
+            "app",
+            Some("ref.example.org"),
+        );
+        assert_eq!(first.replication_password.len(), 48);
+        assert_eq!(first.monitor_password.len(), 48);
+        let mut kept = first.clone();
+        kept.mark_joined("ref.example.org");
+        // The same machines and referee: the passwords they hold, and who
+        // has joined, stay.
+        let again = super::next_plan(
+            Some(kept.clone()),
+            &nodes(),
+            "192.0.2.11",
+            "key",
+            "app",
+            Some("ref.example.org"),
+        );
+        assert_eq!(again.replication_password, first.replication_password);
+        assert_eq!(again.monitor_password, first.monitor_password);
+        assert_eq!(again.joined, ["ref.example.org"]);
+        assert_eq!(again.hub, "192.0.2.11");
+        // Another referee, or other machines: new passwords, none joined.
+        for (machines, referee) in [
+            (nodes(), Some("ref2.example.org")),
+            (
+                vec!["db1.example.org".to_string(), "db3.example.org".to_string()],
+                Some("ref.example.org"),
+            ),
+        ] {
+            let other = super::next_plan(
+                Some(kept.clone()),
+                &machines,
+                "192.0.2.10",
+                "key",
+                "app",
+                referee,
+            );
+            assert_ne!(other.replication_password, first.replication_password);
+            assert!(other.joined.is_empty());
+        }
+        // By hand: no referee's password.
+        let by_hand = super::next_plan(None, &nodes(), "192.0.2.10", "key", "app", None);
+        assert_eq!(by_hand.monitor_password, "");
+    }
+
+    #[test]
+    fn the_waiting_line_names_who_is_awaited_and_the_next_to_join() {
+        let mut plan: Plan = super::next_plan(
+            None,
+            &nodes(),
+            "192.0.2.10",
+            "key",
+            "app",
+            Some("ref.example.org"),
+        );
+        let line = super::waiting_line(&plan);
+        assert!(
+            line.contains("waiting for: ref.example.org, db1.example.org, 192.0.2.22"),
+            "{line}"
+        );
+        assert!(line.contains("(192.0.2.10)"), "{line}");
+        assert!(line.contains("ref.example.org goes first"), "{line}");
+        for machine in ["ref.example.org", "db1.example.org", "192.0.2.22"] {
+            plan.mark_joined(machine);
+        }
+        assert!(super::waiting_line(&plan).contains("all have joined"));
+    }
 
     fn me() -> String {
         let user = std::process::Command::new("id")
