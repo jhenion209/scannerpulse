@@ -144,6 +144,9 @@ backend scannerpulse
     option redispatch
     retries 2
     timeout connect 3s
+    # A new connection for each request: one kept open to a machine that
+    # has vanished would hold a request until the server timeout.
+    http-reuse never
     retry-on conn-failure empty-response response-timeout
     option httpchk GET /healthz
     http-check expect status 200
@@ -166,6 +169,9 @@ map $http_upgrade $connection_upgrade {
 }
 
 upstream scannerpulse {
+    # Shared by all of nginx's workers, so each does not learn alone that a
+    # machine is down.
+    zone scannerpulse 64k;
     server 192.0.2.11:443 max_fails=2 fail_timeout=10s;
     server 192.0.2.12:443 max_fails=2 fail_timeout=10s;
 }
@@ -196,17 +202,21 @@ server {
 
 Caddy checks each machine at `/healthz` and adds `X-Forwarded-For` itself.
 With a name that Let's Encrypt can prove for Caddy, put the name in place of
-`:443` and drop the `tls` line.
+`:443` and drop the `tls` line. `lb_try_duration` lets Caddy try the other
+machine when one does not answer, and `keepalive off` gives each request a new
+connection, so that none is held by a machine that has vanished.
 
 ```
 :443 {
 	tls /etc/ssl/sp/site.crt /etc/ssl/sp/site.key
 	reverse_proxy 192.0.2.11:443 192.0.2.12:443 {
 		lb_policy round_robin
+		lb_try_duration 5s
 		health_uri /healthz
 		health_interval 5s
 		transport http {
 			tls_insecure_skip_verify
+			keepalive off
 		}
 	}
 }
