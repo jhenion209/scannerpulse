@@ -331,7 +331,7 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
     ));
-    let (cookie, _) = signed(&pool, &app).await;
+    let (cookie, _) = sign_in(&app, "ann", PASSWORD).await;
     let unknown = send(
         &app,
         "GET",
@@ -349,7 +349,7 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
     let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
         std::net::SocketAddr::from((common::PEER, 40_000)),
     ));
-    let (cookie, _) = signed(&pool, &app).await;
+    let (cookie, _) = sign_in(&app, "ann", PASSWORD).await;
     let one = send(
         &app,
         "GET",
