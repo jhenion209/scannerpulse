@@ -188,7 +188,7 @@ impl Hub {
             "-o",
             &control,
             "-o",
-            "ControlPersist=30",
+            "ControlPersist=300",
             "-o",
             "StrictHostKeyChecking=accept-new",
         ]
@@ -260,10 +260,31 @@ impl Hub {
 /// answers file says yes).
 pub async fn run(hub: Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<(), String> {
     // The kept connection to the hub, the person's login, closes however
-    // the join ends.
-    let joined = join(&hub, dry_run, yes).await;
+    // the join ends: done, failed, or stopped by Ctrl-C, a hang-up or a stop.
+    let joined = tokio::select! {
+        joined = join(&hub, dry_run, yes) => joined,
+        () = stopped() => Err("the join was stopped".into()),
+    };
     hub.close();
     joined
+}
+
+/// Completes at Ctrl-C, a hang-up (the terminal gone) or SIGTERM.
+async fn stopped() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match (
+        signal(SignalKind::hangup()),
+        signal(SignalKind::terminate()),
+    ) {
+        (Ok(mut hangup), Ok(mut term)) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = hangup.recv() => {}
+            _ = term.recv() => {}
+        },
+        _ => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
 }
 
 async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<(), String> {
@@ -501,8 +522,9 @@ mod tests {
         let command = hub.command(&["info", "db2", "192.0.2.22"]);
         assert_eq!(command[0], "ssh");
         assert!(command.contains(&"ControlMaster=auto".to_string()));
-        // A join cut short keeps the person's login open for seconds only.
-        assert!(command.contains(&"ControlPersist=30".to_string()));
+        // Long enough to outlast the steps between the hub's questions; a
+        // join cut short closes it (`run`).
+        assert!(command.contains(&"ControlPersist=300".to_string()));
         assert!(!command.contains(&"BatchMode=yes".to_string()));
         assert_eq!(command[command.len() - 3], "chief@192.0.2.10");
         assert_eq!(
