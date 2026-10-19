@@ -751,15 +751,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             &["enable", "--now", system.postgres_service()],
         ));
     }
-    steps.push(run(
-        "Make the scannerpulse account",
-        "/bin/sh",
-        &[
-            "-c",
-            "id -u scannerpulse >/dev/null 2>&1 || useradd --system --user-group \
-             --home-dir /var/lib/scannerpulse --create-home --shell /usr/sbin/nologin scannerpulse",
-        ],
-    ));
+    steps.push(account_step());
     if here {
         steps.push(Step {
             title: "Make the database and its role".into(),
@@ -782,58 +774,8 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             },
         });
     }
-    for (folder, role) in [
-        (&answers.recordings, "recordings"),
-        (&answers.archive, "archive"),
-    ] {
-        let path = folder.display().to_string();
-        steps.push(setfacl(
-            &format!("Let the scannerpulse account read and write the {role} folder"),
-            &[
-                "-R",
-                "-m",
-                "u:scannerpulse:rwX",
-                "-m",
-                "d:u:scannerpulse:rwX",
-                &path,
-            ],
-        ));
-        // The folder's own access is not enough: every folder above it must
-        // let the account through, and a home folder often does not.
-        steps.push(run(
-            &format!("Check that the scannerpulse account reaches the {role} folder"),
-            "runuser",
-            &[
-                "-u",
-                ACCOUNT,
-                "--",
-                "sh",
-                "-c",
-                &reach(ACCOUNT),
-                "reach",
-                &path,
-            ],
-        ));
-    }
-    steps.push(run(
-        "Make the settings folder",
-        "install",
-        &["-d", "-m", "0750", "-o", "root", "-g", ACCOUNT, ETC],
-    ));
-    steps.push(run(
-        "Make the certificate folder",
-        "install",
-        &[
-            "-d",
-            "-m",
-            "0750",
-            "-o",
-            ACCOUNT,
-            "-g",
-            ACCOUNT,
-            &format!("{ETC}/tls"),
-        ],
-    ));
+    steps.extend(folder_steps(&answers.recordings, &answers.archive));
+    steps.extend(settings_folder_steps());
     steps.push(Step {
         title: "Write the database's password file".into(),
         action: Action::Write {
@@ -1061,6 +1003,106 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
     if let Some(backups) = &backups {
         backup_steps(&mut steps, backups, binary, system);
     }
+    steps.extend(start_steps(
+        binary,
+        system,
+        &answers.recordings,
+        &answers.archive,
+        answers.database == Database::Here,
+        backups.is_some(),
+        answers.port,
+    ));
+    steps
+}
+
+/// The service account, as setup makes it.
+pub(super) fn account_step() -> Step {
+    run(
+        "Make the scannerpulse account",
+        "/bin/sh",
+        &[
+            "-c",
+            "id -u scannerpulse >/dev/null 2>&1 || useradd --system --user-group \
+             --home-dir /var/lib/scannerpulse --create-home --shell /usr/sbin/nologin scannerpulse",
+        ],
+    )
+}
+
+/// The service account reads and writes the recordings and the archive,
+/// and reaches them through every folder above.
+pub(super) fn folder_steps(recordings: &Path, archive: &Path) -> Vec<Step> {
+    let mut steps = Vec::new();
+    for (folder, role) in [(recordings, "recordings"), (archive, "archive")] {
+        let path = folder.display().to_string();
+        steps.push(setfacl(
+            &format!("Let the scannerpulse account read and write the {role} folder"),
+            &[
+                "-R",
+                "-m",
+                "u:scannerpulse:rwX",
+                "-m",
+                "d:u:scannerpulse:rwX",
+                &path,
+            ],
+        ));
+        // The folder's own access is not enough: every folder above it must
+        // let the account through, and a home folder often does not.
+        steps.push(run(
+            &format!("Check that the scannerpulse account reaches the {role} folder"),
+            "runuser",
+            &[
+                "-u",
+                ACCOUNT,
+                "--",
+                "sh",
+                "-c",
+                &reach(ACCOUNT),
+                "reach",
+                &path,
+            ],
+        ));
+    }
+    steps
+}
+
+/// The settings folder, and the certificate's.
+pub(super) fn settings_folder_steps() -> Vec<Step> {
+    let mut steps = Vec::new();
+    steps.push(run(
+        "Make the settings folder",
+        "install",
+        &["-d", "-m", "0750", "-o", "root", "-g", ACCOUNT, ETC],
+    ));
+    steps.push(run(
+        "Make the certificate folder",
+        "install",
+        &[
+            "-d",
+            "-m",
+            "0750",
+            "-o",
+            ACCOUNT,
+            "-g",
+            ACCOUNT,
+            &format!("{ETC}/tls"),
+        ],
+    ));
+    steps
+}
+
+/// The web and ingest services written, started at boot and now (with the
+/// nightly backup's timer when `backups`), the site's port opened, and the
+/// web waited for. `local_db` orders them after this machine's PostgreSQL.
+pub(super) fn start_steps(
+    binary: &Path,
+    system: &System,
+    recordings: &Path,
+    archive: &Path,
+    local_db: bool,
+    backups: bool,
+    port: u16,
+) -> Vec<Step> {
+    let mut steps = Vec::new();
     for command in ["web", "ingest"] {
         steps.push(Step {
             title: format!("Write the {command} service"),
@@ -1068,13 +1110,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 path: PathBuf::from(format!(
                     "/etc/systemd/system/scannerpulse-{command}.service"
                 )),
-                contents: unit(
-                    command,
-                    binary,
-                    system,
-                    &[&answers.recordings, &answers.archive],
-                    answers.database == Database::Here,
-                ),
+                contents: unit(command, binary, system, &[recordings, archive], local_db),
                 mode: 0o644,
                 owner: "root:root".into(),
             },
@@ -1086,7 +1122,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         &["daemon-reload"],
     ));
     let mut units = vec!["scannerpulse-web", "scannerpulse-ingest"];
-    if backups.is_some() {
+    if backups {
         units.push("scannerpulse-backup.timer");
     }
     steps.push(run(
@@ -1102,10 +1138,10 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
         &[&["restart"], &units[..]].concat(),
     ));
     // Rocky, Alma and Fedora run firewalld, which would shut the site out.
-    steps.push(firewall(true, answers.port));
+    steps.push(firewall(true, port));
     steps.push(Step {
         title: "Wait for the web interface".into(),
-        action: Action::WaitForWeb { port: answers.port },
+        action: Action::WaitForWeb { port },
     });
     steps
 }
