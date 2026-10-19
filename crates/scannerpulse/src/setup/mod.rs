@@ -116,6 +116,9 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         // its role make tables, and a Cloudflare token must reach the site's
         // zone, before anything is planned on them.
         let online = async {
+            // The questions tell the machines apart by name only; here they
+            // are told apart by address too (an answers file was already).
+            ask::machines_apart(&answers, plan::resolve)?;
             if let steps::Database::Theirs(remote) = &answers.database {
                 let version = ask::check_remote(remote).await?;
                 println!("\nThe database answers: {version}.");

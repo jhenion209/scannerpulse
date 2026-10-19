@@ -139,6 +139,7 @@ async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
             names: vec!["radio.example.org".into()],
             directory: "https://127.0.0.1:1/directory".into(),
             cloudflare_api: None,
+            host: "radio-a".into(),
         },
         &std::fs::read_to_string(made.join("cert.pem")).unwrap(),
         &std::fs::read_to_string(made.join("key.pem")).unwrap(),
@@ -159,6 +160,7 @@ async fn with_lets_encrypt_on_the_kept_certificate_is_served_from_the_start() {
                 // certificate stays.
                 directory: "https://127.0.0.1:1/directory".into(),
                 cloudflare_api: None,
+                host: "radio-a".into(),
             }),
             ..Default::default()
         },

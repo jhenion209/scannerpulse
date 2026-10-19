@@ -642,11 +642,14 @@ pub fn pair_names(names: &[String], second: Option<&str>, shared: Option<&str>) 
         .collect()
 }
 
+/// setfacl with the script's arguments, letting through a filesystem
+/// without POSIX ACLs.
+const LET_THROUGH: &str = "said=$(LC_ALL=C setfacl \"$@\" 2>&1) && exit 0; printf '%s\\n' \"$said\" | grep -qv 'Operation not supported' || exit 0; printf '%s\\n' \"$said\" >&2; exit 1";
+
 /// `setfacl` with `args`, except that a filesystem without POSIX ACLs, as
 /// an NFSv4 or CIFS share, is let through: its own permissions decide, and
 /// setup's reach check proves them. Any other error still stops.
 pub(super) fn setfacl(title: &str, args: &[&str]) -> Step {
-    const LET_THROUGH: &str = "said=$(LC_ALL=C setfacl \"$@\" 2>&1) && exit 0; printf '%s\\n' \"$said\" | grep -qv 'Operation not supported' || exit 0; printf '%s\\n' \"$said\" >&2; exit 1";
     run(
         title,
         "sh",
@@ -825,7 +828,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
             },
         });
     }
-    steps.extend(folder_steps(&answers.recordings, &answers.archive));
+    steps.extend(folder_steps(&answers.recordings, &answers.archive, false));
     steps.extend(settings_folder_steps());
     steps.push(Step {
         title: "Write the database's password file".into(),
@@ -1101,21 +1104,46 @@ pub(super) fn account_step() -> Step {
 
 /// The service account reads and writes the recordings and the archive,
 /// and reaches them through every folder above.
-pub(super) fn folder_steps(recordings: &Path, archive: &Path) -> Vec<Step> {
+/// With `unless_reached` (a joining second machine), a folder the account
+/// already reaches and writes is not walked again: on a large shared archive
+/// the walk takes hours, and a join runs again after each certificate change.
+pub(super) fn folder_steps(recordings: &Path, archive: &Path, unless_reached: bool) -> Vec<Step> {
     let mut steps = Vec::new();
     for (folder, role) in [(recordings, "recordings"), (archive, "archive")] {
         let path = folder.display().to_string();
-        steps.push(setfacl(
-            &format!("Let the scannerpulse account read and write the {role} folder"),
-            &[
-                "-R",
-                "-m",
-                "u:scannerpulse:rwX",
-                "-m",
-                "d:u:scannerpulse:rwX",
-                &path,
-            ],
-        ));
+        let title = format!("Let the scannerpulse account read and write the {role} folder");
+        let args = [
+            "-R",
+            "-m",
+            "u:scannerpulse:rwX",
+            "-m",
+            "d:u:scannerpulse:rwX",
+            &path,
+        ];
+        steps.push(if unless_reached {
+            let script = format!(
+                "runuser -u {ACCOUNT} -- sh -c \"$REACH\" reach \"$FOLDER\" >/dev/null 2>&1 && exit 0\n{LET_THROUGH}"
+            );
+            Step {
+                title: title.clone(),
+                action: Action::Run {
+                    program: "sh".into(),
+                    args: ["-c", &script, "setfacl"]
+                        .iter()
+                        .chain(&args)
+                        .map(|a| a.to_string())
+                        .collect(),
+                    input: None,
+                    env: vec![
+                        ("REACH".into(), reach(ACCOUNT)),
+                        ("FOLDER".into(), path.clone()),
+                    ],
+                    unless: None,
+                },
+            }
+        } else {
+            setfacl(&title, &args)
+        });
         // The folder's own access is not enough: every folder above it must
         // let the account through, and a home folder often does not.
         steps.push(run(
@@ -2423,5 +2451,50 @@ mod tests {
         assert!(!touched.iter().any(|a| *a == "/srv/backups"), "{touched:?}");
         assert!(touched.iter().any(|a| *a == "/srv/backups/pgbackrest"));
         assert!(touched.iter().any(|a| *a == "/srv/backups/dump"));
+    }
+
+    #[test]
+    fn a_folder_the_account_already_writes_is_not_walked_again() {
+        use crate::setup::test_script::run;
+        let steps = super::folder_steps(
+            Path::new("/srv/recordings"),
+            Path::new("/srv/archive"),
+            true,
+        );
+        let access = &steps[2];
+        assert_eq!(
+            access.title,
+            "Let the scannerpulse account read and write the archive folder"
+        );
+        for (reaches, walked) in [("exit 0", false), ("exit 1", true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let ran = run(
+                access,
+                &[("runuser", reaches), ("setfacl", "exit 0")],
+                &[],
+                dir.path(),
+                "",
+            );
+            assert!(ran.ok, "{}", ran.stderr);
+            assert_eq!(
+                ran.calls.contains(
+                    "setfacl -R -m u:scannerpulse:rwX -m d:u:scannerpulse:rwX /srv/archive"
+                ),
+                walked,
+                "{}",
+                ran.calls
+            );
+        }
+        // On the first machine, setup walks its folders every time.
+        let first = super::folder_steps(
+            Path::new("/srv/recordings"),
+            Path::new("/srv/archive"),
+            false,
+        );
+        assert_eq!(first[2].title, access.title);
+        let Action::Run { program, .. } = &first[2].action else {
+            panic!()
+        };
+        assert_eq!(program, "sh");
     }
 }

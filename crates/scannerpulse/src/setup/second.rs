@@ -205,7 +205,7 @@ pub fn steps(
         )),
     }
     steps.push(account_step());
-    steps.extend(folder_steps(recordings, archive));
+    steps.extend(folder_steps(recordings, archive, true));
     steps.extend(settings_folder_steps());
     let own = format!("{ACCOUNT}:{ACCOUNT}");
     for (title, path, contents, mode, owner) in [

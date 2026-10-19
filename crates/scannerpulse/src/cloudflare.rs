@@ -7,13 +7,15 @@ use serde_json::Value;
 const API: &str = "https://api.cloudflare.com/client/v4";
 
 /// The comment on every record the site writes, which tells its own from
-/// anyone else's.
+/// anyone else's; with the machine's name after it, each of two machines
+/// renewing tells its own from the other's.
 const MARK: &str = "scannerpulse";
 
 pub struct Cloudflare {
     http: reqwest::Client,
     api: String,
     token: String,
+    mark: String,
 }
 
 impl Cloudflare {
@@ -36,6 +38,17 @@ impl Cloudflare {
             http: reqwest::Client::new(),
             api: api.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            mark: MARK.into(),
+        }
+    }
+
+    /// Records marked as this machine's (`host`), so that another machine
+    /// renewing the same names never removes them while its order is in
+    /// flight.
+    pub fn for_host(self, host: &str) -> Cloudflare {
+        Cloudflare {
+            mark: format!("{MARK} {host}"),
+            ..self
         }
     }
 
@@ -72,7 +85,7 @@ impl Cloudflare {
             "name": name,
             "content": value,
             "ttl": 60,
-            "comment": MARK,
+            "comment": self.mark,
         });
         let made = self
             .call(
@@ -101,7 +114,9 @@ impl Cloudflare {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|record| record["comment"] == MARK)
+            // A record marked before records were a machine's own is
+            // anyone's to clear.
+            .filter(|record| record["comment"] == self.mark.as_str() || record["comment"] == MARK)
             .filter_map(|record| record["id"].as_str().map(String::from))
             .collect())
     }

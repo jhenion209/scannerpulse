@@ -81,6 +81,9 @@ pub struct Settings {
     pub directory: String,
     /// Another address for Cloudflare's API (a stand-in, for a trial).
     pub cloudflare_api: Option<String>,
+    /// This machine's name (SCANNERPULSE_HOST), which marks its proof
+    /// records apart from another machine's.
+    pub host: String,
 }
 
 impl Settings {
@@ -117,6 +120,10 @@ impl Settings {
             names,
             directory: get("SCANNERPULSE_ACME_DIRECTORY").unwrap_or_else(|| LETS_ENCRYPT.into()),
             cloudflare_api: get("SCANNERPULSE_CLOUDFLARE_API"),
+            host: get("SCANNERPULSE_HOST")
+                .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+                .map(|host| host.trim().to_string())
+                .unwrap_or_default(),
         }))
     }
 
@@ -421,10 +428,13 @@ pub async fn obtain(
     };
     let cloudflare = match &settings.proof {
         Proof::Web => None,
-        Proof::Cloudflare { token } => Some(match &settings.cloudflare_api {
-            Some(api) => Cloudflare::with_api(api, token),
-            None => Cloudflare::new(token),
-        }),
+        Proof::Cloudflare { token } => Some(
+            match &settings.cloudflare_api {
+                Some(api) => Cloudflare::with_api(api, token),
+                None => Cloudflare::new(token),
+            }
+            .for_host(&settings.host),
+        ),
     };
     let mut records = Vec::new();
     let polls = RetryPolicy::new()

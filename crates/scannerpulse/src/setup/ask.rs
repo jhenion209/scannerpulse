@@ -105,21 +105,7 @@ fn checked(
                 return Err("the referee is a third machine, neither database machine".into());
             }
         }
-        check_machines(
-            &pair.nodes,
-            pair.referee.as_deref(),
-            &pair.hub,
-            pair.second.as_deref(),
-            pair.shared.as_deref(),
-            matches!(
-                answers.certificate,
-                Certificate::LetsEncrypt {
-                    proof: crate::acme::Proof::Web,
-                    ..
-                }
-            ),
-            resolve,
-        )?;
+        machines_apart(&answers, resolve)?;
     }
     if let Some(backups) = &answers.backups {
         answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
@@ -1354,6 +1340,33 @@ pub fn default_hub(defaults: &Defaults) -> String {
         .unwrap_or_else(|| defaults.host.clone())
 }
 
+/// The machines `answers` plan, checked as `check_machines` does; the
+/// questions check names only, so their answers come here before the
+/// summary.
+pub fn machines_apart(
+    answers: &Answers,
+    resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
+) -> Result<(), String> {
+    let Database::Nodes(pair) = &answers.database else {
+        return Ok(());
+    };
+    check_machines(
+        &pair.nodes,
+        pair.referee.as_deref(),
+        &pair.hub,
+        pair.second.as_deref(),
+        pair.shared.as_deref(),
+        matches!(
+            answers.certificate,
+            Certificate::LetsEncrypt {
+                proof: crate::acme::Proof::Web,
+                ..
+            }
+        ),
+        resolve,
+    )
+}
+
 /// The machines of a plan each a machine of their own, and a second
 /// ScannerPulse machine's own checks: the shared address, and no Let's
 /// Encrypt over the web (`le_web`).
@@ -1579,6 +1592,28 @@ mod tests {
         let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let port = taken.local_addr().unwrap().port();
         assert!(free_port(port) > port);
+    }
+
+    #[test]
+    fn answers_from_the_questions_are_told_apart_by_address_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = format!(
+            "RECORDINGS={}\nARCHIVE={}\nADMIN=chief\nADMIN_PASSWORD=\"a long lab password\"\nTIME_ZONE=America/Chicago\nDATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nHUB=192.0.2.10\nSECOND=192.0.2.22\n",
+            dir.path().join("rec").display(),
+            dir.path().join("arc").display()
+        );
+        std::fs::create_dir(dir.path().join("rec")).unwrap();
+        std::fs::create_dir(dir.path().join("arc")).unwrap();
+        // Read without resolving, as the questions give them.
+        let answers = from_file(&answers_file(dir.path(), &base, 0o600), &defaults()).unwrap();
+        // db2's address given as the second, db2 given by name.
+        let resolve = |name: &str| match name {
+            "db2.example.org" | "192.0.2.22" => vec!["192.0.2.22".parse().unwrap()],
+            _ => Vec::new(),
+        };
+        let error = super::machines_apart(&answers, resolve).unwrap_err();
+        assert!(error.contains("same machine"), "{error}");
+        assert_eq!(super::machines_apart(&answers, |_| Vec::new()), Ok(()));
     }
 
     #[test]

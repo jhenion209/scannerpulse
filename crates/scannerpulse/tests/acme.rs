@@ -318,6 +318,7 @@ fn web(names: &[&str], directory: &str) -> Settings {
         names: names.iter().map(|n| n.to_string()).collect(),
         directory: directory.into(),
         cloudflare_api: None,
+        host: "radio-a".into(),
     }
 }
 
@@ -634,6 +635,25 @@ async fn a_proof_record_left_behind_goes_before_the_next_and_others_stay() {
         "only the site's own record goes; someone else's stays"
     );
     assert!(cf.leftovers("zone-1", name).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn two_machines_clear_only_their_own_proof_records() {
+    use scannerpulse::cloudflare::Cloudflare;
+    let (api, _) = cloudflare().await;
+    let name = "_acme-challenge.radio.west.example.org";
+    let first = Cloudflare::with_api(&api, "cf-token-1").for_host("web1");
+    let second = Cloudflare::with_api(&api, "cf-token-1").for_host("web2");
+    // The first machine's order is in flight when the second's starts.
+    let mine = first.add_txt("zone-1", name, "first-proof").await.unwrap();
+    assert!(second.leftovers("zone-1", name).await.unwrap().is_empty());
+    assert_eq!(first.leftovers("zone-1", name).await.unwrap(), [mine]);
+    // A record from before records were the machine's own: either clears it.
+    let old = Cloudflare::with_api(&api, "cf-token-1")
+        .add_txt("zone-1", name, "old-proof")
+        .await
+        .unwrap();
+    assert_eq!(second.leftovers("zone-1", name).await.unwrap(), [old]);
 }
 
 #[tokio::test]
