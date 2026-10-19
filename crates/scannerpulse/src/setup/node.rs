@@ -407,13 +407,32 @@ pub(super) fn autoctl(system: &System, args: &[&str]) -> Vec<String> {
     all
 }
 
+/// pg_autoctl's service unit, written once its node is made: a node whose
+/// making was cut short has none, and `pg_autoctl create` resumes it.
+pub(super) const AUTOCTL_UNIT: &str = "/etc/systemd/system/pgautofailover.service";
+
+/// pg_autoctl's data directory, in a folder of postgres's: pg_autoctl
+/// keeps its backups beside it.
+pub(super) fn autoctl_folder(title: &str, data: &str) -> Step {
+    script(
+        title,
+        "install -d -m 0755 -o postgres -g postgres \"$(dirname \"$DATA\")\" && install -d -m 0700 -o postgres -g postgres \"$DATA\"",
+        &[("DATA", data)],
+        None,
+    )
+}
+
 /// pg_autoctl's service, as pg_autoctl writes it, started now and at boot.
 pub(super) fn autoctl_service(system: &System, data: &str) -> Vec<Step> {
     vec![
         script(
             "Write pg_autoctl's service",
-            "runuser -u postgres -- env -u XDG_RUNTIME_DIR PATH=\"$BIN:/usr/bin:/bin\" pg_autoctl -q show systemd --pgdata \"$DATA\" > /etc/systemd/system/pgautofailover.service",
-            &[("BIN", system.postgres_bin()), ("DATA", data)],
+            "runuser -u postgres -- env -u XDG_RUNTIME_DIR PATH=\"$BIN:/usr/bin:/bin\" pg_autoctl -q show systemd --pgdata \"$DATA\" > \"$UNIT.new\" && mv \"$UNIT.new\" \"$UNIT\"",
+            &[
+                ("BIN", system.postgres_bin()),
+                ("DATA", data),
+                ("UNIT", AUTOCTL_UNIT),
+            ],
             None,
         ),
         run("Read the new units", "systemctl", &["daemon-reload"]),
@@ -454,13 +473,7 @@ fn by_referee(
             owner: "postgres:postgres".into(),
         },
     });
-    steps.push(run(
-        "Make pg_autoctl's data directory",
-        "install",
-        &[
-            "-d", "-m", "0700", "-o", "postgres", "-g", "postgres", &data,
-        ],
-    ));
+    steps.push(autoctl_folder("Make pg_autoctl's data directory", &data));
     let monitor =
         format!("postgres://autoctl_node@{referee}:5432/pg_auto_failover?sslmode=require");
     steps.push(Step {
@@ -495,7 +508,7 @@ fn by_referee(
             ),
             input: None,
             env: Vec::new(),
-            unless: Some(Path::new(&data).join("PG_VERSION")),
+            unless: Some(AUTOCTL_UNIT.into()),
         },
     });
     steps.push(script(
@@ -1368,14 +1381,24 @@ mod tests {
             assert!(line.contains(part), "{part}: {line}");
         }
         assert!(!line.contains("secret"), "{line}");
-        // Run again, a registered machine is left as it is.
+        // Run again, a registered machine (its service written) is left as
+        // it is; one whose registration was cut short resumes it.
         let Action::Run { unless, .. } = &first[at(register)].action else {
             panic!()
         };
         assert_eq!(
             unless.as_deref(),
-            Some(Path::new("/var/lib/postgresql/17/sp/PG_VERSION"))
+            Some(Path::new("/etc/systemd/system/pgautofailover.service"))
         );
+        // pg_autoctl keeps its backups beside the data directory, in a
+        // folder of postgres's.
+        let (_, args, env, _) = ran(&first, "Make pg_autoctl's data directory");
+        assert!(
+            args[1].contains("install -d -m 0755 -o postgres -g postgres \"$(dirname \"$DATA\")\""),
+            "{}",
+            args[1]
+        );
+        assert!(env.contains(&("DATA".into(), "/var/lib/postgresql/17/sp".into())));
         // The ScannerPulse machine's access, then pg_autoctl's service.
         let hba = "Let the ScannerPulse machine in";
         let (_, _, _, input) = ran(&first, hba);

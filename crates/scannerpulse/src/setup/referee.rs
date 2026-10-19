@@ -7,9 +7,12 @@
 use std::net::IpAddr;
 use std::path::Path;
 
-use super::node::{autoctl, autoctl_service, drop_debians_cluster, hub_key_step, install};
+use super::node::{
+    AUTOCTL_UNIT, autoctl, autoctl_folder, autoctl_service, drop_debians_cluster, hub_key_step,
+    install,
+};
 use super::plan::Plan;
-use super::steps::{Action, Step, run};
+use super::steps::{Action, Step};
 use super::system::{Family, System};
 
 /// The marker of setup's lines in the referee's access rules.
@@ -49,13 +52,7 @@ pub fn steps(
         steps.push(drop_debians_cluster());
     }
     steps.push(super::steps::firewall(true, 5432));
-    steps.push(run(
-        "Make the referee's data directory",
-        "install",
-        &[
-            "-d", "-m", "0700", "-o", "postgres", "-g", "postgres", &data,
-        ],
-    ));
+    steps.push(autoctl_folder("Make the referee's data directory", &data));
     steps.push(Step {
         title: "Make the referee (pg_auto_failover's monitor)".into(),
         action: Action::Run {
@@ -74,12 +71,11 @@ pub fn steps(
                     "--auth",
                     "scram-sha-256",
                     "--ssl-self-signed",
-                    "--no-run",
                 ],
             ),
             input: None,
             env: Vec::new(),
-            unless: Some(Path::new(&data).join("PG_VERSION")),
+            unless: Some(AUTOCTL_UNIT.into()),
         },
     });
     steps.push(super::node::script(
@@ -178,10 +174,22 @@ mod tests {
         };
         assert_eq!(program, "runuser");
         let line = args.join(" ");
-        assert!(line.contains("PATH=/usr/pgsql-17/bin:/usr/bin:/bin pg_autoctl create monitor --pgdata /var/lib/pgsql/17/monitor --pgport 5432 --hostname ref.example.org --auth scram-sha-256 --ssl-self-signed --no-run"), "{line}");
+        assert!(line.contains("PATH=/usr/pgsql-17/bin:/usr/bin:/bin pg_autoctl create monitor --pgdata /var/lib/pgsql/17/monitor --pgport 5432 --hostname ref.example.org --auth scram-sha-256 --ssl-self-signed"), "{line}");
+        assert!(
+            !line.contains("--no-run"),
+            "pg_autoctl 2.2 has no --no-run: {line}"
+        );
         assert_eq!(
             unless.as_deref(),
-            Some(Path::new("/var/lib/pgsql/17/monitor/PG_VERSION"))
+            Some(Path::new("/etc/systemd/system/pgautofailover.service"))
+        );
+        let Action::Run { args, .. } = &all[at("Make the referee's data directory")].action else {
+            panic!()
+        };
+        assert!(
+            args[1].contains("install -d -m 0755 -o postgres -g postgres"),
+            "{}",
+            args[1]
         );
         let Action::Run { input, .. } = &all[at("Let both database machines in")].action else {
             panic!()
