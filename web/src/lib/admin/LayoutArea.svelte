@@ -1,18 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { callTime } from '../format';
   import { formerPrimaryText, machineText, modeText, standbyText, type LayoutInfo } from './layout';
   import { admin, why } from './session.svelte';
+  import { siteZone } from '../status.svelte';
 
   /** How often the layout is read again while the area is open. */
   const LAYOUT_EVERY_MS = 15_000;
 
   let data = $state<LayoutInfo | null>(null);
   let problem = $state<string | null>(null);
+  /** When the layout on screen was read: a failed read keeps it, undated otherwise. */
+  let readAt = $state<Date | null>(null);
 
   /** The timer's reads are polls: they do not count as use of the session. */
   async function read(poll = false) {
     try {
       data = await admin<LayoutInfo>('GET', '/api/admin/layout', undefined, { poll });
+      readAt = new Date();
       problem = null;
     } catch (error) {
       problem = why(error);
@@ -30,6 +35,9 @@
 
 <section class="area" aria-labelledby="layout-title">
   <h1 id="layout-title">Layout</h1>
+  <p class="lead">
+    {#if readAt}Read at {callTime(readAt.toISOString(), new Date(), siteZone())}; read again every 15 s.{:else}Reading…{/if}
+  </p>
   {#if problem}<p class="problem" role="alert">The layout could not be read: {problem}</p>{/if}
 
   {#if data}

@@ -10,6 +10,7 @@ test('the layout of one machine shows it answering and no failover', async ({ pa
   await signIn(page, '#layout');
   await expect(page.getByRole('heading', { name: 'Layout', level: 1 })).toBeVisible();
   await expect(page.getByText('One machine: no failover.')).toBeVisible();
+  await expect(page.getByText('Read at', { exact: false })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'ScannerPulse machines' })).toBeVisible();
   await expect(page.getByText('answering (version', { exact: false })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Switchover' })).toHaveCount(0);
