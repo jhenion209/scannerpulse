@@ -39,6 +39,7 @@ pub mod store;
 pub mod talkgroups;
 pub mod transcriber;
 pub mod transcripts;
+pub mod update;
 pub mod watcher;
 pub mod web;
 pub mod wer;

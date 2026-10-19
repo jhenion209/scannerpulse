@@ -1051,6 +1051,12 @@ pub enum Asked {
     /// Promote once replayed past this location (`hex/hex`).
     PromoteAfter(String),
     Follow(String),
+    /// This machine's version and processor (`scannerpulse update` asks
+    /// every machine first).
+    Version,
+    /// The program on standard input, with this SHA-256, takes this
+    /// machine's program's place, and its services restart.
+    Update(String),
 }
 
 /// The command the hub asked for (SSH_ORIGINAL_COMMAND), if it is one of
@@ -1080,6 +1086,12 @@ pub fn asked(command: &str) -> Option<Asked> {
         {
             Some(Asked::Follow(host.to_string()))
         }
+        ["version"] => Some(Asked::Version),
+        ["update", sha256]
+            if sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            Some(Asked::Update(sha256.to_string()))
+        }
         _ => None,
     }
 }
@@ -1097,7 +1109,7 @@ pub fn serve() -> Result<String, String> {
     }
     match asked(&command) {
         None => Err(format!(
-            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST or switchover"
+            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST, switchover, version or update SHA256"
         )),
         Some(Asked::Status) => serde_json::to_string(&status()).map_err(|e| e.to_string()),
         Some(Asked::Stop) => stop(),
@@ -1106,6 +1118,15 @@ pub fn serve() -> Result<String, String> {
         Some(Asked::Promote) => promote().map(|()| "promoted".into()),
         Some(Asked::PromoteAfter(lsn)) => promote_after(&lsn).map(|()| "promoted".into()),
         Some(Asked::Follow(host)) => follow(&host).map(|()| format!("following {host}")),
+        Some(Asked::Version) => Ok(crate::update::running_here()),
+        Some(Asked::Update(sha256)) => {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+                .map_err(|error| format!("cannot read the program sent: {error}"))?;
+            let version = crate::update::install(Path::new(super::BINARY), &bytes, &sha256)?;
+            crate::update::restart()?;
+            Ok(format!("now runs {version}"))
+        }
     }
 }
 
@@ -1254,8 +1275,14 @@ pub fn ready_to_switch(first: &Status, second: &Status) -> Result<(usize, usize)
 
 /// Runs a node command on `node` with the hub's key.
 fn on_node(node: &str, command: &str) -> Result<String, String> {
+    ask(node, command, &[])
+}
+
+/// Runs a node command on `node` with the hub's key, `input` on its
+/// standard input.
+pub fn ask(node: &str, command: &str, input: &[u8]) -> Result<String, String> {
     let ssh = super::plan::SSH;
-    let output = Command::new("ssh")
+    let mut child = Command::new("ssh")
         .args([
             "-i",
             &format!("{ssh}/id_ed25519"),
@@ -1270,8 +1297,26 @@ fn on_node(node: &str, command: &str) -> Result<String, String> {
             &format!("root@{node}"),
             command,
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|error| format!("cannot run ssh: {error}"))?;
+    // Written while ssh reads, then closed, so the far side sees its end.
+    let mut stdin = child.stdin.take();
+    let written = stdin
+        .as_mut()
+        .map(|stdin| std::io::Write::write_all(stdin, input))
+        .transpose();
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("cannot run ssh: {error}"))?;
+    if let Err(error) = written
+        && output.status.success()
+    {
+        return Err(format!("{node}: the program could not be sent: {error}"));
+    }
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -1735,7 +1780,18 @@ mod tests {
             asked("follow db2.example.org"),
             Some(Asked::Follow("db2.example.org".into()))
         );
+        assert_eq!(asked("version"), Some(Asked::Version));
+        let sha256 = "a".repeat(64);
+        assert_eq!(
+            asked(&format!("update {sha256}")),
+            Some(Asked::Update(sha256))
+        );
         for refused in [
+            "update",
+            "update 0a1b",
+            &format!("update {}g", "a".repeat(63)),
+            &format!("update {};id", "a".repeat(64)),
+            "version now",
             "",
             "sh",
             "follow db2;rm -rf /",
@@ -2014,7 +2070,12 @@ mod tests {
             assert!(refused_with_referee(true, &asked), "{asked:?}");
             assert!(!refused_with_referee(false, &asked), "{asked:?}");
         }
-        for asked in [Asked::Status, Asked::Switchover] {
+        for asked in [
+            Asked::Status,
+            Asked::Switchover,
+            Asked::Version,
+            Asked::Update("a".repeat(64)),
+        ] {
             assert!(!refused_with_referee(true, &asked), "{asked:?}");
         }
     }
