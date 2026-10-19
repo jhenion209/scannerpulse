@@ -118,7 +118,23 @@ impl Plan {
                 .and_then(|f| f.sync_all())
                 .map_err(fail)?;
         }
-        Ok(())
+        // Its public part, for the admin page, which may not read the plan.
+        let layout = path.with_file_name("layout.json");
+        self.layout()
+            .write(&layout)
+            .map_err(|error| format!("cannot write {}: {error}", layout.display()))
+    }
+
+    /// The plan's public part: no password.
+    pub fn layout(&self) -> crate::layout::Layout {
+        crate::layout::Layout {
+            hub: self.hub.clone(),
+            nodes: self.nodes.clone(),
+            referee: self.referee.clone(),
+            second: self.second.clone(),
+            shared: self.shared.clone(),
+            install_id: self.install_id.clone(),
+        }
     }
 
     /// Changes the plan at `path` with `change`, under its lock, so that
@@ -443,5 +459,22 @@ mod tests {
         let old = r#"{"hub":"h","hub_key":"k","nodes":["a","b"],"database":"d","role":"r","password":"p","replication_password":"q"}"#;
         let old: Plan = serde_json::from_str(old).unwrap();
         assert_eq!((old.referee, old.monitor_password.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn the_plan_writes_its_public_layout_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = Plan {
+            second: Some("web2.example.org".into()),
+            shared: Some("192.0.2.50/24".into()),
+            ..refereed()
+        };
+        plan.write(&dir.path().join("plan.json")).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("layout.json")).unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        let layout = crate::layout::Layout::read(&dir.path().join("layout.json")).unwrap();
+        assert_eq!(layout.second.as_deref(), Some("web2.example.org"));
+        assert_eq!(layout.referee.as_deref(), Some("ref.example.org"));
+        assert_eq!(layout.nodes, plan.nodes);
     }
 }

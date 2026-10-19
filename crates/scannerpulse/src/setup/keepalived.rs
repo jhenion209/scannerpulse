@@ -278,6 +278,7 @@ mod tests {
             &rocky,
             std::path::Path::new("/b"),
             "web2.example.org",
+            None,
         )
         .unwrap();
         let tools = second

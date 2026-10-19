@@ -158,6 +158,15 @@ pub fn add_steps(
     steps
 }
 
+/// The settings file's database address.
+fn database_url(settings: &str) -> Option<String> {
+    crate::hostfile::parse(settings)
+        .ok()?
+        .into_iter()
+        .find(|(name, _)| name == "DATABASE_URL")
+        .map(|(_, url)| url)
+}
+
 /// The steps that make this machine the second ScannerPulse machine of
 /// `plan`, named `name`, from the first machine's `files`.
 pub fn steps(
@@ -166,7 +175,15 @@ pub fn steps(
     system: &System,
     binary: &Path,
     name: &str,
+    here: Option<&str>,
 ) -> Result<Vec<Step>, String> {
+    // `here`: this machine's settings, when it already runs a site. Joining
+    // again keeps it; a site of another install's is not taken over.
+    if let Some(here) = here
+        && database_url(here) != database_url(&files.settings)
+    {
+        return Err("this machine runs a site of its own, with another database: uninstall it first (`sudo /usr/local/bin/scannerpulse uninstall`), then join".into());
+    }
     let port = port_of(&files.settings)?;
     let (recordings, archive) = (Path::new(&plan.recordings), Path::new(&plan.archive));
     // Checked before anything is installed or written: a refusal leaves
@@ -236,6 +253,13 @@ pub fn steps(
             files.key.clone(),
             0o600,
             own.clone(),
+        ),
+        (
+            "Write the install's layout, for the admin page",
+            std::path::PathBuf::from(crate::layout::PATH),
+            serde_json::to_string_pretty(&plan.layout()).map_err(|e| e.to_string())?,
+            0o644,
+            "root:root".into(),
         ),
     ] {
         steps.push(Step {
@@ -325,6 +349,7 @@ pub(super) mod tests {
             &system,
             Path::new("/usr/local/bin/scannerpulse"),
             "web2",
+            None,
         )
         .unwrap();
         let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
@@ -424,7 +449,15 @@ pub(super) mod tests {
         assert!(dropped(&first(None)));
         assert!(!dropped(&first(Some("192.0.2.50/24"))));
         let second = |plan: &Plan| {
-            steps(plan, &files(), &system, Path::new("/b"), "web2.example.org").unwrap()
+            steps(
+                plan,
+                &files(),
+                &system,
+                Path::new("/b"),
+                "web2.example.org",
+                None,
+            )
+            .unwrap()
         };
         assert!(dropped(&second(&Plan {
             shared: None,
@@ -444,6 +477,7 @@ pub(super) mod tests {
             &system,
             Path::new("/b"),
             "web2.example.org",
+            None,
         )
         .unwrap();
         // Before any package or account: a refusal leaves nothing behind.
@@ -479,5 +513,47 @@ pub(super) mod tests {
         assert!(!is_second(&files().settings, false));
         assert!(!is_second(&second, true));
         assert!(!is_second("SCANNERPULSE_HOST=\"radio-a\"\n", false));
+    }
+
+    #[test]
+    fn a_machine_with_a_site_of_its_own_is_not_made_the_second() {
+        use crate::setup::system::detect;
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let join = |here: Option<&str>| {
+            steps(
+                &plan(),
+                &files(),
+                &system,
+                Path::new("/b"),
+                "web2.example.org",
+                here,
+            )
+        };
+        // Joining again: its settings are this install's.
+        let again = settings_for(&files().settings, "web2.example.org").unwrap();
+        assert!(join(Some(&again)).is_ok());
+        assert!(join(None).is_ok());
+        let other = "DATABASE_URL=postgres://scannerpulse@other.example.org:5432/scannerpulse\n";
+        let error = join(Some(other)).err().unwrap();
+        assert!(error.contains("a site of its own"), "{error}");
+        // It keeps the install's layout, for its admin page.
+        let all = join(None).unwrap();
+        let written = all
+            .iter()
+            .find_map(|s| match &s.action {
+                Action::Write {
+                    path,
+                    contents,
+                    mode,
+                    ..
+                } if s.title == "Write the install's layout, for the admin page" => {
+                    Some((path.clone(), contents.clone(), *mode))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(written.0, Path::new(crate::layout::PATH));
+        assert_eq!(written.2, 0o644);
+        assert!(written.1.contains("web2.example.org") && !written.1.contains("secret"));
     }
 }

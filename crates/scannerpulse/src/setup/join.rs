@@ -360,6 +360,11 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
                 &system,
                 binary,
                 plan.name(place),
+                Path::new(super::steps::WEB_UNIT)
+                    .exists()
+                    .then(|| std::fs::read_to_string(super::steps::env_path()).ok())
+                    .flatten()
+                    .as_deref(),
             )?,
             "the second ScannerPulse machine".to_string(),
         ),
