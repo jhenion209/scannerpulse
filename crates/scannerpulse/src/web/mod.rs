@@ -13,6 +13,7 @@ mod embedded;
 mod error;
 mod info;
 mod jobs;
+mod recorders;
 
 /// The jobs the admin page and `jobs list` show.
 pub use jobs::LISTED as JOBS_LISTED;
@@ -316,6 +317,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(transcription::transcribe),
         )
         .route("/api/admin/queue/retry", post(transcription::retry_failed))
+        .route(
+            "/api/admin/recorders",
+            get(recorders::list).post(recorders::add),
+        )
+        .route(
+            "/api/admin/recorders/{id}/{change}",
+            post(recorders::change),
+        )
         .route("/api/admin/data/uncorrected", get(data::uncorrected))
         .route("/api/admin/talkgroups/{id}/rename", post(data::rename))
         .route(

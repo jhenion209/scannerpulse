@@ -13,6 +13,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
+use scannerpulse::recorders;
 use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, talkgroups, web};
 use serde_json::json;
 use sqlx::Row;
@@ -45,6 +46,9 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse favorites remove NAME
        scannerpulse viewers
        scannerpulse rescan
+       scannerpulse recorder list
+       scannerpulse recorder add NAME FOLDER [--when-asked]
+       scannerpulse recorder watch|ask|pause|bring-in|remove NAME
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
@@ -128,6 +132,12 @@ settings    list, set or remove the administrator's settings; a value is JSON
 favorites   list, set or remove the named favorite lists of talkgroups
 viewers     list the open pages of every web host
 rescan      ask every running ingest to list its sources now
+recorder    the SDRTrunk folders calls are taken from: list them; add one,
+            watched (its files taken as they arrive) or --when-asked (its
+            files wait until bring-in takes those it holds then); watch,
+            ask, pause or remove one (its files stay in its folder, its calls
+            in the archive). Every file taken, and every file that cannot be
+            filed, is deleted from the folder
 talkgroups  list the talkgroups and their transcription switches;
             uncorrected: those whose files still carry an old name
 talkgroup   turn a talkgroup's transcription on or off (its new calls only;
@@ -336,6 +346,7 @@ enum Command {
     },
     Uncorrected,
     Data(Data),
+    Recorder(RecorderCommand),
     RetryFailed,
     Status,
     Traffic,
@@ -359,6 +370,21 @@ enum Data {
     Purge {
         talkgroup: String,
         confirm: Option<String>,
+    },
+}
+
+/// The recorders: the SDRTrunk folders ingest takes calls from.
+#[derive(Debug, PartialEq, Eq)]
+enum RecorderCommand {
+    List,
+    Add {
+        name: String,
+        folder: PathBuf,
+        asked: bool,
+    },
+    Change {
+        change: recorders::Change,
+        name: String,
     },
 }
 
@@ -620,6 +646,19 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["viewers"] => Some(Command::Viewers),
         ["jobs", rest @ ..] => parse_jobs(rest).map(Command::Jobs),
         ["rescan"] => Some(Command::Rescan),
+        ["recorder", "list"] => Some(Command::Recorder(RecorderCommand::List)),
+        ["recorder", "add", name, folder, rest @ ..] => {
+            let found = flags(rest, &[], &[], &["--when-asked"])?;
+            Some(Command::Recorder(RecorderCommand::Add {
+                name: name.to_string(),
+                folder: PathBuf::from(folder),
+                asked: found.contains_key("--when-asked"),
+            }))
+        }
+        ["recorder", change, name] => Some(Command::Recorder(RecorderCommand::Change {
+            change: change.parse().ok()?,
+            name: name.to_string(),
+        })),
         ["cert", "make", "--cert", cert, "--key", key, names @ ..] if !names.is_empty() => {
             Some(Command::CertMake {
                 cert: cert.to_string(),
@@ -933,6 +972,13 @@ async fn run() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Recorder(command)) => match recorder_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("recorder: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -1472,6 +1518,87 @@ async fn favorites_command(command: Favorites) -> CommandResult {
         Favorites::Remove(name) => {
             favorites::remove(&mut conn, &name).await?;
             println!("{name} is removed");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `scannerpulse recorder ...`. Root checks a new folder as the service
+/// account, since ingest runs as that account.
+async fn recorder_command(command: RecorderCommand) -> CommandResult {
+    let mut conn = connect().await?;
+    match command {
+        RecorderCommand::List => {
+            let zone = settings::load(&mut conn).await?.time_zone;
+            let since = recorders::start_of_day(chrono::Utc::now(), zone);
+            for r in recorders::list(&mut conn, since).await? {
+                let state = match (r.state, r.bringing_in) {
+                    (recorders::State::Watched, _) => "watched",
+                    (recorders::State::Paused, _) => "paused",
+                    (recorders::State::Asked, false) => "when asked",
+                    (recorders::State::Asked, true) => "when asked, bringing in",
+                };
+                let last = r.last_file.map_or("never".to_string(), |at| {
+                    at.with_timezone(&zone)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                });
+                println!(
+                    "{}\t{state}\t{}\tlast file {last}\ttoday {} filed, {} rejected, {} waiting",
+                    r.name, r.folder, r.filed_today, r.rejected_today, r.waiting
+                );
+                for host in r.hosts.iter().filter(|h| !h.ok) {
+                    println!(
+                        "  on {}: {}",
+                        host.host,
+                        host.problem.as_deref().unwrap_or("cannot be listed")
+                    );
+                }
+            }
+        }
+        RecorderCommand::Add {
+            name,
+            folder,
+            asked,
+        } => {
+            let root = rustix::process::geteuid().is_root();
+            let id = recorders::add(&mut conn, &name, &folder, asked, |folder| {
+                let real = recorders::check_here(folder)?;
+                if root {
+                    recorders::reach_as(scannerpulse::setup::steps::ACCOUNT, &real)?;
+                }
+                Ok(real)
+            })
+            .await?;
+            println!(
+                "added the recorder {name} (id {id}), {}; every running ingest picks it up within a few seconds",
+                if asked {
+                    "taken in when asked: `scannerpulse recorder bring-in NAME` takes the files it holds"
+                } else {
+                    "watched"
+                }
+            );
+        }
+        RecorderCommand::Change { change, name } => {
+            let id = recorders::find(&mut conn, &name).await?;
+            recorders::change(&mut conn, id, change).await?;
+            println!(
+                "{}",
+                match change {
+                    recorders::Change::Watch =>
+                        format!("{name} is watched: its files are taken as they arrive"),
+                    recorders::Change::Ask =>
+                        format!("{name} is taken in when asked: its files wait in its folder"),
+                    recorders::Change::Pause =>
+                        format!("{name} is paused: its files wait in its folder"),
+                    recorders::Change::BringIn => format!(
+                        "{name}'s files are brought in: those its folder holds now are filed within a few seconds"
+                    ),
+                    recorders::Change::Remove => format!(
+                        "{name} is removed: its files stay in its folder, its calls stay in the archive"
+                    ),
+                }
+            );
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -2265,7 +2392,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 mod tests {
     use super::{
         Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
-        Settings, parse, talkgroup_list,
+        RecorderCommand, Settings, parse, recorders, talkgroup_list,
     };
 
     #[test]
@@ -2777,6 +2904,39 @@ mod tests {
             Some(Command::Favorites(Favorites::Remove("Fire".into())))
         );
         assert_eq!(parse(&["viewers"]), Some(Command::Viewers));
+        assert_eq!(
+            parse(&["recorder", "list"]),
+            Some(Command::Recorder(RecorderCommand::List))
+        );
+        assert_eq!(
+            parse(&["recorder", "add", "east", "/srv/in/east"]),
+            Some(Command::Recorder(RecorderCommand::Add {
+                name: "east".into(),
+                folder: "/srv/in/east".into(),
+                asked: false
+            }))
+        );
+        assert_eq!(
+            parse(&["recorder", "add", "east", "/srv/in/east", "--when-asked"]),
+            Some(Command::Recorder(RecorderCommand::Add {
+                name: "east".into(),
+                folder: "/srv/in/east".into(),
+                asked: true
+            }))
+        );
+        assert_eq!(
+            parse(&["recorder", "bring-in", "east"]),
+            Some(Command::Recorder(RecorderCommand::Change {
+                change: recorders::Change::BringIn,
+                name: "east".into()
+            }))
+        );
+        assert_eq!(parse(&["recorder", "add", "east"]), None);
+        assert_eq!(parse(&["recorder", "delete", "east"]), None);
+        assert_eq!(
+            parse(&["recorder", "add", "east", "/srv/in/east", "--asked"]),
+            None
+        );
         assert_eq!(parse(&["viewers", "all"]), None);
     }
 

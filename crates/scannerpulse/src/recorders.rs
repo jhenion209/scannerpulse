@@ -8,7 +8,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use serde::Serialize;
 use sqlx::PgConnection;
 
@@ -102,6 +103,8 @@ impl From<sqlx::Error> for Refused {
     }
 }
 
+impl std::error::Error for Refused {}
+
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -109,6 +112,19 @@ impl fmt::Display for Refused {
             Refused::Database(error) => write!(f, "the database failed: {error}"),
         }
     }
+}
+
+/// When the day of `now` began in `zone`: the start of the counts of the
+/// day. A day whose midnight a change of clocks skips begins at the first
+/// moment it has.
+pub fn start_of_day(now: DateTime<Utc>, zone: Tz) -> DateTime<Utc> {
+    let day = now.with_timezone(&zone).date_naive();
+    (0..=3)
+        .find_map(|hour| {
+            zone.from_local_datetime(&day.and_hms_opt(hour, 0, 0)?)
+                .earliest()
+        })
+        .map_or(now, |start| start.with_timezone(&Utc))
 }
 
 /// Why `name` cannot name a recorder, or None.
@@ -186,6 +202,27 @@ pub fn check_here(folder: &Path) -> Result<PathBuf, String> {
             )
         })?;
     Ok(real)
+}
+
+/// Run by root on the command line: whether `account` (the service account,
+/// which ingest runs as) can list `folder` and write in it, or why not.
+pub fn reach_as(account: &str, folder: &Path) -> Result<(), String> {
+    let output = std::process::Command::new("runuser")
+        .args(["-u", account, "--", "sh", "-c"])
+        .arg(
+            "cd -- \"$1\" && ls >/dev/null && touch .scannerpulse-reach && rm -f .scannerpulse-reach",
+        )
+        .arg("sh")
+        .arg(folder)
+        .output()
+        .map_err(|error| format!("cannot run runuser: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "the {account} account cannot list or write {0}: let it in, as setup lets it into its own folders (setfacl -R -m u:{account}:rwX -m d:u:{account}:rwX {0}), or through the share's own rights, then add the recorder again",
+        folder.display()
+    ))
 }
 
 /// Adds a recorder, watched or taken in when asked. `check` finds the folder

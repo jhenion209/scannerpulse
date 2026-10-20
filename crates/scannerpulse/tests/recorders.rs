@@ -247,3 +247,34 @@ fn changes_are_named_as_the_command_line_and_the_page_name_them() {
     }
     assert!("delete".parse::<Change>().is_err());
 }
+
+#[test]
+fn the_counts_of_the_day_start_at_the_sites_midnight() {
+    let zone: chrono_tz::Tz = "America/Chicago".parse().unwrap();
+    let at = |text: &str| chrono::DateTime::parse_from_rfc3339(text).unwrap().to_utc();
+    assert_eq!(
+        recorders::start_of_day(at("2031-01-15T03:00:00Z"), zone),
+        at("2031-01-14T06:00:00Z"),
+        "9 p.m. the day before, in Chicago"
+    );
+    assert_eq!(
+        recorders::start_of_day(at("2031-07-15T12:00:00Z"), zone),
+        at("2031-07-15T05:00:00Z")
+    );
+    let havana: chrono_tz::Tz = "America/Havana".parse().unwrap();
+    // Havana's clocks go from midnight to 1 a.m. on 2031-03-09.
+    assert_eq!(
+        recorders::start_of_day(at("2031-03-09T12:00:00Z"), havana),
+        at("2031-03-09T05:00:00Z")
+    );
+}
+
+#[test]
+fn root_checks_a_folder_as_the_service_account_and_says_why_it_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let why = recorders::reach_as("no-such-account", dir.path()).unwrap_err();
+    assert!(
+        why.contains("no-such-account account cannot list or write") || why.contains("runuser"),
+        "{why}"
+    );
+}
