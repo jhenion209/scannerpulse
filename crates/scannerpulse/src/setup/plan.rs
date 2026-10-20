@@ -231,9 +231,17 @@ impl Plan {
             .take_while(|n| n.as_str() != mine)
             .find(|n| !self.joined.contains(n))
             .map(String::as_str);
-        // While the database moves, the second database machine also waits
-        // for the switch on the hub.
-        before.or((self.moving && place == Place::Node(1)).then_some(self.hub.as_str()))
+        // While the database moves, the second database machine waits for
+        // the switch on the hub; with a referee, the first waits for the
+        // hub's own database to join it, as the primary it copies.
+        let hub_first = self.moving
+            && match place {
+                Place::Node(0) => {
+                    self.referee.is_some() && !self.joined.iter().any(|j| j == &self.hub)
+                }
+                _ => place == Place::Node(1),
+            };
+        before.or(hub_first.then_some(self.hub.as_str()))
     }
 
     /// `waiting`, then the second ScannerPulse machine if it has not
@@ -440,6 +448,19 @@ mod tests {
         assert_eq!(moving.awaited_before(Place::Node(1)), Some("192.0.2.10"));
         moving.moving = false;
         assert_eq!(moving.awaited_before(Place::Node(1)), None);
+        // With a referee, the first database machine also waits for the
+        // ScannerPulse machine's own database to join the referee: it is the
+        // primary the first one copies.
+        let mut refereed = refereed();
+        refereed.moving = true;
+        refereed.mark_joined("ref.example.org");
+        assert_eq!(refereed.awaited_before(Place::Node(0)), Some("192.0.2.10"));
+        refereed.mark_joined("192.0.2.10");
+        assert_eq!(refereed.awaited_before(Place::Node(0)), None);
+        assert_eq!(
+            refereed.awaited_before(Place::Node(1)),
+            Some("db1.example.org")
+        );
         // Promoted by hand: the second waits for the first only.
         assert_eq!(super::tests::plan().awaited_before(Place::Node(0)), None);
         assert_eq!(

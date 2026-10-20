@@ -79,11 +79,17 @@ pub fn steps(
             unless: Some(AUTOCTL_UNIT.into()),
         },
     });
+    // The ScannerPulse machine's own database is in the formation from the
+    // start of a move until it is retired.
+    let mut clients = nodes.to_vec();
+    if plan.moving || plan.joined.contains(&plan.hub) {
+        clients.extend(hub);
+    }
     steps.push(super::node::script(
         "Let both database machines in",
         super::node::REPLACE_BLOCK,
         &[("MARK", MARK), ("HBA", &format!("{data}/pg_hba.conf"))],
-        Some(hba(nodes)),
+        Some(hba(&clients)),
     ));
     steps.extend(autoctl_service(system, &data));
     steps.push(super::node::script(
@@ -226,5 +232,43 @@ mod tests {
         );
         // No database of the install's on the referee.
         assert!(!titles.iter().any(|t| t.contains("nightly dump")));
+    }
+
+    #[test]
+    fn while_the_database_moves_the_scannerpulse_machine_reaches_the_referee_too() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let ips =
+            |list: &[&str]| -> Vec<IpAddr> { list.iter().map(|s| s.parse().unwrap()).collect() };
+        let rules = |plan: &Plan| {
+            let all = steps(
+                plan,
+                &debian,
+                Path::new("/usr/local/bin/scannerpulse"),
+                &ips(&["192.0.2.10"]),
+                &ips(&["192.0.2.21", "192.0.2.22"]),
+            );
+            match &all
+                .iter()
+                .find(|s| s.title == "Let both database machines in")
+                .unwrap()
+                .action
+            {
+                Action::Run { input, .. } => input.clone().unwrap_or_default(),
+                _ => panic!(),
+            }
+        };
+        let hub_line = "hostssl pg_auto_failover autoctl_node 192.0.2.10/32";
+        assert!(!rules(&plan()).contains(hub_line));
+        // Its own database is in the referee's formation from the move until
+        // it is retired.
+        let mut moving = Plan {
+            moving: true,
+            ..plan()
+        };
+        assert!(rules(&moving).contains(hub_line));
+        moving.moving = false;
+        moving.mark_joined("192.0.2.10");
+        assert!(rules(&moving).contains(hub_line));
     }
 }

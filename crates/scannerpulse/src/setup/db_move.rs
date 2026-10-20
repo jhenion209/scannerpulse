@@ -39,6 +39,61 @@ pub fn database_here(settings: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `database_here`, or the settings a move with a referee gives the site
+/// once this machine's database has joined it: still this database, and
+/// the first database machine beside it, so that the site follows the
+/// referee's primary.
+pub fn database_here_or_following(settings: &str) -> Result<(), String> {
+    let following = crate::hostfile::parse(settings)?
+        .into_iter()
+        .find(|(name, _)| name == crate::primary::HOSTS)
+        .is_some_and(|(_, hosts)| hosts.starts_with("localhost:5432 "));
+    if following {
+        let without = crate::hostfile::changed(settings, crate::primary::HOSTS, None)?;
+        return database_here(&without);
+    }
+    database_here(settings)
+}
+
+/// With a referee, once this machine's database has joined it: the site
+/// names it and the first database machine (`node0`), its password file
+/// fits both, and the services restart to read them, so that a promotion
+/// by the referee before the switch moves the site too.
+pub fn follow_steps(text: &str, password: &str, node0: &str) -> Result<Vec<Step>, String> {
+    let node0 = if node0.contains(':') {
+        format!("[{node0}]:{PORT_PG}")
+    } else {
+        format!("{node0}:{PORT_PG}")
+    };
+    let settings = crate::hostfile::changed(
+        text,
+        crate::primary::HOSTS,
+        Some(&format!("localhost:{PORT_PG} {node0}")),
+    )?;
+    Ok(vec![
+        super::change::settings_with(&settings, &[])?,
+        Step {
+            title: "Write the database's password file".into(),
+            action: Action::Write {
+                path: super::steps::pgpass_path(),
+                contents: moved_pgpass(password),
+                mode: 0o600,
+                owner: format!("{ACCOUNT}:{ACCOUNT}"),
+            },
+        },
+        run(
+            "Restart the services, to follow the referee's primary",
+            "systemctl",
+            &[
+                "try-restart",
+                "scannerpulse-web.service",
+                "scannerpulse-ingest.service",
+                "scannerpulse-agent.service",
+            ],
+        ),
+    ])
+}
+
 /// The site's password, from its password file: the password of the line
 /// for the database and its role, as setup writes it (the rest of the line).
 pub fn app_password(pgpass: &str) -> Option<String> {
@@ -203,6 +258,63 @@ fn switch_roles(
     Ok(())
 }
 
+/// Whether the referee's view (`pg_autoctl show state --json`) has this
+/// machine (`hub`) as the primary and `node0` as its secondary, each where
+/// the referee wants it: right after a join it is still settling, and it
+/// refuses a switchover then.
+fn settled(state: &str, hub: &str, node0: &str) -> Result<(), String> {
+    let nodes: Vec<serde_json::Value> =
+        serde_json::from_str(state).map_err(|error| format!("the referee's view: {error}"))?;
+    let at = |name: &str| {
+        nodes.iter().find(|n| n["nodename"] == name).map(|n| {
+            (
+                n["current_group_state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                n["assigned_group_state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+    };
+    let want = |name: &str, role: &str| match at(name) {
+        Some((now, goal)) if now == role && goal == role => Ok(()),
+        Some((now, goal)) => Err(format!("{name} is {now} (going to {goal})")),
+        None => Err(format!("{name} is not in the referee's formation")),
+    };
+    want(hub, "primary")
+        .and_then(|()| want(node0, "secondary"))
+        .map_err(|why| format!("the referee is still settling: {why}; try again in a few seconds"))
+}
+
+/// The switch with a referee: it makes `node0`, this machine's standby,
+/// the primary, and this machine's database its standby (pg_auto_failover
+/// waits for the standby to have everything first). Nothing else is
+/// changed when it refuses.
+fn by_the_referee(
+    referee: &str,
+    node0: &str,
+    ask: impl Fn(&str, &str) -> Result<String, String>,
+    say: impl Fn(&str),
+) -> Result<(), String> {
+    say(&format!(
+        "Asking the referee, {referee}, to make {node0} the primary"
+    ));
+    let switched = ask(referee, "switchover");
+    let now = node::as_status(ask(node0, "status"));
+    match switched {
+        Ok(_) if now.answers && !now.standby => Ok(()),
+        Err(error) if now.answers && now.standby => Err(format!(
+            "the referee did not switch the roles ({error}): this machine's database is still the primary, and nothing moved"
+        )),
+        Ok(_) | Err(_) => Err(format!(
+            "{node0} does not answer as the primary yet: once it does, run `sudo /usr/local/bin/scannerpulse db move --switch` again to finish"
+        )),
+    }
+}
+
 /// Debian's file that says whether PostgreSQL 17's cluster starts at boot.
 const START_CONF: &str = "/etc/postgresql/17/main/start.conf";
 
@@ -223,29 +335,150 @@ pub fn boot(system: &System, start: bool, start_conf: &Path) -> Result<(), Strin
 /// after the switch, so that they reach the database machines too.
 const RESTARTED: [&str; 1] = ["scannerpulse-agent.service"];
 
-/// The two database machines and this machine (`hub`) are each a machine
-/// of their own, by name or by the addresses their names give, and each
-/// name is a plain one.
+/// The two database machines, this machine (`hub`) and the referee, if
+/// any, are each a machine of their own, by name or by the addresses their
+/// names give, and each name is a plain one.
 fn machines_apart(
     nodes: &[String; 2],
     hub: &str,
+    referee: Option<&str>,
     resolve: impl Fn(&str) -> Vec<IpAddr>,
 ) -> Result<(), String> {
-    for name in nodes.iter().map(String::as_str).chain([hub]) {
+    for name in nodes.iter().map(String::as_str).chain([hub]).chain(referee) {
         if !super::join::plain(name) {
             return Err(format!(
                 "{name:?} is not a name or an address: letters, digits, dots, dashes and colons"
             ));
         }
     }
-    super::ask::distinct_machines(
+    let mut machines = vec![
+        ("database machine 1", nodes[0].as_str()),
+        ("database machine 2", nodes[1].as_str()),
+        ("this machine", hub),
+    ];
+    machines.extend(referee.map(|referee| ("the referee", referee)));
+    super::ask::distinct_machines(&machines, resolve)
+}
+
+/// Whether a switch was cut short after the promotion: the copy answers as
+/// the primary, and this machine's PostgreSQL is stopped (by hand) or
+/// follows it (with a referee). Only the rest is left.
+fn finishing(here: &node::Status, there: &node::Status) -> bool {
+    there.answers && !there.standby && (!here.answers || here.standby)
+}
+
+/// With a referee: this machine's own database joins its formation as the
+/// primary, under pg_autoctl, so that the first database machine joins as
+/// its standby and the referee can switch the two. pg_autoctl takes the
+/// data directory as it is (on Debian it moves the cluster's settings into
+/// it), and runs PostgreSQL from then on.
+pub fn adopt_steps(plan: &Plan, system: &System) -> Vec<Step> {
+    let data = system.postgres_data();
+    let monitor = node::monitor_uri(plan.referee.as_deref().unwrap_or_default());
+    let mut steps = node::install(system, true);
+    steps.push(node::pgpass_step(
+        "Write the passwords for the copy and the referee, for the postgres account",
+        system,
+        &["pgautofailover_replicator", "autoctl_node"],
+        format!(
+            "*:*:*:pgautofailover_replicator:{}\n*:*:pg_auto_failover:autoctl_node:{}\n",
+            plan.replication_password, plan.monitor_password
+        ),
+    ));
+    steps.push(super::steps::firewall(true, PORT_PG));
+    steps.push(node::script(
+        "Stop this machine's PostgreSQL, for pg_autoctl to run it",
+        "[ -f \"$UNIT\" ] && exit 0\nsystemctl stop \"$SERVICE\" && systemctl disable \"$SERVICE\" 2>/dev/null; true",
         &[
-            ("database machine 1", &nodes[0]),
-            ("database machine 2", &nodes[1]),
-            ("this machine", hub),
+            ("UNIT", node::AUTOCTL_UNIT),
+            ("SERVICE", system.postgres_cluster()),
         ],
-        resolve,
-    )
+        None,
+    ));
+    steps.push(Step {
+        title: "Register this machine's database with the referee, as the primary (writes pause for a few seconds)".into(),
+        action: Action::Run {
+            program: "runuser".into(),
+            args: node::autoctl(
+                system,
+                &[
+                    "create",
+                    "postgres",
+                    "--pgdata",
+                    data,
+                    "--pgport",
+                    "5432",
+                    "--hostname",
+                    &plan.hub,
+                    "--name",
+                    &plan.hub,
+                    "--dbname",
+                    "postgres",
+                    "--monitor",
+                    &monitor,
+                    "--auth",
+                    "scram-sha-256",
+                    "--ssl-self-signed",
+                    "--replication-quorum",
+                    "true",
+                    "--candidate-priority",
+                    "10",
+                ],
+            ),
+            input: None,
+            env: Vec::new(),
+            unless: Some(node::AUTOCTL_UNIT.into()),
+        },
+    });
+    steps.extend(node::autoctl_service(system, data));
+    steps.push(node::script(
+        "Give the copying role its password",
+        "for i in $(seq 120); do runuser -u postgres -- psql -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\nrunuser -u postgres -- psql -q -v ON_ERROR_STOP=1",
+        &[],
+        Some(format!(
+            "{}ALTER ROLE pgautofailover_replicator PASSWORD '{}';\n",
+            super::steps::QUIET_SQL,
+            plan.replication_password.replace('\'', "''")
+        )),
+    ));
+    steps
+}
+
+/// With a referee: the old database, a standby in the formation since the
+/// switch, leaves it and is removed; pg_autoctl stops here for good.
+pub fn retire_refereed_steps(system: &System) -> Vec<Step> {
+    vec![
+        Step {
+            title: "Take the old database out of the referee's formation, and remove it".into(),
+            action: Action::Run {
+                program: "runuser".into(),
+                args: node::autoctl(
+                    system,
+                    &[
+                        "drop",
+                        "node",
+                        "--destroy",
+                        "--pgdata",
+                        system.postgres_data(),
+                    ],
+                ),
+                input: None,
+                env: Vec::new(),
+                unless: None,
+            },
+        },
+        run(
+            "Stop pg_autoctl here, for good",
+            "systemctl",
+            &["disable", "--now", "pgautofailover"],
+        ),
+        run(
+            "Remove pg_autoctl's service",
+            "rm",
+            &["-f", node::AUTOCTL_UNIT],
+        ),
+        run("Read the units again", "systemctl", &["daemon-reload"]),
+    ]
 }
 
 /// The old database's backups stopped: the site no longer uses it.
@@ -327,19 +560,21 @@ fn context() -> super::apply::Context {
 /// this machine's address as they reach it), and this machine's PostgreSQL
 /// opened to them. Run again, it says how far the first one's copy is.
 pub async fn begin(
-    conn: &mut sqlx::PgConnection,
+    conn: Option<&mut sqlx::PgConnection>,
     nodes: [String; 2],
     hub: String,
+    referee: Option<String>,
 ) -> Result<String, String> {
     let settings = read_settings()?;
     let path = Path::new(super::plan::PLAN);
     if super::second::is_second(&settings, path.exists()) {
         return Err("run this on the install's first ScannerPulse machine".into());
     }
-    database_here(&settings)?;
-    machines_apart(&nodes, &hub, super::plan::resolve)?;
-    if let Ok(kept) = Plan::read(path)
-        && !(kept.moving && kept.nodes == nodes)
+    database_here_or_following(&settings)?;
+    machines_apart(&nodes, &hub, referee.as_deref(), super::plan::resolve)?;
+    let kept = Plan::read(path).ok();
+    if let Some(kept) = &kept
+        && !(kept.moving && kept.nodes == nodes && kept.referee == referee)
     {
         return Err(if kept.moving {
             format!(
@@ -362,15 +597,28 @@ pub async fn begin(
         .map_err(|error| format!("{}: {error}", super::steps::pgpass_path().display()))?;
     let password =
         app_password(&pgpass).ok_or("the site's password file has no line for its database")?;
-    let archive = super::archive_move::current(conn)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or("the database names no archive")?;
-    let recordings: Option<String> =
-        sqlx::query_scalar("SELECT path FROM sources ORDER BY id LIMIT 1")
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(|error| error.to_string())?;
+    // The folders, from the database the first time; run again (the
+    // database may be restarting under pg_autoctl), from the plan.
+    let (archive, recordings) = match (kept, conn) {
+        (Some(kept), _) => (kept.archive, kept.recordings),
+        (None, None) => {
+            return Err("the database must answer, to read the site's folders".into());
+        }
+        (None, Some(conn)) => {
+            let archive = super::archive_move::current(conn)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("the database names no archive")?
+                .display()
+                .to_string();
+            let recordings: Option<String> =
+                sqlx::query_scalar("SELECT path FROM sources ORDER BY id LIMIT 1")
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            (archive, recordings.unwrap_or_default())
+        }
+    };
     let key = Path::new(super::plan::SSH).join("id_ed25519");
     if !key.exists() {
         let made = std::process::Command::new("/bin/sh")
@@ -394,21 +642,36 @@ pub async fn begin(
         role: ACCOUNT.into(),
         password,
         replication_password: String::new(),
-        referee: None,
+        referee: referee.clone(),
         monitor_password: String::new(),
         second: None,
         shared: None,
         install_id: String::new(),
-        archive: archive.display().to_string(),
-        recordings: recordings.unwrap_or_default(),
+        archive,
+        recordings,
         ready: false,
         joined: Vec::new(),
         moving: true,
     })?;
-    let plan = Plan::read(path)?;
-    let steps = hub_steps(&plan, &this_system()?, Path::new(super::BINARY), &node_ips);
-    super::apply::apply(&steps, &context(), true).await?;
+    let mut plan = Plan::read(path)?;
     let [first, second] = &nodes;
+    if let Some(referee) = &plan.referee {
+        if !plan.joined.contains(referee) {
+            return Ok(format!(
+                "The database moves to {first} (the primary) and {second} (its standby), with {referee} as their referee.\nOn {referee}: run the install line, then `sudo /usr/local/bin/scannerpulse setup`, choose Advanced, then \"join an existing install\", and give this machine's address ({hub}). Then run this command again: this machine's database joins the referee."
+            ));
+        }
+        if !plan.joined.contains(&plan.hub) {
+            let mut steps = adopt_steps(&plan, &this_system()?);
+            steps.extend(follow_steps(&settings, &plan.password, first)?);
+            super::apply::apply(&steps, &context(), true).await?;
+            Plan::update(path, |plan| plan.mark_joined(&hub))?;
+            plan = Plan::read(path)?;
+        }
+    } else {
+        let steps = hub_steps(&plan, &this_system()?, Path::new(super::BINARY), &node_ips);
+        super::apply::apply(&steps, &context(), true).await?;
+    }
     let progress = if plan.joined.contains(first) {
         let here = node::status();
         if here.streaming > 0 {
@@ -493,9 +756,24 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
     let _lock = crate::update::exclusive(Path::new(crate::update::LOCK))?;
     let here = node::status();
     let there = node::as_status(node::ask(&node0, "status", &[]));
-    // A switch cut short after the promotion: this machine's PostgreSQL is
-    // stopped and the copy is the primary; only the rest is left.
-    let finishing = !here.answers && there.answers && !there.standby;
+    let finishing = finishing(&here, &there);
+    if !finishing && plan.referee.is_some() {
+        let output = std::process::Command::new("runuser")
+            .args(node::autoctl(
+                &system,
+                &[
+                    "show",
+                    "state",
+                    "--json",
+                    "--pgdata",
+                    system.postgres_data(),
+                ],
+            ))
+            .current_dir("/")
+            .output()
+            .map_err(|error| format!("cannot run pg_autoctl: {error}"))?;
+        settled(&String::from_utf8_lossy(&output.stdout), &plan.hub, &node0)?;
+    }
     if !finishing {
         if !here.answers || here.standby {
             return Err("this machine's PostgreSQL must answer as the primary".into());
@@ -546,7 +824,16 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
         "scannerpulse-ingest.service",
     ])?;
     let start_conf = Path::new(START_CONF);
-    if finishing {
+    if let Some(referee) = &plan.referee {
+        if !finishing {
+            by_the_referee(
+                referee,
+                &node0,
+                |node, command| node::ask(node, command, &[]),
+                &say,
+            )?;
+        }
+    } else if finishing {
         boot(&system, false, start_conf)?;
     } else {
         switch_roles(
@@ -583,6 +870,31 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
         },
     ];
     steps.extend(hold_steps());
+    if plan.referee.is_some() {
+        // A standby now, kept current by pg_autoctl until it is retired:
+        // never to be promoted again.
+        steps.push(Step {
+            title: "Keep the referee from ever making this machine's database the primary again"
+                .into(),
+            action: Action::Run {
+                program: "runuser".into(),
+                args: node::autoctl(
+                    &system,
+                    &[
+                        "set",
+                        "node",
+                        "candidate-priority",
+                        "0",
+                        "--pgdata",
+                        system.postgres_data(),
+                    ],
+                ),
+                input: None,
+                env: Vec::new(),
+                unless: None,
+            },
+        });
+    }
     super::apply::apply(&steps, &context(), true)
         .await
         .map_err(finish)?;
@@ -599,8 +911,13 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
     let kept = backups
         .map(|folder| format!(", and its backups stay in {folder}"))
         .unwrap_or_default();
+    let old = if plan.referee.is_some() {
+        format!("follows {node0} as a standby the referee never promotes")
+    } else {
+        "is stopped and kept as it was".to_string()
+    };
     Ok(format!(
-        "The database is on {node0} now, and the site uses it. Next, {second} joins the same way {node0} did, as its standby. This machine's old database is stopped and kept as it was{kept}. Once you are satisfied, `sudo /usr/local/bin/scannerpulse db move --retire` removes it.",
+        "The database is on {node0} now, and the site uses it. Next, {second} joins the same way {node0} did, as its standby. This machine's old database {old}{kept}. Once you are satisfied, `sudo /usr/local/bin/scannerpulse db move --retire` removes it.",
         second = plan.nodes[1]
     ))
 }
@@ -631,7 +948,16 @@ pub async fn retire(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     )) {
         return Ok("Nothing was removed.".into());
     }
-    super::apply::apply(&retire_steps(&system), &context(), true).await?;
+    if plan.referee.is_some() {
+        super::apply::apply(&retire_refereed_steps(&system), &context(), true).await?;
+        // The referee no longer lets it in when it is set up again.
+        let hub = plan.hub.clone();
+        Plan::update(Path::new(super::plan::PLAN), |plan| {
+            plan.joined.retain(|joined| *joined != hub)
+        })?;
+    } else {
+        super::apply::apply(&retire_steps(&system), &context(), true).await?;
+    }
     Ok("This machine's old database is removed. Its old backups stay in the backups' folder until you remove them.".into())
 }
 
@@ -841,20 +1167,204 @@ mod tests {
             (pair("DB1.example.org", "db1.example.org"), "192.0.2.10"),
             (pair("db1.example.org", "db2.example.org"), "192.0.2.21"),
         ] {
-            let error = machines_apart(&nodes, hub, dns).unwrap_err();
+            let error = machines_apart(&nodes, hub, None, dns).unwrap_err();
             assert!(error.contains("same machine"), "{error}");
         }
-        let error =
-            machines_apart(&pair("db1.example.org", "db2.example.org"), "a b", dns).unwrap_err();
+        let error = machines_apart(
+            &pair("db1.example.org", "db2.example.org"),
+            "a b",
+            None,
+            dns,
+        )
+        .unwrap_err();
         assert!(error.contains("not a name or an address"), "{error}");
         assert_eq!(
             machines_apart(
                 &pair("db1.example.org", "db2.example.org"),
                 "192.0.2.10",
+                None,
                 dns
             ),
             Ok(())
         );
+        // The referee is a machine of its own too.
+        let error = machines_apart(
+            &pair("db1.example.org", "db2.example.org"),
+            "192.0.2.10",
+            Some("192.0.2.21"),
+            dns,
+        )
+        .unwrap_err();
+        assert!(error.contains("the referee"), "{error}");
+    }
+
+    #[test]
+    fn with_a_referee_this_machines_database_joins_it_as_the_primary() {
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let plan = Plan {
+            referee: Some("ref.example.org".into()),
+            monitor_password: "referee-secret-3".into(),
+            ..plan()
+        };
+        let all = adopt_steps(&plan, &debian);
+        let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
+        let at = |title: &str| {
+            titles
+                .iter()
+                .position(|t| *t == title)
+                .unwrap_or_else(|| panic!("{title}: {titles:?}"))
+        };
+        let Action::Run { args, .. } =
+            &all[at("Install PostgreSQL 17, pg_auto_failover and SSH")].action
+        else {
+            panic!()
+        };
+        assert!(args.contains(&"postgresql-17-auto-failover".to_string()));
+        let join = "Register this machine's database with the referee, as the primary (writes pause for a few seconds)";
+        let Action::Run { args, unless, .. } = &all[at(join)].action else {
+            panic!()
+        };
+        let args = args.join(" ");
+        for part in [
+            "create postgres",
+            "--pgdata /var/lib/postgresql/17/main",
+            "--hostname 192.0.2.10",
+            "--name 192.0.2.10",
+            "--auth scram-sha-256",
+            "--ssl-self-signed",
+            // Not 0: the first machine of a formation must be able to be
+            // the primary.
+            "--candidate-priority 10",
+            "pg_auto_failover?sslmode=require",
+        ] {
+            assert!(args.contains(part), "{part}: {args}");
+        }
+        assert_eq!(
+            unless.as_deref(),
+            Some(Path::new("/etc/systemd/system/pgautofailover.service"))
+        );
+        assert!(at("Stop this machine's PostgreSQL, for pg_autoctl to run it") < at(join));
+        assert!(at(join) < at("Start pg_autoctl, now and at boot"));
+        let copy = "Give the copying role its password";
+        assert!(at("Start pg_autoctl, now and at boot") < at(copy));
+        let Action::Run { input, .. } = &all[at(copy)].action else {
+            panic!()
+        };
+        assert!(
+            input
+                .as_deref()
+                .unwrap_or_default()
+                .contains("pgautofailover_replicator PASSWORD 'copy-secret-2'")
+        );
+        assert!(titles.contains(&"Open port 5432 in the firewall, if firewalld runs"));
+    }
+
+    #[test]
+    fn with_a_referee_the_site_follows_whichever_is_the_primary() {
+        // The referee may promote the copy by itself before the switch (a
+        // stalled ScannerPulse machine): the site must follow it.
+        let all = follow_steps(HERE, "s3cret", "db1.example.org").unwrap();
+        let Action::Write { contents, .. } = &all[0].action else {
+            panic!()
+        };
+        assert!(
+            contents
+                .contains("SCANNERPULSE_DATABASE_HOSTS=\"localhost:5432 db1.example.org:5432\""),
+            "{contents}"
+        );
+        assert!(
+            contents
+                .contains("DATABASE_URL=\"postgres://scannerpulse@localhost:5432/scannerpulse\""),
+            "{contents}"
+        );
+        assert!(contents.contains("SCANNERPULSE_BACKUPS"), "{contents}");
+        let Action::Write { contents, .. } = &all[1].action else {
+            panic!()
+        };
+        assert_eq!(contents, "*:5432:scannerpulse:scannerpulse:s3cret\n");
+        let Action::Run { args, .. } = &all[2].action else {
+            panic!()
+        };
+        assert_eq!(
+            args.join(" "),
+            "try-restart scannerpulse-web.service scannerpulse-ingest.service scannerpulse-agent.service"
+        );
+        // Run again, the settings name the database machines as the move
+        // left them: still this machine's own database.
+        let following = crate::hostfile::changed(
+            HERE,
+            crate::primary::HOSTS,
+            Some("localhost:5432 db1.example.org:5432"),
+        )
+        .unwrap();
+        assert_eq!(database_here_or_following(&following), Ok(()));
+    }
+
+    #[test]
+    fn with_a_referee_the_switch_waits_for_it_to_settle() {
+        let state = |hub: &str, hub_goal: &str, db1: &str| {
+            format!(
+                r#"[{{"nodename":"192.0.2.10","current_group_state":"{hub}","assigned_group_state":"{hub_goal}"}},{{"nodename":"db1.example.org","current_group_state":"{db1}","assigned_group_state":"{db1}"}}]"#
+            )
+        };
+        assert_eq!(
+            settled(
+                &state("primary", "primary", "secondary"),
+                "192.0.2.10",
+                "db1.example.org"
+            ),
+            Ok(())
+        );
+        for (hub, goal, db1) in [
+            ("wait_primary", "primary", "secondary"),
+            ("primary", "primary", "catchingup"),
+            ("primary", "draining", "secondary"),
+        ] {
+            let error =
+                settled(&state(hub, goal, db1), "192.0.2.10", "db1.example.org").unwrap_err();
+            assert!(error.contains("try again in a few seconds"), "{error}");
+        }
+        assert!(settled("not json", "192.0.2.10", "db1.example.org").is_err());
+    }
+
+    #[test]
+    fn with_a_referee_the_old_database_leaves_its_formation() {
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let all = retire_refereed_steps(&debian);
+        let titles: Vec<&str> = all.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Take the old database out of the referee's formation, and remove it",
+                "Stop pg_autoctl here, for good",
+                "Remove pg_autoctl's service",
+                "Read the units again",
+            ]
+        );
+        let Action::Run { args, .. } = &all[0].action else {
+            panic!()
+        };
+        let args = args.join(" ");
+        assert!(
+            args.contains("drop node --destroy --pgdata /var/lib/postgresql/17/main"),
+            "{args}"
+        );
+    }
+
+    #[test]
+    fn a_switch_cut_short_is_finished_once_the_copy_is_the_primary() {
+        let status = |answers, standby| node::Status {
+            answers,
+            standby,
+            streaming: 0,
+            behind: 0,
+        };
+        // By hand, this machine stopped; with a referee, it follows the copy.
+        assert!(finishing(&status(false, false), &status(true, false)));
+        assert!(finishing(&status(true, true), &status(true, false)));
+        assert!(!finishing(&status(true, false), &status(true, true)));
+        assert!(!finishing(&status(false, false), &status(true, true)));
+        assert!(!finishing(&status(true, true), &status(false, false)));
     }
 
     #[test]

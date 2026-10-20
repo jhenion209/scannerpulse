@@ -369,13 +369,7 @@ fn by_hand(
         // which the copy brought from the ScannerPulse machine: setup's own
         // go in again, read at the restart that follows.
         steps.push(rules);
-        // Its WAL went to its own pgBackRest, which this machine has not.
-        steps.push(script(
-            "Leave the ScannerPulse machine's backups behind",
-            "runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 && systemctl restart \"$SERVICE\"",
-            &[("SERVICE", system.postgres_cluster())],
-            Some("ALTER SYSTEM RESET archive_mode;\nALTER SYSTEM RESET archive_command;\n".into()),
-        ));
+        steps.push(leave_backups_behind(system.postgres_cluster()));
     } else if index == 0 {
         // A standby since a change of roles whose copy was cut short has no
         // cluster: it copies the other machine, the primary, again.
@@ -424,6 +418,8 @@ pub fn autoctl_data(system: &System) -> String {
 /// `pg_autoctl ARGS` as the postgres account, with PostgreSQL 17's programs
 /// first on its path.
 pub(super) fn autoctl(system: &System, args: &[&str]) -> Vec<String> {
+    // Not the site's own password file, which the ScannerPulse machine's
+    // settings name: libpq reads postgres's.
     let mut all: Vec<String> = [
         "-u",
         "postgres",
@@ -431,6 +427,8 @@ pub(super) fn autoctl(system: &System, args: &[&str]) -> Vec<String> {
         "env",
         "-u",
         "XDG_RUNTIME_DIR",
+        "-u",
+        "PGPASSFILE",
         "LANG=C.UTF-8",
         "LC_ALL=C.UTF-8",
     ]
@@ -587,7 +585,22 @@ fn by_referee(
             None,
         ));
     }
+    if index == 0 && plan.moving {
+        steps.push(leave_backups_behind("pgautofailover"));
+    }
     steps
+}
+
+/// The first machine of a move drops the WAL archiving its copy brought
+/// from the ScannerPulse machine (to that machine's pgBackRest), before it
+/// can become the primary; `service` restarts its PostgreSQL.
+fn leave_backups_behind(service: &str) -> Step {
+    script(
+        "Leave the ScannerPulse machine's backups behind",
+        "runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 && systemctl restart \"$SERVICE\"",
+        &[("SERVICE", service)],
+        Some("ALTER SYSTEM RESET archive_mode;\nALTER SYSTEM RESET archive_command;\n".into()),
+    )
 }
 
 /// A machine registered before (its pg_autoctl service written) that the
@@ -631,7 +644,7 @@ fn hub_hba(hub: &[IpAddr]) -> String {
 
 /// postgres's password file with `lines` for `roles`: the file's lines for
 /// other roles stay; the file is postgres's alone.
-fn pgpass_step(title: &str, system: &System, roles: &[&str], lines: String) -> Step {
+pub(super) fn pgpass_step(title: &str, system: &System, roles: &[&str], lines: String) -> Step {
     let path = Path::new(system.postgres_home())
         .join(".pgpass")
         .display()
@@ -1677,6 +1690,65 @@ mod tests {
             "{:?}",
             all.iter().map(|s| &s.title).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn with_a_referee_the_first_machine_of_a_move_leaves_the_hubs_backups_behind() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let moving = Plan {
+            moving: true,
+            ..refereed()
+        };
+        let all = steps(
+            &moving,
+            0,
+            &debian,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        let at = |title: &str| {
+            all.iter()
+                .position(|s| s.title == title)
+                .unwrap_or_else(|| panic!("{title}"))
+        };
+        let leave = at("Leave the ScannerPulse machine's backups behind");
+        assert!(leave > at("Start pg_autoctl, now and at boot"));
+        let Action::Run { env, input, .. } = &all[leave].action else {
+            panic!()
+        };
+        assert!(env.contains(&("SERVICE".to_string(), "pgautofailover".to_string())));
+        assert!(
+            input
+                .as_deref()
+                .unwrap_or_default()
+                .contains("ALTER SYSTEM RESET archive_command")
+        );
+        // Not on a machine of an install that does not move.
+        let all = steps(
+            &refereed(),
+            0,
+            &debian,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        assert!(
+            !all.iter()
+                .any(|s| s.title.starts_with("Leave the ScannerPulse"))
+        );
+    }
+
+    #[test]
+    fn pg_autoctl_finds_postgress_own_password_file() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        // On the ScannerPulse machine the settings name the site's own
+        // password file (PGPASSFILE), which is not postgres's.
+        let args = autoctl(&debian, &["show", "state"]);
+        let at = args.iter().position(|a| a == "PGPASSFILE").unwrap();
+        assert_eq!(args[at - 1], "-u");
     }
 
     #[test]

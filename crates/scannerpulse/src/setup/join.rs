@@ -424,7 +424,11 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
 /// join, or the switch that moves the database to the first database
 /// machine.
 fn waiting_text(plan: &Plan, first: &str) -> String {
-    if plan.moving && first == plan.hub {
+    if plan.moving && first == plan.hub && !plan.joined.contains(&plan.nodes[0]) {
+        format!(
+            "Waiting for {first}'s database to join the referee: run its `sudo /usr/local/bin/scannerpulse db move ...` command again there."
+        )
+    } else if plan.moving && first == plan.hub {
         format!(
             "Waiting for the database to move to {}: run `sudo /usr/local/bin/scannerpulse db move --switch` on {first}.",
             plan.nodes[0]
@@ -517,6 +521,12 @@ mod tests {
             waiting_text(&plan, "db1.example.org"),
             "Waiting for db1.example.org to join first."
         );
+        assert_eq!(
+            waiting_text(&plan, "192.0.2.10"),
+            "Waiting for 192.0.2.10's database to join the referee: run its `sudo /usr/local/bin/scannerpulse db move ...` command again there."
+        );
+        let mut plan = plan;
+        plan.mark_joined("db1.example.org");
         assert_eq!(
             waiting_text(&plan, "192.0.2.10"),
             "Waiting for the database to move to db1.example.org: run `sudo /usr/local/bin/scannerpulse db move --switch` on 192.0.2.10."

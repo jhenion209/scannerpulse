@@ -247,7 +247,11 @@ enum DbCommand {
 /// Moving the database from this machine to two database machines.
 #[derive(Debug, PartialEq, Eq)]
 enum DbMove {
-    Begin { nodes: [String; 2], hub: String },
+    Begin {
+        nodes: [String; 2],
+        hub: String,
+        referee: Option<String>,
+    },
     Switch,
     Retire,
 }
@@ -660,6 +664,21 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db", "move", first, second, "--hub", hub] => Some(Command::DbMove(DbMove::Begin {
             nodes: [first.to_string(), second.to_string()],
             hub: hub.to_string(),
+            referee: None,
+        })),
+        [
+            "db",
+            "move",
+            first,
+            second,
+            "--hub",
+            hub,
+            "--referee",
+            referee,
+        ] => Some(Command::DbMove(DbMove::Begin {
+            nodes: [first.to_string(), second.to_string()],
+            hub: hub.to_string(),
+            referee: Some(referee.to_string()),
         })),
         ["archive", "move", new] => Some(Command::ArchiveMove {
             new: PathBuf::from(new),
@@ -1005,12 +1024,17 @@ async fn run() -> ExitCode {
             let result = match as_root() {
                 Err(error) => Err(error),
                 Ok(()) => match command {
-                    DbMove::Begin { nodes, hub } => match connect().await {
-                        Ok(mut conn) => {
-                            scannerpulse::setup::db_move::begin(&mut conn, nodes, hub).await
-                        }
-                        Err(error) => Err(error.to_string()),
-                    },
+                    DbMove::Begin {
+                        nodes,
+                        hub,
+                        referee,
+                    } => {
+                        // Run again, the move reads its plan: the database
+                        // may be restarting under pg_autoctl.
+                        let mut conn = connect().await.ok();
+                        scannerpulse::setup::db_move::begin(conn.as_mut(), nodes, hub, referee)
+                            .await
+                    }
                     // A terminal gone mid-switch must not panic it.
                     DbMove::Switch => {
                         scannerpulse::setup::db_move::switch(|line| {
@@ -2370,7 +2394,8 @@ mod tests {
             parse(&["db", "move", "db1", "db2", "--hub", "192.0.2.10"]),
             Some(Command::DbMove(DbMove::Begin {
                 nodes: ["db1".into(), "db2".into()],
-                hub: "192.0.2.10".into()
+                hub: "192.0.2.10".into(),
+                referee: None,
             }))
         );
         assert_eq!(
@@ -2382,6 +2407,23 @@ mod tests {
             Some(Command::DbMove(DbMove::Retire))
         );
         assert_eq!(parse(&["db", "move", "db1", "db2"]), None);
+        assert_eq!(
+            parse(&[
+                "db",
+                "move",
+                "db1",
+                "db2",
+                "--hub",
+                "192.0.2.10",
+                "--referee",
+                "ref"
+            ]),
+            Some(Command::DbMove(DbMove::Begin {
+                nodes: ["db1".into(), "db2".into()],
+                hub: "192.0.2.10".into(),
+                referee: Some("ref".into()),
+            }))
+        );
     }
 
     #[test]
