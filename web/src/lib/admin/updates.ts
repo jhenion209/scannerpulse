@@ -1,10 +1,25 @@
 // The admin page's updates and the root helper (`/api/admin/updates`): the
 // newest release, the helper on the first ScannerPulse machine, and the
-// latest request an admin made of it (an update or a switchover).
+// latest request of each kind an admin made of it (an update, a switchover,
+// or a step of the conversion to high availability).
+
+/** What an admin may ask the root helper for, and the request in words. */
+export const HELPER_KINDS = {
+  update: 'The update',
+  switchover: 'The switchover',
+  archive_check: 'The check of the copy',
+  archive_switch: "The archive's switch",
+  db_move: "The database's move",
+  db_switch: "The database's switch",
+  db_retire: "The old database's removal",
+  second: "The second machine's addition",
+} as const;
+
+export type HelperKind = keyof typeof HELPER_KINDS;
 
 export interface HelperRequest {
   id: number;
-  kind: 'update' | 'switchover';
+  kind: HelperKind;
   requested_by: string;
   requested_at: string;
   started_at: string | null;
@@ -25,7 +40,7 @@ export interface UpdatesInfo {
   check: boolean;
   helper: { host: string; version: string; seen_seconds_ago: number; up: boolean } | null;
   /** The newest request of each kind. */
-  requests: { update: HelperRequest | null; switchover: HelperRequest | null };
+  requests: Partial<Record<HelperKind, HelperRequest | null>>;
   /** A request of either kind waits or runs: another must wait. */
   open: boolean;
 }
@@ -65,12 +80,15 @@ export function helperText(info: UpdatesInfo): { text: string; ok: boolean } {
   return { text: `The root helper runs on ${helper.host} (${helper.version}).`, ok: true };
 }
 
+/** The heading of the newest request of `kind`: "The latest update". */
+export const latestText = (kind: HelperKind) => `The latest ${HELPER_KINDS[kind].replace(/^The /, '')}`;
+
 /** An admin may ask the helper now: it is up and no request waits or runs. */
 export const canAsk = (info: UpdatesInfo) => info.helper?.up === true && !info.open;
 
 /** A request's state in words. */
 export function requestState(request: HelperRequest): { text: string; ok: boolean } {
-  const what = request.kind === 'update' ? 'The update' : 'The switchover';
+  const what = HELPER_KINDS[request.kind] ?? 'The request';
   if (request.started_at === null) return { text: `${what} waits for the root helper.`, ok: true };
   if (request.finished_at === null) return { text: `${what} runs on ${request.host}.`, ok: true };
   return request.ok

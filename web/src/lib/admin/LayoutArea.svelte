@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { callTime } from '../format';
+  import ConvertGuide from './ConvertGuide.svelte';
   import HelperAction from './HelperAction.svelte';
-  import { firstMachine, formerPrimaryText, machineLabel, machineText, modeText, standbyText, type LayoutInfo } from './layout';
+  import { firstMachine, formerPrimaryText, machineLabel, machineText, modeText, movingText, standbyText, type LayoutInfo } from './layout';
   import { admin, why } from './session.svelte';
   import { siteZone } from '../status.svelte';
 
@@ -42,7 +43,8 @@
   {#if problem}<p class="problem" role="alert">The layout could not be read: {problem}</p>{/if}
 
   {#if data}
-    <p class="lead">{modeText(data.mode)}</p>
+    <p class="lead">{data.moving ? movingText : modeText(data.mode)}</p>
+    <ConvertGuide one={data.mode === 'one'} />
 
     <h2>ScannerPulse machines</h2>
     {#if data.machines.length === 0}

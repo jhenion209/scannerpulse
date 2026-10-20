@@ -1,18 +1,19 @@
 <script lang="ts">
-  // One thing an admin asks the root helper for (an update, a switchover):
+  // One thing an admin asks the root helper for (an update, a switchover, a
+  // step of the conversion):
   // its button, a confirming step, and the latest such request with what the
   // helper said, read again every 2 s while it is open. Through an update's
   // restarts a read fails for a moment: the last one stays on screen.
   import { onMount } from 'svelte';
   import { admin, why } from './session.svelte';
-  import { canAsk, requestState, type UpdatesInfo } from './updates';
+  import { canAsk, latestText, requestState, type HelperKind, type UpdatesInfo } from './updates';
 
   let {
     kind,
     label,
     question,
     allowed = true,
-  }: { kind: 'update' | 'switchover'; label: string; question: string; allowed?: boolean } = $props();
+  }: { kind: HelperKind; label: string; question: string; allowed?: boolean } = $props();
 
   let info = $state<UpdatesInfo | null>(null);
   let problem = $state<string | null>(null);
@@ -27,7 +28,7 @@
       problem = null;
     } catch (error) {
       problem = info?.open
-        ? 'the site did not answer: it may be restarting for the update; reading again shortly'
+        ? 'the site did not answer: it may be restarting; reading again shortly'
         : why(error);
     }
   }
@@ -75,7 +76,7 @@
 {#if problem}<p class="problem" role="alert">{problem}</p>{/if}
 {#if request}
   {@const state = requestState(request)}
-  <h3>The latest {kind}, asked by {request.requested_by}</h3>
+  <h3>{latestText(kind)}, asked by {request.requested_by}</h3>
   <p class={state.ok ? '' : 'flag'}>{state.text}</p>
   {#if request.said}<pre aria-live="polite"><code>{request.said.trimEnd()}</code></pre>{/if}
 {/if}

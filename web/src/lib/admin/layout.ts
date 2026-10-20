@@ -28,6 +28,8 @@ export interface DatabaseMachine {
 
 export interface LayoutInfo {
   mode: Mode;
+  /** The database is moving to the database machines, not yet switched. */
+  moving: boolean;
   first: string | null;
   second: string | null;
   shared: string | null;
@@ -39,6 +41,10 @@ export interface LayoutInfo {
   /** Run on the first machine; null on one machine alone. */
   switchover: string | null;
 }
+
+/** While the database moves to the database machines. */
+export const movingText =
+  "The database is moving to the database machines: the conversion's guide below gives the next step.";
 
 /** A machine that answers as a primary on an older timeline, back after a hand promotion. */
 export const formerPrimaryText =

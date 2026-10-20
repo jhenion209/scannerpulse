@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canAsk, helperText, newestText, requestState, type HelperRequest, type UpdatesInfo } from './updates';
+import { canAsk, helperText, latestText, newestText, requestState, type HelperRequest, type UpdatesInfo } from './updates';
 
 const info = (over: Partial<UpdatesInfo> = {}): UpdatesInfo => ({
   running: '0.9.0',
@@ -64,5 +64,17 @@ describe('updates in words', () => {
       ok: true,
     });
     expect(requestState(request({ started_at: 'x', finished_at: 'y', ok: false })).ok).toBe(false);
+  });
+
+  it('names each step of the conversion the helper carries out', () => {
+    expect(requestState(request({ kind: 'db_switch', started_at: 'x', host: 'radio-a' })).text).toBe(
+      "The database's switch runs on radio-a.",
+    );
+    expect(requestState(request({ kind: 'archive_check', started_at: 'x', finished_at: 'y', ok: false }))).toEqual({
+      text: 'The check of the copy stopped: see its last line.',
+      ok: false,
+    });
+    expect(latestText('update')).toBe('The latest update');
+    expect(latestText('db_retire')).toBe("The latest old database's removal");
   });
 });
