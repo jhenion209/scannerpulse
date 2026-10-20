@@ -92,7 +92,8 @@ steps, with the site up throughout:
 1. `sudo /usr/local/bin/scannerpulse archive move /srv/shared/archive` compares
    the two and gives the copy to run (rsync, as the scannerpulse account).
 2. Run that copy, then the first command again, until it finds nothing
-   missing.
+   missing, or only calls filed since the copy (at most 1,000), which the
+   switch copies.
 3. `sudo /usr/local/bin/scannerpulse archive move /srv/shared/archive --switch`
    pauses filing (the recordings wait in their folder), copies the calls filed
    since your copy, checks them, and points the site at the share. Ctrl-C or

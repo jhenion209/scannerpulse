@@ -19,6 +19,10 @@ pub const BACKUPS: &str = ".scannerpulse-backups";
 /// How many differences are named; the rest are counted.
 const NAMED: usize = 10;
 
+/// How many files missing or of another size the switch copies in its
+/// pause; with more, the person copies again first.
+pub const SWITCH_COPIES: usize = 1_000;
+
 /// What the old archive holds that the new one does not, file by file.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Compared {
@@ -122,6 +126,44 @@ pub fn differences(compared: &Compared) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// What a comparison of the archive at `old` with `new` says, and whether
+/// the switch may go ahead: with nothing missing, or no more than the
+/// switch copies in its pause (calls filed since the copy, on a site that
+/// files calls throughout).
+fn verdict(compared: &Compared, old: &Path, new: &Path) -> (bool, String) {
+    let switch = format!(
+        "sudo /usr/local/bin/scannerpulse archive move {} --switch",
+        new.display()
+    );
+    let late = compared.missing.len() + compared.differ.len();
+    if compared.same() {
+        (
+            true,
+            format!(
+                "{} holds every one of them. To move to it, run: {switch}",
+                new.display()
+            ),
+        )
+    } else if late <= SWITCH_COPIES {
+        (
+            true,
+            format!(
+                "{}\nThese are calls filed since the copy, most likely: the switch copies them in its pause. To move, run: {switch}",
+                differences(compared)
+            ),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "{}\nCopy them with:\n  {}\nthen run this again.",
+                differences(compared),
+                copy_line(old, new)
+            ),
+        )
+    }
 }
 
 /// The copy the person runs, as the service's own account, so that the
@@ -391,27 +433,9 @@ pub async fn run(
         super::folders::size(compared.bytes)
     ));
     if !switch {
-        return Ok(if compared.same() {
-            (
-                true,
-                format!(
-                    "{} holds every one of them. To move to it, run: sudo /usr/local/bin/scannerpulse archive move {} --switch",
-                    new.display(),
-                    new.display()
-                ),
-            )
-        } else {
-            (
-                false,
-                format!(
-                    "{}\nCopy them with:\n  {}\nthen run this again.",
-                    differences(&compared),
-                    copy_line(&old, &new)
-                ),
-            )
-        });
+        return Ok(verdict(&compared, &old, &new));
     }
-    if compared.differ.len() + compared.missing.len() > 1_000 {
+    if compared.differ.len() + compared.missing.len() > SWITCH_COPIES {
         return Err(format!(
             "{}\nCopy them first with:\n  {}",
             differences(&compared),
@@ -546,6 +570,35 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn calls_filed_since_the_copy_do_not_hold_the_switch_back() {
+        let (old, new) = (Path::new("/srv/archive"), Path::new("/srv/share"));
+        let late = |n: usize| Compared {
+            files: 5_000,
+            bytes: 1 << 30,
+            missing: (0..n)
+                .map(|i| format!("2026-10-20/100-Fire/{i}.mp3"))
+                .collect(),
+            differ: Vec::new(),
+        };
+        let (ok, said) = verdict(&late(0), old, new);
+        assert!(ok && said.contains("holds every one of them"), "{said}");
+        // A live site files calls while the copy and the check run: the
+        // switch copies those in its pause.
+        let (ok, said) = verdict(&late(3), old, new);
+        assert!(ok, "{said}");
+        assert!(said.contains("3 file(s) missing"), "{said}");
+        assert!(
+            said.contains("the switch copies them in its pause"),
+            "{said}"
+        );
+        assert!(said.contains("archive move /srv/share --switch"), "{said}");
+        // More than the switch copies: copy again first.
+        let (ok, said) = verdict(&late(SWITCH_COPIES + 1), old, new);
+        assert!(!ok, "{said}");
+        assert!(said.contains("then run this again"), "{said}");
     }
 
     #[test]
