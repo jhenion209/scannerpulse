@@ -980,7 +980,15 @@ mod tests {
         let error = exclusive(&lock).unwrap_err();
         assert!(error.contains("already"), "{error}");
         drop(first);
-        assert!(exclusive(&lock).is_ok());
+        // Another test may start a program meanwhile: its child holds a copy
+        // of the lock's descriptor for the instant before its program runs.
+        let freed = (0..100).any(|_| {
+            exclusive(&lock).is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(freed);
     }
 
     #[test]
