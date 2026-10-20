@@ -471,6 +471,25 @@ pub async fn helper(
             "no conversion is planned: run `sudo /usr/local/bin/scannerpulse setup` on this machine first".into(),
         ));
     }
+    // A helper from before the conversion's steps (an upgrade by the
+    // install line restarts the site only) would take the request and
+    // never finish it.
+    if kind.converts() {
+        let helper: Option<(String, String)> = sqlx::query_as(
+            "SELECT host, version FROM agents \
+             WHERE seen_at > now() - make_interval(secs => $1) ORDER BY seen_at DESC LIMIT 1",
+        )
+        .bind(crate::agent::SILENT_AFTER as f64)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some((host, version)) = helper
+            && crate::update::newer(&version, crate::update::VERSION)
+        {
+            return Err(ApiError::Conflict(format!(
+                "the root helper on {host} runs {version}, from before this step: restart it there (`sudo systemctl restart scannerpulse-agent`), then ask again"
+            )));
+        }
+    }
     match crate::agent::ask(&state.pool, kind, &admin.0.login).await {
         Ok(id) => {
             record(&admin, format!("asked the root helper for request {id}: {}", kind.name()));

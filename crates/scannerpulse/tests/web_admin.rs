@@ -661,6 +661,23 @@ async fn an_admin_follows_the_conversions_guide_and_approves_its_steps(pool: PgP
     assert_eq!(steps[0]["state"], "now");
     assert_eq!(steps[0]["ask"]["kind"], "db_move");
     assert_eq!(got.body["guide"]["complete"], false);
+    // A helper still on an older version (an upgrade by the install line
+    // restarts the site only) would take the step and drop it: refused,
+    // with the restart to run.
+    sqlx::query("UPDATE agents SET version = '0.1.0'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let old = ask("db_move").await;
+    assert_eq!(old.status, 409, "{:?}", old.body);
+    assert!(
+        old.body
+            .to_string()
+            .contains("sudo systemctl restart scannerpulse-agent"),
+        "{:?}",
+        old.body
+    );
+    scannerpulse::agent::beat(&pool, "radio-a").await.unwrap();
     // Approved: the root helper's request is recorded.
     assert_eq!(ask("db_move").await.status, 202);
     let got = send(&app, "GET", "/api/admin/updates", &h, None).await;
