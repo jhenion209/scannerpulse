@@ -149,6 +149,19 @@ referee to make DB1 the primary; this machine's database follows it as a
 standby the referee never promotes, until `--retire` takes it out of the
 referee's watch and removes it.
 
+**Going back before the switch:** `sudo /usr/local/bin/scannerpulse db move
+--cancel` on this machine, until `--switch` has begun, takes the site back to
+this machine's own database alone, with writes paused for a few seconds. By
+hand, it closes this machine's database to the database machines again; with
+a referee, this machine's database leaves the referee's formation, its data
+kept, and PostgreSQL's own service runs it again with its own settings; the
+referee's formation is emptied, so that it may serve a new move. Then run
+`sudo /usr/local/bin/scannerpulse uninstall` on DB1 if it joined: its copy
+is cut off and is no longer the site's database. The conversion's plan
+stays, for setup to change or drop. The
+archive goes back the same way it came: `archive move` with the old folder
+and `--switch`.
+
 ## Converting an install on one machine, guided
 
 An install set up Simple becomes highly available without being set up
@@ -171,7 +184,8 @@ again, with the site up except for the pauses each step names:
    and the page shows each line it says.
 
 The commands above (`archive move`, `db move`) and `second` do the same steps
-by hand, and the guide follows them either way.
+by hand, and the guide follows them either way. Until the switch, `db move
+--cancel` goes back (above).
 
 ## Reverse proxies
 

@@ -384,6 +384,8 @@ already set in the environment wins. So far:
 - `archive move` and `db move`, as root, move an install on one machine to a
   network share and to two database machines (`docs/deploying.md`); the
   conversion's guide has the root helper run them once an admin approves.
+  Until the switch, `db move --cancel` takes the site back to its own
+  database alone.
 - `ingest` watches the source folders and files each new call into the
   archive. Two hosts can run it side by side: a lease in the database lets one
   of them work at a time, and the other takes over when it stops. It reads
