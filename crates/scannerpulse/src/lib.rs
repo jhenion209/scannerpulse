@@ -28,6 +28,7 @@ pub mod mp3;
 pub mod primary;
 pub mod queue;
 pub mod reader;
+pub mod recorders;
 pub mod reports;
 pub mod retag;
 pub mod search;
