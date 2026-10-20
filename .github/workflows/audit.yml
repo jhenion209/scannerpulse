@@ -20,5 +20,7 @@ jobs:
       - run: cargo install cargo-audit --locked
       # RUSTSEC-2023-0071 (rsa, no fix released) is a timing attack on the
       # private key; jsonwebtoken only verifies sign-in tokens with the
-      # identity provider's public keys.
-      - run: cargo audit --ignore RUSTSEC-2023-0071
+      # identity provider's public keys. RUSTSEC-2026-0381 matches
+      # webpki-roots 0.26.11, sqlx's shim, by its version: it re-exports
+      # webpki-roots 1.x, which the lock holds at 1.0.10, the patched release.
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381
