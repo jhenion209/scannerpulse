@@ -59,6 +59,10 @@ pub struct Plan {
     /// second joins after that.
     #[serde(default)]
     pub moving: bool,
+    /// After a move, the first ScannerPulse machine's old database is
+    /// removed (`db move --retire`).
+    #[serde(default)]
+    pub retired: bool,
 }
 
 /// A machine's place in the plan.
@@ -140,6 +144,9 @@ impl Plan {
             second: self.second.clone(),
             shared: self.shared.clone(),
             install_id: self.install_id.clone(),
+            joined: self.joined.clone(),
+            moving: self.moving,
+            retired: self.retired,
         }
     }
 
@@ -316,6 +323,7 @@ mod tests {
             ready: false,
             joined: Vec::new(),
             moving: false,
+            retired: false,
         }
     }
 
@@ -512,6 +520,9 @@ mod tests {
         let plan = Plan {
             second: Some("web2.example.org".into()),
             shared: Some("192.0.2.50/24".into()),
+            joined: vec!["ref.example.org".into()],
+            moving: true,
+            retired: true,
             ..refereed()
         };
         plan.write(&dir.path().join("plan.json")).unwrap();
@@ -521,5 +532,8 @@ mod tests {
         assert_eq!(layout.second.as_deref(), Some("web2.example.org"));
         assert_eq!(layout.referee.as_deref(), Some("ref.example.org"));
         assert_eq!(layout.nodes, plan.nodes);
+        // How far a move has come, for the conversion's guide.
+        assert_eq!(layout.joined, ["ref.example.org"]);
+        assert!(layout.moving && layout.retired);
     }
 }

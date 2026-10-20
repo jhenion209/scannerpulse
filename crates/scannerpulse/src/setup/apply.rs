@@ -98,6 +98,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 ready: false,
                 joined: Vec::new(),
                 moving: false,
+                retired: false,
             })
             .map_err(fail)?,
             Action::Ready => super::plan::Plan::update(Path::new(super::plan::PLAN), |plan| {
@@ -355,6 +356,8 @@ pub(super) fn next_plan(
         install_id,
         ready: false,
         joined,
+        // A second added after a move keeps its old database's removal.
+        retired: same.as_ref().is_some_and(|old| old.retired),
         ..fresh
     }
 }
@@ -501,6 +504,7 @@ mod tests {
                 ready: true,
                 joined: Vec::new(),
                 moving: false,
+                retired: false,
             },
         )
     }
@@ -530,6 +534,16 @@ mod tests {
             !again.ready,
             "the first machine is ready only at the end of its setup"
         );
+        // A second added after a move keeps the old database's removal.
+        kept.retired = true;
+        let again = make(
+            Some(kept),
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            Some("web2.example.org"),
+        );
+        assert!(again.retired);
     }
 
     #[test]

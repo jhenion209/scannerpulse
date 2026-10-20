@@ -1,13 +1,15 @@
 //! `scannerpulse agent`: the root helper on the first ScannerPulse machine (or
 //! one machine alone). The web service runs without root, so an admin's
-//! "Update now" or switchover is a row in `agent_requests` that this takes,
-//! runs, and writes what it says into, line by line: the admin page reads it
-//! through the restarts an update makes. It does nothing else an admin did
-//! not ask for, except to look for a newer release once a day, unless
-//! `updates.check` is false.
+//! "Update now", switchover or approved step of a conversion is a row in
+//! `agent_requests` that this takes, runs, and writes what it says into,
+//! line by line: the admin page reads it through the restarts an update or a
+//! move makes. It does nothing else an admin did not ask for, except to look
+//! for a newer release once a day, unless `updates.check` is false.
 
 use serde::Serialize;
 use sqlx::PgPool;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// The helper's unit, on the first ScannerPulse machine only.
@@ -20,30 +22,70 @@ const CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// A helper not heard from for this long is shown as not running.
 pub const SILENT_AFTER: i64 = 30;
 
-/// What an admin may ask for.
+/// Set in the helper's own process: what it runs leaves the helper's
+/// restart to it, once the request is closed.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// This process is the root helper.
+pub fn running() -> bool {
+    RUNNING.load(Ordering::Relaxed)
+}
+
+/// What an admin may ask for: the conversion's steps take their machines
+/// and folders from its plan (`convert::PATH`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// `scannerpulse update`, every machine in turn.
     Update,
     /// `scannerpulse db switchover`: the standby becomes the primary.
     Switchover,
+    /// `scannerpulse archive move FOLDER`: the copy compared.
+    ArchiveCheck,
+    /// `scannerpulse archive move FOLDER --switch`.
+    ArchiveSwitch,
+    /// `scannerpulse db move DB1 DB2 --hub ADDRESS [--referee REF]`.
+    DbMove,
+    /// `scannerpulse db move --switch`.
+    DbSwitch,
+    /// `scannerpulse db move --retire`, the approval its confirmation.
+    DbRetire,
+    /// `scannerpulse second NAME [ADDRESS/PREFIX]`, without its wait.
+    Second,
 }
 
 impl Kind {
+    pub const ALL: [Kind; 8] = [
+        Kind::Update,
+        Kind::Switchover,
+        Kind::ArchiveCheck,
+        Kind::ArchiveSwitch,
+        Kind::DbMove,
+        Kind::DbSwitch,
+        Kind::DbRetire,
+        Kind::Second,
+    ];
+
     pub fn parse(text: &str) -> Option<Kind> {
-        match text {
-            "update" => Some(Kind::Update),
-            "switchover" => Some(Kind::Switchover),
-            _ => None,
-        }
+        Kind::ALL.into_iter().find(|kind| kind.name() == text)
     }
 
     pub fn name(self) -> &'static str {
         match self {
             Kind::Update => "update",
             Kind::Switchover => "switchover",
+            Kind::ArchiveCheck => "archive_check",
+            Kind::ArchiveSwitch => "archive_switch",
+            Kind::DbMove => "db_move",
+            Kind::DbSwitch => "db_switch",
+            Kind::DbRetire => "db_retire",
+            Kind::Second => "second",
         }
+    }
+
+    /// A step of the conversion, which reads its plan.
+    pub fn converts(self) -> bool {
+        !matches!(self, Kind::Update | Kind::Switchover)
     }
 }
 
@@ -120,15 +162,17 @@ pub async fn open(pool: &PgPool) -> sqlx::Result<bool> {
         .await
 }
 
-/// Takes the oldest request no helper has started, for `host`.
+/// Takes the oldest request no helper has started, for `host`, of a kind
+/// this helper knows: one a newer web recorded waits for a newer helper.
 pub async fn claim(pool: &PgPool, host: &str) -> sqlx::Result<Option<(i64, Kind)>> {
     let row: Option<(i64, String)> = sqlx::query_as(
         "UPDATE agent_requests SET started_at = now(), host = $1 \
-         WHERE id = (SELECT id FROM agent_requests WHERE started_at IS NULL \
+         WHERE id = (SELECT id FROM agent_requests WHERE started_at IS NULL AND kind = ANY($2) \
                      ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, kind",
     )
     .bind(host)
+    .bind(Kind::ALL.map(Kind::name).to_vec())
     .fetch_optional(pool)
     .await?;
     Ok(row.and_then(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind))))
@@ -208,9 +252,10 @@ pub async fn checks(pool: &PgPool) -> sqlx::Result<bool> {
     Ok(value.and_then(|value| value.as_bool()).unwrap_or(true))
 }
 
-/// What request `id` runs: the update or the switchover, each line it says
-/// written to the request as it comes. The update restarts this machine's
-/// web and ingest, never this helper, which restarts itself afterwards.
+/// What request `id` runs, each line it says written to the request as it
+/// comes. An update or a move restarts this machine's web and ingest, never
+/// this helper, which restarts itself afterwards. Whether it ended well: a
+/// check of the archive's copy ends well only when the copy is complete.
 async fn carry_out(pool: &PgPool, id: i64, kind: Kind) -> (bool, String) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let writer = {
@@ -242,18 +287,68 @@ async fn carry_out(pool: &PgPool, id: i64, kind: Kind) -> (bool, String) {
     let said = move |line: &str| {
         let _ = tx.send(line.to_string());
     };
+    let well = |done: String| (true, done);
     let result = match kind {
-        Kind::Update => crate::update::run(false, true, said, |_| true).await,
+        Kind::Update => crate::update::run(false, true, said, |_| true)
+            .await
+            .map(well),
         Kind::Switchover => {
             tokio::task::spawn_blocking(move || crate::setup::node::db_switchover(said))
                 .await
                 .unwrap_or_else(|error| Err(format!("the switchover stopped: {error}")))
+                .map(well)
         }
+        _ => convert_step(pool, kind, said).await,
     };
     let _ = writer.await;
     match result {
-        Ok(done) => (true, done),
+        Ok(done) => done,
         Err(error) => (false, format!("{}: {error}", kind.name())),
+    }
+}
+
+/// A step of the conversion, on the machines and folders its plan names.
+async fn convert_step(
+    pool: &PgPool,
+    kind: Kind,
+    said: impl Fn(&str),
+) -> Result<(bool, String), String> {
+    use crate::setup::{archive_move, change, db_move};
+    let plan = crate::convert::Convert::read(Path::new(crate::convert::PATH))?;
+    let well = |done: String| (true, done);
+    match kind {
+        Kind::ArchiveCheck | Kind::ArchiveSwitch => {
+            let new = plan
+                .archive
+                .ok_or("the conversion's plan keeps the archive where it is")?;
+            let mut conn = pool.acquire().await.map_err(|error| error.to_string())?;
+            archive_move::run(
+                &mut conn,
+                Path::new(&new),
+                kind == Kind::ArchiveSwitch,
+                said,
+            )
+            .await
+        }
+        Kind::DbMove => {
+            // Run again, the move reads its own plan: the database may be
+            // restarting under pg_autoctl.
+            let mut conn = pool.acquire().await.ok();
+            db_move::begin(conn.as_deref_mut(), plan.nodes, plan.hub, plan.referee)
+                .await
+                .map(well)
+        }
+        Kind::DbSwitch => db_move::switch(said).await.map(well),
+        Kind::DbRetire => db_move::retire(|_| true).await.map(well),
+        Kind::Second => {
+            let name = plan
+                .second
+                .ok_or("the conversion's plan adds no second ScannerPulse machine")?;
+            change::add_second(&name, plan.shared.as_deref())
+                .await
+                .map(well)
+        }
+        Kind::Update | Kind::Switchover => Err("not a step of the conversion".into()),
     }
 }
 
@@ -319,6 +414,11 @@ pub async fn run(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), String> {
     let host = host();
+    RUNNING.store(true, Ordering::Relaxed);
+    // A request that changes the settings (a move) leaves this helper on
+    // the old ones until it restarts.
+    let settings = || std::fs::read(crate::setup::steps::env_path()).ok();
+    let started_with = settings();
     spawn_beat(pool.clone(), host.clone());
     spawn_check(pool.clone());
     // Until the requests it left unfinished are closed, it takes none: the
@@ -356,12 +456,13 @@ pub async fn run(
                     crate::log::warn(format!("agent: cannot close request {id} yet: {error}"));
                     tokio::time::sleep(EVERY).await;
                 }
-                // A new program in place: this helper runs the old one still.
-                if kind == Kind::Update
-                    && crate::update::version_of(std::path::Path::new(crate::setup::BINARY))
-                        .is_some_and(|version| version != crate::update::VERSION)
-                {
-                    crate::log::info("agent: restarting into the new program");
+                // A new program in place, or new settings: this helper runs
+                // the old ones still.
+                let new_program = kind == Kind::Update
+                    && crate::update::version_of(Path::new(crate::setup::BINARY))
+                        .is_some_and(|version| version != crate::update::VERSION);
+                if new_program || settings() != started_with {
+                    crate::log::info("agent: restarting into the new program or settings");
                     let _ = std::process::Command::new("systemctl")
                         .args(["--no-block", "restart", "scannerpulse-agent.service"])
                         .status();

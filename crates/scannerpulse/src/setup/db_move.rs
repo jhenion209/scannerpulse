@@ -55,10 +55,11 @@ pub fn database_here_or_following(settings: &str) -> Result<(), String> {
     database_here(settings)
 }
 
-/// With a referee, once this machine's database has joined it: the site
-/// names it and the first database machine (`node0`), its password file
-/// fits both, and the services restart to read them, so that a promotion
-/// by the referee before the switch moves the site too.
+/// From the start of a move (with a referee, once this machine's database
+/// has joined it): the site names it and the first database machine
+/// (`node0`), its password file fits both, and the services restart to read
+/// them, so that they follow the copy once it is the primary, whether the
+/// switch or the referee makes it so.
 pub fn follow_steps(text: &str, password: &str, node0: &str) -> Result<Vec<Step>, String> {
     let node0 = if node0.contains(':') {
         format!("[{node0}]:{PORT_PG}")
@@ -82,14 +83,17 @@ pub fn follow_steps(text: &str, password: &str, node0: &str) -> Result<Vec<Step>
             },
         },
         run(
-            "Restart the services, to follow the referee's primary",
+            "Restart the services, to follow the database machines' primary",
             "systemctl",
             &[
-                "try-restart",
-                "scannerpulse-web.service",
-                "scannerpulse-ingest.service",
-                "scannerpulse-agent.service",
-            ],
+                &[
+                    "try-restart",
+                    "scannerpulse-web.service",
+                    "scannerpulse-ingest.service",
+                ][..],
+                helper_restart().as_slice(),
+            ]
+            .concat(),
         ),
     ])
 }
@@ -331,14 +335,17 @@ pub fn boot(system: &System, start: bool, start_conf: &Path) -> Result<(), Strin
     }
 }
 
-/// The units that read the settings and are not the site's: restarted
-/// after the switch, so that they reach the database machines too.
-const RESTARTED: [&str; 1] = ["scannerpulse-agent.service"];
+/// The root helper reads the settings too: restarted after they change,
+/// so that it reaches the database machines, unless the helper itself makes
+/// the change (it restarts itself once it has said how it ended).
+fn helper_restart() -> Option<&'static str> {
+    (!crate::agent::running()).then_some("scannerpulse-agent.service")
+}
 
 /// The two database machines, this machine (`hub`) and the referee, if
 /// any, are each a machine of their own, by name or by the addresses their
 /// names give, and each name is a plain one.
-fn machines_apart(
+pub(super) fn machines_apart(
     nodes: &[String; 2],
     hub: &str,
     referee: Option<&str>,
@@ -665,6 +672,7 @@ pub async fn begin(
         ready: false,
         joined: Vec::new(),
         moving: true,
+        retired: false,
     })?;
     let mut plan = Plan::read(path)?;
     let [first, second] = &nodes;
@@ -682,7 +690,11 @@ pub async fn begin(
             plan = Plan::read(path)?;
         }
     } else {
-        let steps = hub_steps(&plan, &this_system()?, Path::new(super::BINARY), &node_ips);
+        let mut steps = hub_steps(&plan, &this_system()?, Path::new(super::BINARY), &node_ips);
+        // Once: run again, the services are not restarted.
+        if database_here(&settings).is_ok() {
+            steps.extend(follow_steps(&settings, &plan.password, first)?);
+        }
         super::apply::apply(&steps, &context(), true).await?;
     }
     let progress = if plan.joined.contains(first) {
@@ -918,9 +930,9 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
         "scannerpulse-web.service",
         "scannerpulse-ingest.service",
     ])?;
-    let mut restart = vec!["try-restart"];
-    restart.extend(RESTARTED);
-    systemctl(&restart)?;
+    if let Some(helper) = helper_restart() {
+        systemctl(&["try-restart", helper])?;
+    }
     let kept = backups
         .map(|folder| format!(", and its backups stay in {folder}"))
         .unwrap_or_default();
@@ -944,7 +956,9 @@ pub async fn retire(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
         return Err("the site still uses this machine's database: switch first (`sudo /usr/local/bin/scannerpulse db move --switch`)".into());
     }
     let system = this_system()?;
+    let path = Path::new(super::plan::PLAN);
     if !Path::new(system.postgres_data()).exists() {
+        Plan::update(path, |plan| plan.retired = true)?;
         return Ok("This machine has no old database left.".into());
     }
     let primary = plan
@@ -963,14 +977,15 @@ pub async fn retire(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     }
     if plan.referee.is_some() {
         super::apply::apply(&retire_refereed_steps(&system), &context(), true).await?;
-        // The referee no longer lets it in when it is set up again.
-        let hub = plan.hub.clone();
-        Plan::update(Path::new(super::plan::PLAN), |plan| {
-            plan.joined.retain(|joined| *joined != hub)
-        })?;
     } else {
         super::apply::apply(&retire_steps(&system), &context(), true).await?;
     }
+    // The referee no longer lets it in when it is set up again.
+    let hub = plan.hub.clone();
+    Plan::update(path, |plan| {
+        plan.joined.retain(|joined| *joined != hub);
+        plan.retired = true;
+    })?;
     Ok("This machine's old database is removed. Its old backups stay in the backups' folder until you remove them.".into())
 }
 
@@ -1398,7 +1413,7 @@ mod tests {
 
     #[test]
     fn the_root_helper_reads_the_moved_settings_too() {
-        assert!(RESTARTED.contains(&"scannerpulse-agent.service"));
+        assert_eq!(helper_restart(), Some("scannerpulse-agent.service"));
     }
 
     #[test]

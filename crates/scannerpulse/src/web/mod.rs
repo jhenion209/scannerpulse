@@ -306,6 +306,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/status", get(admin::status))
         .route("/api/admin/machine", get(admin::machine))
         .route("/api/admin/layout", get(admin::layout))
+        .route("/api/admin/convert", get(admin::convert))
         .route("/api/admin/updates", get(admin::updates))
         .route("/api/admin/helper", post(admin::helper))
         .route("/api/admin/reports/traffic", get(admin::traffic))

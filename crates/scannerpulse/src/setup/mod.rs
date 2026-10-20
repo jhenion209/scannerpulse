@@ -11,6 +11,7 @@ pub mod join;
 pub mod keepalived;
 pub mod node;
 pub mod plan;
+pub mod planner;
 pub mod referee;
 pub mod screen;
 pub mod second;
@@ -51,6 +52,10 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     // Another PostgreSQL here matters only to a database setup installs here.
     let seen = system.seen();
     let defaults = ask::defaults();
+    // Run again on a site on one machine, setup plans its conversion.
+    if !dry_run && planner::standalone() && planner::run(answers_file, &defaults).await? {
+        return Ok(());
+    }
     // A setup that stopped part way, even at its last steps (the web unit
     // written, the web not running), runs again; a finished one does not.
     // A join runs again: the second ScannerPulse machine takes the first
@@ -58,6 +63,11 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
     let refuse_finished = || {
         if !dry_run && web_running() {
             let finish = finish_second(plan::Plan::read(Path::new(plan::PLAN)).ok().as_ref())
+                .or_else(|| {
+                    Path::new(crate::convert::PATH).exists().then(|| {
+                        "its conversion to high availability is under way: the admin page's Layout area guides it".to_string()
+                    })
+                })
                 .map(|said| format!("; {said}"))
                 .unwrap_or_default();
             return Err(format!(
@@ -224,7 +234,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
 }
 
 /// This machine's site is set up and running.
-fn web_running() -> bool {
+pub(super) fn web_running() -> bool {
     Path::new(steps::WEB_UNIT).exists()
         && std::process::Command::new("systemctl")
             .args(["is-active", "--quiet", "scannerpulse-web.service"])

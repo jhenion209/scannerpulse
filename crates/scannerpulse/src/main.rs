@@ -69,6 +69,8 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse second NAME [ADDRESS/PREFIX]
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse db promote | db rejoin | db switchover
+       scannerpulse db move DB1 DB2 --hub ADDRESS [--referee REF]
+       scannerpulse db move --switch | db move --retire
        scannerpulse update [--check | --yes]
        scannerpulse agent | agent install
        scannerpulse archive move FOLDER [--switch]
@@ -163,7 +165,12 @@ setup       make this machine a ScannerPulse site, as root: asks Simple or
             transcription, shows what it will do, and does it after a yes
             (PostgreSQL 17, the scannerpulse account, the settings file, the
             certificate, the services); --answers FILE reads the answers
-            instead (NAME=value lines, mode 600), --dry-run changes nothing
+            instead (NAME=value lines, mode 600), --dry-run changes nothing.
+            Run again on a site on one machine, it plans the site's
+            conversion to high availability (the database machines, the
+            referee, the second machine, the archive's share), which the
+            admin page's Layout area then guides; CONVERT=yes in an answers
+            file gives the plan instead
 backup      take the nightly backups, as root (the backup timer runs it):
             pgBackRest (full on Sundays, differential otherwise) and a dump,
             the newest 14 kept, into SCANNERPULSE_BACKUPS; then each kind's
@@ -185,7 +192,11 @@ db          as root, with two database machines: promote, on the standby
             makes it the new primary's standby; switchover, on the
             ScannerPulse machine, swaps the roles while both are healthy.
             With a referee, it promotes and rejoins by itself, and
-            switchover asks it
+            switchover asks it. move, on an install on one machine, moves
+            its database to DB1 and DB2 (ADDRESS is this machine's address
+            as they reach them): the plan, and this database opened to them;
+            --switch makes DB1 the primary once it has caught up; --retire
+            removes the old database once you agree
 second      as root, on the first ScannerPulse machine with two database
             machines: adds NAME, a second ScannerPulse machine, which
             shares ADDRESS/PREFIX with this one; the database machines
@@ -212,8 +223,9 @@ archive     as root, on an install without a second machine: move FOLDER
             copies the calls filed since, compares again, points the install
             at FOLDER and files again (the old archive stays as it was)
 agent       as root, the first ScannerPulse machine's root helper (its unit
-            runs it): it carries out an update or a switchover an admin asks
-            for on the admin page, and looks for a newer release once a day
+            runs it): it carries out an update, a switchover or a step of the
+            conversion to high availability an admin asks for on the admin
+            page, and looks for a newer release once a day
             unless updates.check is false; install writes and starts its unit
             (setup does; an install from before 0.9.0 needs it once)
 uninstall   undo setup, as root: the services, their units, the settings,
@@ -1064,6 +1076,7 @@ async fn run() -> ExitCode {
                             let _ = writeln!(std::io::stdout(), "{line}");
                         })
                         .await
+                        .map(|(_, said)| said)
                     }
                     Err(error) => Err(error.to_string()),
                 },

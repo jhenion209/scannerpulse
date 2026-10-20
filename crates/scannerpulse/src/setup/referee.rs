@@ -148,6 +148,7 @@ mod tests {
             ready: false,
             joined: Vec::new(),
             moving: false,
+            retired: false,
         }
     }
 
@@ -264,6 +265,7 @@ mod tests {
         // it is retired.
         let mut moving = Plan {
             moving: true,
+            retired: false,
             ..plan()
         };
         assert!(rules(&moving).contains(hub_line));

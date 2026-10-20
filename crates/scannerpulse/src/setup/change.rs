@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::acme::Proof;
 
-use super::steps::{ACCOUNT, Step, backup_steps, cert_path, env_path, key_path, run};
+use super::steps::{ACCOUNT, Action, Step, backup_steps, cert_path, env_path, key_path, run};
 use super::system::System;
 
 /// What to change.
@@ -382,58 +382,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                 ),
             )
         }
-        Change::Second { name, shared } => {
-            let plan = super::plan::Plan::read(Path::new(super::plan::PLAN)).map_err(|_| {
-                if super::second::is_second(&text, false) {
-                    "this is the second ScannerPulse machine: run `second` on the first ScannerPulse machine, which holds the plan".to_string()
-                } else {
-                    "a second ScannerPulse machine goes with two database machines, which this install does not have".to_string()
-                }
-            })?;
-            not_moving(&plan)?;
-            let le_web = crate::hostfile::parse(&text)?
-                .iter()
-                .any(|(name, value)| name == "SCANNERPULSE_ACME" && value == "web");
-            super::ask::check_machines(
-                &plan.nodes,
-                plan.referee.as_deref(),
-                &plan.hub,
-                Some(name),
-                shared.as_deref(),
-                le_web,
-                super::plan::resolve,
-            )?;
-            let (recordings, archive, _) = super::uninstall::folders().await.unwrap_or_default();
-            let (Some(recordings), Some(archive)) = (recordings.first(), archive) else {
-                return Err(
-                    "the folders are recorded in the database, which does not answer".into(),
-                );
-            };
-            let os_release = std::fs::read_to_string("/etc/os-release")
-                .map_err(|error| format!("/etc/os-release: {error}"))?;
-            let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
-            let port = super::second::port_of(&text)?;
-            // ponytail: the plan carries the first recordings folder only; a
-            // second source the second machine cannot reach is the person's.
-            (
-                super::second::add_steps(
-                    &plan,
-                    name,
-                    shared.as_deref(),
-                    &archive,
-                    recordings,
-                    &system,
-                    port,
-                ),
-                format!(
-                    "{name} has joined as the second ScannerPulse machine{}.",
-                    shared
-                        .as_ref()
-                        .map(|s| format!(", sharing {s} with this one"))
-                        .unwrap_or_default()
-                ),
-            )
-        }
+        Change::Second { name, shared } => second_steps(&text, name, shared.as_deref()).await?,
     };
     let context = super::apply::Context {
         database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
@@ -445,9 +394,97 @@ pub async fn run_change(change: Change) -> Result<(), String> {
     Ok(())
 }
 
+/// The steps that add `name`, a second ScannerPulse machine sharing
+/// `shared` (address/prefix) with this one, to the install whose settings
+/// are `text`, and what is said once it has joined.
+async fn second_steps(
+    text: &str,
+    name: &str,
+    shared: Option<&str>,
+) -> Result<(Vec<Step>, String), String> {
+    let plan = super::plan::Plan::read(Path::new(super::plan::PLAN)).map_err(|_| {
+        if super::second::is_second(text, false) {
+            "this is the second ScannerPulse machine: run `second` on the first ScannerPulse machine, which holds the plan".to_string()
+        } else {
+            "a second ScannerPulse machine goes with two database machines, which this install does not have".to_string()
+        }
+    })?;
+    not_moving(&plan)?;
+    let le_web = crate::hostfile::parse(text)?
+        .iter()
+        .any(|(name, value)| name == "SCANNERPULSE_ACME" && value == "web");
+    super::ask::check_machines(
+        &plan.nodes,
+        plan.referee.as_deref(),
+        &plan.hub,
+        Some(name),
+        shared,
+        le_web,
+        super::plan::resolve,
+    )?;
+    let (recordings, archive, _) = super::uninstall::folders().await.unwrap_or_default();
+    let (Some(recordings), Some(archive)) = (recordings.first(), archive) else {
+        return Err("the folders are recorded in the database, which does not answer".into());
+    };
+    let os_release = std::fs::read_to_string("/etc/os-release")
+        .map_err(|error| format!("/etc/os-release: {error}"))?;
+    let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
+    let port = super::second::port_of(text)?;
+    // ponytail: the plan carries the first recordings folder only; a
+    // second source the second machine cannot reach is the person's.
+    Ok((
+        super::second::add_steps(&plan, name, shared, &archive, recordings, &system, port),
+        format!(
+            "{name} has joined as the second ScannerPulse machine{}.",
+            shared
+                .map(|s| format!(", sharing {s} with this one"))
+                .unwrap_or_default()
+        ),
+    ))
+}
+
+/// What joins once `name`, the second ScannerPulse machine, is in the
+/// plan: the machines `again` that let it in, then `name`.
+fn joins_text(name: &str, again: &[&str]) -> String {
+    if again.is_empty() {
+        format!("{name} may join now.")
+    } else {
+        format!("Join {} again, then {name}.", again.join(", then "))
+    }
+}
+
+/// `second NAME [SHARED]` without its wait, as root on the first
+/// ScannerPulse machine (the root helper, for the admin page's guide, which
+/// watches for the machines to join instead).
+pub async fn add_second(name: &str, shared: Option<&str>) -> Result<String, String> {
+    let text = std::fs::read_to_string(env_path())
+        .map_err(|error| format!("{}: {error}", env_path().display()))?;
+    let (mut steps, _) = second_steps(&text, name, shared).await?;
+    steps.retain(|step| !matches!(step.action, Action::WaitForSecond));
+    let context = super::apply::Context {
+        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
+        db_password: String::new(),
+        nodes: crate::primary::from_env()?,
+    };
+    super::apply::apply(&steps, &context, true).await?;
+    let plan = super::plan::Plan::read(Path::new(super::plan::PLAN))?;
+    Ok(joins_text(name, &plan.waiting()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{letsencrypt_steps, location_steps, not_moving, push_steps, tls_install_steps};
+    use super::{
+        joins_text, letsencrypt_steps, location_steps, not_moving, push_steps, tls_install_steps,
+    };
+
+    #[test]
+    fn once_the_second_is_planned_the_database_machines_join_again_before_it() {
+        assert_eq!(
+            joins_text("web2", &["db1", "db2"]),
+            "Join db1, then db2 again, then web2."
+        );
+        assert_eq!(joins_text("web2", &[]), "web2 may join now.");
+    }
     use crate::acme::Proof;
     use crate::setup::steps::Action;
     use crate::setup::system::detect;

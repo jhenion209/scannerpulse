@@ -132,3 +132,27 @@ async fn an_open_request_is_busy_even_while_its_helper_is_quiet(pool: PgPool) {
         Err(Refused::Busy)
     ));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_step_of_the_conversion_is_asked_for_and_taken_like_the_others(pool: PgPool) {
+    agent::beat(&pool, "radio-a").await.unwrap();
+    for kind in [
+        Kind::ArchiveCheck,
+        Kind::ArchiveSwitch,
+        Kind::DbMove,
+        Kind::DbSwitch,
+        Kind::DbRetire,
+        Kind::Second,
+    ] {
+        let id = agent::ask(&pool, kind, "ann").await.unwrap();
+        assert_eq!(
+            agent::claim(&pool, "radio-a").await.unwrap(),
+            Some((id, kind))
+        );
+        agent::finish(&pool, id, true, "done").await.unwrap();
+        let last = agent::last(&pool, kind).await.unwrap().unwrap();
+        assert_eq!(last.kind, kind.name());
+        assert_eq!(Kind::parse(kind.name()), Some(kind));
+    }
+    assert_eq!(Kind::parse("reboot"), None);
+}

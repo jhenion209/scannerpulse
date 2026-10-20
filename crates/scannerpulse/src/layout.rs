@@ -1,7 +1,7 @@
 //! The install's layout, for the admin page: each ScannerPulse machine,
 //! which holds the shared address and the processing lease, each database
 //! machine's role and how far the standby is behind, whether the referee
-//! answers, and the failover mode.
+//! answers, the failover mode, and whether the database is moving there.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,6 +35,16 @@ pub struct Layout {
     pub shared: Option<String>,
     #[serde(default)]
     pub install_id: String,
+    /// The machines that have joined, by the plan's names.
+    #[serde(default)]
+    pub joined: Vec<String>,
+    /// The database is moving to the database machines (`db move`), not
+    /// yet switched.
+    #[serde(default)]
+    pub moving: bool,
+    /// After the move, the first machine's old database is removed.
+    #[serde(default)]
+    pub retired: bool,
 }
 
 impl Layout {
@@ -306,6 +316,7 @@ pub async fn report(
     };
     Ok(json!({
         "mode": mode,
+        "moving": layout.is_some_and(|l| l.moving),
         "first": layout.map(|l| l.hub.clone()),
         "second": layout.and_then(|l| l.second.clone()),
         "shared": layout.and_then(|l| l.shared.clone()),
@@ -331,6 +342,7 @@ mod tests {
             second: Some("web2.example.org".into()),
             shared: Some("192.0.2.50/24".into()),
             install_id: "0123456789abcdef".into(),
+            ..Layout::default()
         };
         assert_eq!(layout.mode(), "referee");
         assert_eq!(

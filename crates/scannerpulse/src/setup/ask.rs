@@ -378,6 +378,67 @@ pub fn ask_join() -> Result<Option<super::join::Hub>, inquire::InquireError> {
     }))
 }
 
+/// The database machines an answers file names (DB_NODES, FAILOVER and
+/// REFEREE, HUB, SECOND and SHARED), `get` reading its answers and `need`
+/// one it must give.
+fn pair_from(
+    get: &impl Fn(&str) -> Option<String>,
+    need: &impl Fn(&str) -> Result<String, String>,
+    defaults: &Defaults,
+) -> Result<Pair, String> {
+    let nodes: Vec<String> = need("DB_NODES")?
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let nodes = <[String; 2]>::try_from(nodes).map_err(|_| {
+        "DB_NODES names the two database machines, with a space between".to_string()
+    })?;
+    let referee = match get("FAILOVER").as_deref() {
+        None | Some("hand") => None,
+        Some("auto") => Some(need("REFEREE")?.to_ascii_lowercase()),
+        Some(other) => return Err(format!("FAILOVER is {other:?}: hand or auto")),
+    };
+    Ok(Pair {
+        nodes,
+        hub: get("HUB").unwrap_or_else(|| default_hub(defaults)),
+        referee,
+        second: get("SECOND").map(|s| s.to_ascii_lowercase()),
+        shared: get("SHARED"),
+    })
+}
+
+/// A conversion's answers file (CONVERT=yes, for an install on one
+/// machine): the database machines as a new install's are given, and
+/// ARCHIVE_SHARE, the archive's new folder. None when the file is not one.
+pub fn convert_from_file(
+    path: &Path,
+    defaults: &Defaults,
+) -> Result<Option<crate::convert::Convert>, String> {
+    let pairs = read_pairs(path)?;
+    let get = |name: &str| {
+        pairs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    match get("CONVERT").as_deref() {
+        None => return Ok(None),
+        Some("yes") => {}
+        Some(other) => return Err(format!("CONVERT is {other:?}: yes, or leave it out")),
+    }
+    let need =
+        |name: &str| get(name).ok_or_else(|| format!("{}: {name} is missing", path.display()));
+    let pair = pair_from(&get, &need, defaults)?;
+    Ok(Some(crate::convert::Convert {
+        nodes: pair.nodes,
+        hub: pair.hub,
+        referee: pair.referee,
+        second: pair.second,
+        shared: pair.shared,
+        archive: get("ARCHIVE_SHARE"),
+    }))
+}
+
 /// The answers in `path`: `NAME=value` lines, as the settings file is
 /// written. ADMIN_PASSWORD is in the file, so the file must be its owner's
 /// alone.
@@ -453,27 +514,7 @@ fn from_file_with(
             },
             root_cert: get("DB_SSLROOTCERT").map(PathBuf::from),
         }),
-        Some("nodes") => {
-            let nodes: Vec<String> = need("DB_NODES")?
-                .split_whitespace()
-                .map(str::to_ascii_lowercase)
-                .collect();
-            let nodes = <[String; 2]>::try_from(nodes).map_err(|_| {
-                "DB_NODES names the two database machines, with a space between".to_string()
-            })?;
-            let referee = match get("FAILOVER").as_deref() {
-                None | Some("hand") => None,
-                Some("auto") => Some(need("REFEREE")?.to_ascii_lowercase()),
-                Some(other) => return Err(format!("FAILOVER is {other:?}: hand or auto")),
-            };
-            Database::Nodes(Pair {
-                nodes,
-                hub: get("HUB").unwrap_or_else(|| default_hub(defaults)),
-                referee,
-                second: get("SECOND").map(|s| s.to_ascii_lowercase()),
-                shared: get("SHARED"),
-            })
-        }
+        Some("nodes") => Database::Nodes(pair_from(&get, &need, defaults)?),
         Some(other) => return Err(format!("DATABASE is {other:?}: here, theirs or nodes")),
     };
     if !matches!(database, Database::Nodes(_))
@@ -821,6 +862,196 @@ fn text(
     Ok(prompt.prompt()?.trim().to_string())
 }
 
+/// A folder that is a network share mounted here (NFS or SMB), as the
+/// archive must be once a second ScannerPulse machine reaches it too.
+pub fn check_share(folder: &str) -> Result<(), String> {
+    let path = Path::new(folder);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(format!("{folder} is not a folder here"));
+    }
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(super::second::SHARE_CHECK)
+        .env("ARCHIVE", path)
+        .output()
+        .map_err(|error| format!("cannot run sh: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{folder} is not a network share (NFS or SMB) mounted here: a second ScannerPulse machine could not reach it"
+        ))
+    }
+}
+
+/// The conversion's questions, each answer of `had` offered again: the
+/// database machines and the rest as a new install's, then, with a second
+/// ScannerPulse machine, the archive's new folder on a share unless the
+/// archive (`archive`, now) is on one already. None when the person leaves.
+pub fn ask_convert(
+    had: Option<&crate::convert::Convert>,
+    defaults: &Defaults,
+    archive: &Path,
+) -> Result<Option<crate::convert::Convert>, String> {
+    let result = (|| -> Result<crate::convert::Convert, inquire::InquireError> {
+        let had_pair = had.map(|plan| Pair {
+            nodes: plan.nodes.clone(),
+            hub: plan.hub.clone(),
+            referee: plan.referee.clone(),
+            second: plan.second.clone(),
+            shared: plan.shared.clone(),
+        });
+        let pair = ask_pair(had_pair.as_ref(), defaults)?;
+        let shared_now = check_share(&archive.display().to_string()).is_ok();
+        let new = if pair.second.is_some() && !shared_now {
+            say(&format!(
+                "The second ScannerPulse machine reaches the archive on a network share (NFS or SMB) that both machines mount at the same path. Mount it here first. The archive at {} is copied there, checked and switched to through the admin page's guide, with the site up throughout.",
+                archive.display()
+            ));
+            Some(text(
+                "The archive's new folder, on the share:",
+                had.and_then(|plan| plan.archive.as_deref()),
+                check_share,
+            )?)
+        } else {
+            None
+        };
+        Ok(crate::convert::Convert {
+            nodes: pair.nodes,
+            hub: pair.hub,
+            referee: pair.referee,
+            second: pair.second,
+            shared: pair.shared,
+            archive: new,
+        })
+    })();
+    match result {
+        Ok(plan) => Ok(Some(plan)),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => Ok(None),
+        Err(other) => Err(other.to_string()),
+    }
+}
+
+/// The database machines, how the standby is promoted, this machine's
+/// address as they reach it, and a second ScannerPulse machine with the
+/// address the two share: each answer of `had` offered again.
+pub fn ask_pair(had: Option<&Pair>, defaults: &Defaults) -> Result<Pair, inquire::InquireError> {
+    let named = |n: &str| {
+        if !super::join::plain(n) {
+            Err("a name or an address: letters, digits, dots, dashes and colons".into())
+        } else {
+            Ok(())
+        }
+    };
+    let first = text(
+        "The first database machine, which starts as the primary (name or address):",
+        had.map(|p| p.nodes[0].as_str()),
+        named,
+    )?;
+    let first_lower = first.to_ascii_lowercase();
+    let second = text(
+        "The second, its standby (name or address):",
+        had.map(|p| p.nodes[1].as_str()),
+        move |n| {
+            named(n)?;
+            if n.eq_ignore_ascii_case(&first_lower) {
+                Err("a different machine".into())
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+    const HAND: &str = "By hand: when the primary is lost, you run one command on the standby";
+    const AUTO: &str = "By itself: a third, small machine (the referee) decides; a Raspberry Pi or a small VM is enough";
+    println!(
+        "With two machines, neither can tell \"the other died\" from \"the network between us broke\", \
+         so only a third machine can promote the standby safely by itself."
+    );
+    let auto = Select::new(
+        "When the primary is lost, the standby becomes the primary:",
+        vec![HAND, AUTO],
+    )
+    .with_starting_cursor(usize::from(had.is_some_and(|p| p.referee.is_some())))
+    .prompt()?
+        == AUTO;
+    let (first_lower, second_lower) = (first.to_ascii_lowercase(), second.to_ascii_lowercase());
+    let referee = if auto {
+        Some(
+            text(
+                "The referee (name or address):",
+                had.and_then(|p| p.referee.as_deref()),
+                move |n| {
+                    named(n)?;
+                    if n.eq_ignore_ascii_case(&first_lower) || n.eq_ignore_ascii_case(&second_lower)
+                    {
+                        Err("a third machine".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )?
+            .to_ascii_lowercase(),
+        )
+    } else {
+        None
+    };
+    let hub = text(
+        "This machine's address, as the database machines reach it:",
+        Some(&had.map_or_else(|| default_hub(defaults), |p| p.hub.clone())),
+        named,
+    )?;
+    println!(
+        "A second ScannerPulse machine serves the same site when this one is down. \
+         It mounts this machine's archive share at the same path, and the two can share one address."
+    );
+    let (web2, shared) = if Confirm::new("Add a second ScannerPulse machine?")
+        .with_default(had.is_some_and(|p| p.second.is_some()))
+        .prompt()?
+    {
+        let taken: Vec<String> = [&first, &second, &hub]
+            .into_iter()
+            .chain(referee.as_ref())
+            .map(|n| n.to_ascii_lowercase())
+            .collect();
+        let web2 = text(
+            "The second ScannerPulse machine (name or address):",
+            had.and_then(|p| p.second.as_deref()),
+            move |n| {
+                named(n)?;
+                if taken.contains(&n.to_ascii_lowercase()) {
+                    Err("a machine of its own".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )?
+        .to_ascii_lowercase();
+        let shared = text(
+            "The address the two share, as address/prefix such as 192.0.2.50/24 (empty for none):",
+            had.and_then(|p| p.shared.as_deref()),
+            |s| {
+                if s.is_empty() {
+                    Ok(())
+                } else {
+                    shared_address(s)
+                }
+            },
+        )?;
+        (Some(web2), (!shared.is_empty()).then_some(shared))
+    } else {
+        (None, None)
+    };
+    Ok(Pair {
+        nodes: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
+        hub,
+        referee,
+        second: web2,
+        shared,
+    })
+}
+
 fn ask_database(
     previous: Option<&Database>,
     defaults: &Defaults,
@@ -848,119 +1079,7 @@ fn ask_database(
             Some(Database::Nodes(pair)) => Some(pair),
             _ => None,
         };
-        let named = |n: &str| {
-            if !super::join::plain(n) {
-                Err("a name or an address: letters, digits, dots, dashes and colons".into())
-            } else {
-                Ok(())
-            }
-        };
-        let first = text(
-            "The first database machine, which starts as the primary (name or address):",
-            had.map(|p| p.nodes[0].as_str()),
-            named,
-        )?;
-        let first_lower = first.to_ascii_lowercase();
-        let second = text(
-            "The second, its standby (name or address):",
-            had.map(|p| p.nodes[1].as_str()),
-            move |n| {
-                named(n)?;
-                if n.eq_ignore_ascii_case(&first_lower) {
-                    Err("a different machine".into())
-                } else {
-                    Ok(())
-                }
-            },
-        )?;
-        const HAND: &str = "By hand: when the primary is lost, you run one command on the standby";
-        const AUTO: &str = "By itself: a third, small machine (the referee) decides; a Raspberry Pi or a small VM is enough";
-        println!(
-            "With two machines, neither can tell \"the other died\" from \"the network between us broke\", \
-             so only a third machine can promote the standby safely by itself."
-        );
-        let auto = Select::new(
-            "When the primary is lost, the standby becomes the primary:",
-            vec![HAND, AUTO],
-        )
-        .with_starting_cursor(usize::from(had.is_some_and(|p| p.referee.is_some())))
-        .prompt()?
-            == AUTO;
-        let (first_lower, second_lower) = (first.to_ascii_lowercase(), second.to_ascii_lowercase());
-        let referee = if auto {
-            Some(
-                text(
-                    "The referee (name or address):",
-                    had.and_then(|p| p.referee.as_deref()),
-                    move |n| {
-                        named(n)?;
-                        if n.eq_ignore_ascii_case(&first_lower)
-                            || n.eq_ignore_ascii_case(&second_lower)
-                        {
-                            Err("a third machine".into())
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )?
-                .to_ascii_lowercase(),
-            )
-        } else {
-            None
-        };
-        let hub = text(
-            "This machine's address, as the database machines reach it:",
-            Some(&had.map_or_else(|| default_hub(defaults), |p| p.hub.clone())),
-            named,
-        )?;
-        println!(
-            "A second ScannerPulse machine serves the same site when this one is down. \
-             It mounts this machine's archive share at the same path, and the two can share one address."
-        );
-        let (web2, shared) = if Confirm::new("Add a second ScannerPulse machine?")
-            .with_default(had.is_some_and(|p| p.second.is_some()))
-            .prompt()?
-        {
-            let taken: Vec<String> = [&first, &second, &hub]
-                .into_iter()
-                .chain(referee.as_ref())
-                .map(|n| n.to_ascii_lowercase())
-                .collect();
-            let web2 = text(
-                "The second ScannerPulse machine (name or address):",
-                had.and_then(|p| p.second.as_deref()),
-                move |n| {
-                    named(n)?;
-                    if taken.contains(&n.to_ascii_lowercase()) {
-                        Err("a machine of its own".into())
-                    } else {
-                        Ok(())
-                    }
-                },
-            )?
-            .to_ascii_lowercase();
-            let shared = text(
-                "The address the two share, as address/prefix such as 192.0.2.50/24 (empty for none):",
-                had.and_then(|p| p.shared.as_deref()),
-                |s| {
-                    if s.is_empty() {
-                        Ok(())
-                    } else {
-                        shared_address(s)
-                    }
-                },
-            )?;
-            (Some(web2), (!shared.is_empty()).then_some(shared))
-        } else {
-            (None, None)
-        };
-        return Ok(Database::Nodes(Pair {
-            nodes: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
-            hub,
-            referee,
-            second: web2,
-            shared,
-        }));
+        return Ok(Database::Nodes(ask_pair(had, defaults)?));
     }
     let host = text(
         "Its host (name or address):",
@@ -1474,7 +1593,9 @@ fn free(port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Defaults, distinct_machines, free_port, program_in, zone_from_link};
+    use super::{
+        Defaults, convert_from_file, distinct_machines, free_port, program_in, zone_from_link,
+    };
 
     /// The answers file read with no name resolving: a test's names are
     /// invented, and a resolver with a wildcard would make them one machine.
@@ -1671,6 +1792,36 @@ mod tests {
             none,
         );
         assert!(six.unwrap_err().contains("IPv4"));
+    }
+
+    #[test]
+    fn a_conversions_answers_file_gives_its_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = answers_file(
+            dir.path(),
+            "CONVERT=yes\nDB_NODES=DB1.example.org db2.example.org\nFAILOVER=auto\nREFEREE=ref.example.org\nHUB=192.0.2.10\nSECOND=web2.example.org\nSHARED=192.0.2.50/24\nARCHIVE_SHARE=/srv/share/archive\n",
+            0o600,
+        );
+        assert_eq!(
+            convert_from_file(&path, &defaults()),
+            Ok(Some(crate::convert::Convert {
+                nodes: ["db1.example.org".into(), "db2.example.org".into()],
+                hub: "192.0.2.10".into(),
+                referee: Some("ref.example.org".into()),
+                second: Some("web2.example.org".into()),
+                shared: Some("192.0.2.50/24".into()),
+                archive: Some("/srv/share/archive".into()),
+            }))
+        );
+        // Another machine's answers file is not a conversion's.
+        let path = answers_file(dir.path(), "JOIN=192.0.2.10\n", 0o600);
+        assert_eq!(convert_from_file(&path, &defaults()), Ok(None));
+        let path = answers_file(dir.path(), "CONVERT=no\nDB_NODES=a b\n", 0o600);
+        assert!(
+            convert_from_file(&path, &defaults())
+                .unwrap_err()
+                .contains("CONVERT")
+        );
     }
 
     #[test]

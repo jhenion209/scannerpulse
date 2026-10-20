@@ -1565,6 +1565,7 @@ mod tests {
             ready: false,
             joined: Vec::new(),
             moving: false,
+            retired: false,
         }
     }
 
@@ -1614,6 +1615,7 @@ mod tests {
         let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
         let moving = Plan {
             moving: true,
+            retired: false,
             ..plan()
         };
         let all = steps(
@@ -1698,6 +1700,7 @@ mod tests {
         let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
         let moving = Plan {
             moving: true,
+            retired: false,
             ..refereed()
         };
         let all = steps(

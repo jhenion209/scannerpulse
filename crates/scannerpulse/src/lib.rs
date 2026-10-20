@@ -10,6 +10,7 @@ pub mod backfill;
 pub mod backup;
 pub mod cert;
 pub mod cloudflare;
+pub mod convert;
 pub mod data;
 pub mod evaluation;
 pub mod favorites;

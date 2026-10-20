@@ -17,10 +17,12 @@ Setup asks for the folder SDRTrunk saves its recordings in, the archive, the tim
 the first admin account and, if you like, a transcription server. \
 Every advanced option can be set later in the admin page.";
 
-pub const ADVANCED_NOTE: &str = "Also asks where the database runs (this machine, or a \
-PostgreSQL 17 database you run), the certificate (setup's own, or yours), the port, a reverse \
-proxy in front, sending logs to a syslog server, where the backups go, and a monitor's push \
-address for each backup. High availability and Let's Encrypt come in later versions.";
+pub const ADVANCED_NOTE: &str = "Also asks where the database runs (this machine, a \
+PostgreSQL 17 database you run, or two database machines of its own with a referee if you \
+like, and a second ScannerPulse machine), the certificate (setup's own, yours, or Let's \
+Encrypt's), the port, a reverse proxy in front, sending logs to a syslog server, where the \
+backups go, and a monitor's push address for each backup. Or this machine joins an install \
+another machine planned.";
 
 const CHOICES: [(&str, Kind, &str); 2] = [
     ("Simple", Kind::Simple, SIMPLE_NOTE),
@@ -146,7 +148,7 @@ mod tests {
         assert!(
             advanced
                 .join(" ")
-                .contains("High availability and Let's Encrypt come in later versions")
+                .contains("two database machines of its own with a referee if you like")
         );
     }
 

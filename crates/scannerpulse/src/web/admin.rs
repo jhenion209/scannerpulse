@@ -206,6 +206,60 @@ pub async fn layout(_: Admin, State(state): State<AppState>) -> Result<Json<Valu
     ))
 }
 
+/// The conversion's plan, beside the install's layout file.
+fn convert_plan(state: &AppState) -> Option<crate::convert::Convert> {
+    let path = state
+        .machine
+        .layout
+        .as_deref()?
+        .with_file_name("convert.json");
+    crate::convert::Convert::read(&path).ok()
+}
+
+/// `GET /api/admin/convert`: the guide through the install's conversion to
+/// high availability (`convert::guide`), once setup's planner has saved its
+/// plan; `{"plan": null}` before.
+pub async fn convert(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let Some(plan) = convert_plan(&state) else {
+        return Ok(Json(json!({ "plan": null })));
+    };
+    let layout = state
+        .machine
+        .layout
+        .as_deref()
+        .and_then(crate::layout::Layout::read);
+    let report = crate::layout::report(&state.pool, layout.as_ref(), &state.machine.nodes).await?;
+    let mut conn = state.pool.acquire().await?;
+    let archive = crate::setup::archive_move::current(&mut conn)
+        .await?
+        .map(|path| path.display().to_string());
+    drop(conn);
+    let mut asked = Vec::new();
+    for kind in crate::agent::Kind::ALL {
+        if let Some(request) = crate::agent::last(&state.pool, kind).await? {
+            asked.push((kind, request.finished_at.and(request.ok)));
+        }
+    }
+    let seen = crate::convert::Seen {
+        archive,
+        layout,
+        asked,
+        up: report["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|machine| machine["up"] == true)
+            .filter_map(|machine| machine["host"].as_str().map(String::from))
+            .collect(),
+        standby_current: crate::convert::standby_current(&report["database"]),
+        referee_answers: report["referee"]["answers"].as_bool(),
+    };
+    Ok(Json(json!({
+        "plan": plan,
+        "guide": crate::convert::guide(&plan, &seen),
+    })))
+}
+
 /// `GET /api/admin/reports/traffic`: the traffic report, kept for ten
 /// minutes on each host, since it reads months of calls; a changed time zone
 /// makes it again.
@@ -361,6 +415,11 @@ pub async fn updates(_: Admin, State(state): State<AppState>) -> Result<Json<Val
             .fetch_all(&state.pool)
             .await?;
     let running = crate::update::VERSION;
+    let mut requests = serde_json::Map::new();
+    for kind in crate::agent::Kind::ALL {
+        let last = crate::agent::last(&state.pool, kind).await?;
+        requests.insert(kind.name().into(), json!(last));
+    }
     Ok(Json(json!({
         "running": running,
         "machines": machines
@@ -380,10 +439,7 @@ pub async fn updates(_: Admin, State(state): State<AppState>) -> Result<Json<Val
             "seen_seconds_ago": ago.round(),
             "up": ago < crate::agent::SILENT_AFTER as f64,
         })),
-        "requests": {
-            "update": crate::agent::last(&state.pool, crate::agent::Kind::Update).await?,
-            "switchover": crate::agent::last(&state.pool, crate::agent::Kind::Switchover).await?,
-        },
+        "requests": requests,
         "open": crate::agent::open(&state.pool).await?,
     })))
 }
@@ -394,17 +450,27 @@ pub struct HelperRequest {
 }
 
 /// `POST /api/admin/helper`: asks the root helper for an update of every
-/// machine (`update`) or a switchover of the database machines
-/// (`switchover`). Refused while another request waits or runs, or when no
-/// helper is up.
+/// machine (`update`), a switchover of the database machines (`switchover`)
+/// or a step of the conversion the guide shows (the others, which need its
+/// plan). Refused while another request waits or runs, or when no helper is
+/// up.
 pub async fn helper(
     admin: Admin,
     State(state): State<AppState>,
     Json(body): Json<HelperRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     use crate::agent::{Kind, Refused};
-    let kind = Kind::parse(&body.kind)
-        .ok_or_else(|| ApiError::BadRequest("ask for update or switchover".into()))?;
+    let kind = Kind::parse(&body.kind).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "ask for one of: {}",
+            Kind::ALL.map(Kind::name).join(", ")
+        ))
+    })?;
+    if kind.converts() && convert_plan(&state).is_none() {
+        return Err(ApiError::BadRequest(
+            "no conversion is planned: run `sudo /usr/local/bin/scannerpulse setup` on this machine first".into(),
+        ));
+    }
     match crate::agent::ask(&state.pool, kind, &admin.0.login).await {
         Ok(id) => {
             record(&admin, format!("asked the root helper for request {id}: {}", kind.name()));

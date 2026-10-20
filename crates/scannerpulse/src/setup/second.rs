@@ -319,6 +319,7 @@ pub(super) mod tests {
             ready: true,
             joined: Vec::new(),
             moving: false,
+            retired: false,
         }
     }
 

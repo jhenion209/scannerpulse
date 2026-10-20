@@ -555,6 +555,7 @@ mod tests {
             ready: false,
             joined: Vec::new(),
             moving: false,
+            retired: false,
         };
         plan.write(&path).unwrap();
         let none = |_: &str| Vec::new();

@@ -260,6 +260,7 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
         second: Some("radio-b".into()),
         shared: Some("192.0.2.50/24".into()),
         install_id: "0123456789abcdef".into(),
+        ..Default::default()
     }
     .write(&layout)
     .unwrap();
@@ -605,4 +606,82 @@ async fn an_admin_asks_the_root_helper_and_sees_what_it_said(pool: PgPool) {
     assert!(asked["started_at"].is_null());
     assert_eq!(asked["said"], "");
     assert!(body["requests"]["switchover"].is_null());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_admin_follows_the_conversions_guide_and_approves_its_steps(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = dir.path().join("layout.json");
+    let mut state = scannerpulse::web::AppState::new(pool.clone());
+    state.machine = scannerpulse::web::Machine {
+        layout: Some(layout.clone()),
+        ..Default::default()
+    };
+    let app = scannerpulse::web::router(state).layer(axum::extract::connect_info::MockConnectInfo(
+        std::net::SocketAddr::from((common::PEER, 40_000)),
+    ));
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    // No plan yet: no guide, and none of its steps may be asked for.
+    let got = send(&app, "GET", "/api/admin/convert", &h, None).await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    assert!(got.body["plan"].is_null());
+    scannerpulse::agent::beat(&pool, "radio-a").await.unwrap();
+    let ask = |kind: &str| {
+        send(
+            &app,
+            "POST",
+            "/api/admin/helper",
+            &h,
+            Some(json!({"kind": kind})),
+        )
+    };
+    let refused = ask("db_move").await;
+    assert_eq!(refused.status, 400, "{:?}", refused.body);
+    assert!(
+        refused.body.to_string().contains("scannerpulse setup"),
+        "{:?}",
+        refused.body
+    );
+    // The planner's plan: the first step opens this machine's database.
+    scannerpulse::convert::Convert {
+        nodes: ["db1.example.org".into(), "db2.example.org".into()],
+        hub: "192.0.2.10".into(),
+        referee: None,
+        second: None,
+        shared: None,
+        archive: None,
+    }
+    .write(&dir.path().join("convert.json"))
+    .unwrap();
+    let got = send(&app, "GET", "/api/admin/convert", &h, None).await;
+    assert_eq!(got.body["plan"]["nodes"][0], "db1.example.org");
+    let steps = &got.body["guide"]["steps"];
+    assert_eq!(steps[0]["id"], "db-open");
+    assert_eq!(steps[0]["state"], "now");
+    assert_eq!(steps[0]["ask"]["kind"], "db_move");
+    assert_eq!(got.body["guide"]["complete"], false);
+    // Approved: the root helper's request is recorded.
+    assert_eq!(ask("db_move").await.status, 202);
+    let got = send(&app, "GET", "/api/admin/updates", &h, None).await;
+    assert_eq!(got.body["requests"]["db_move"]["kind"], "db_move");
+    assert!(got.body["requests"]["db_switch"].is_null());
+    // Opened: the first database machine joins next.
+    scannerpulse::layout::Layout {
+        hub: "192.0.2.10".into(),
+        nodes: vec!["db1.example.org".into(), "db2.example.org".into()],
+        moving: true,
+        ..Default::default()
+    }
+    .write(&layout)
+    .unwrap();
+    let got = send(&app, "GET", "/api/admin/convert", &h, None).await;
+    let steps = &got.body["guide"]["steps"];
+    assert_eq!(steps[0]["state"], "done");
+    assert_eq!(steps[1]["id"], "db1-join");
+    assert_eq!(steps[1]["state"], "now");
+    assert_eq!(steps[1]["on"], "db1.example.org");
+    // The Layout says the database is moving.
+    let got = send(&app, "GET", "/api/admin/layout", &h, None).await;
+    assert_eq!(got.body["moving"], true);
 }

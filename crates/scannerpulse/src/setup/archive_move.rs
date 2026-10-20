@@ -329,13 +329,14 @@ fn usable(new: &Path, say: &impl Fn(&str)) -> Result<(), String> {
 }
 
 /// `scannerpulse archive move NEW [--switch]`, as root on the ScannerPulse
-/// machine of an install without a second one.
+/// machine of an install without a second one: what it says, and whether
+/// NEW holds the whole archive (always, once switched).
 pub async fn run(
     conn: &mut sqlx::PgConnection,
     new: &Path,
     switch: bool,
     say: impl Fn(&str),
-) -> Result<String, String> {
+) -> Result<(bool, String), String> {
     let settings = std::fs::read_to_string(super::steps::env_path())
         .map_err(|_| "this machine runs no ScannerPulse site".to_string())?;
     let plan_here = Path::new(super::plan::PLAN).exists();
@@ -391,16 +392,22 @@ pub async fn run(
     ));
     if !switch {
         return Ok(if compared.same() {
-            format!(
-                "{} holds every one of them. To move to it, run: sudo /usr/local/bin/scannerpulse archive move {} --switch",
-                new.display(),
-                new.display()
+            (
+                true,
+                format!(
+                    "{} holds every one of them. To move to it, run: sudo /usr/local/bin/scannerpulse archive move {} --switch",
+                    new.display(),
+                    new.display()
+                ),
             )
         } else {
-            format!(
-                "{}\nCopy them with:\n  {}\nthen run this again.",
-                differences(&compared),
-                copy_line(&old, &new)
+            (
+                false,
+                format!(
+                    "{}\nCopy them with:\n  {}\nthen run this again.",
+                    differences(&compared),
+                    copy_line(&old, &new)
+                ),
             )
         });
     }
@@ -497,7 +504,7 @@ pub async fn run(
     ]);
     switched?;
     restarted?;
-    Ok(moved_text(&old, &new, old.join(BACKUPS).is_dir()))
+    Ok((true, moved_text(&old, &new, old.join(BACKUPS).is_dir())))
 }
 
 /// The path with its links resolved, or as it is when it is not there.
