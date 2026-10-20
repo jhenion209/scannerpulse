@@ -70,7 +70,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse db promote | db rejoin | db switchover
        scannerpulse db move DB1 DB2 --hub ADDRESS [--referee REF]
-       scannerpulse db move --switch | db move --retire
+       scannerpulse db move --switch | db move --retire | db move --cancel
        scannerpulse update [--check | --yes]
        scannerpulse agent | agent install
        scannerpulse archive move FOLDER [--switch]
@@ -196,7 +196,8 @@ db          as root, with two database machines: promote, on the standby
             its database to DB1 and DB2 (ADDRESS is this machine's address
             as they reach them): the plan, and this database opened to them;
             --switch makes DB1 the primary once it has caught up; --retire
-            removes the old database once you agree
+            removes the old database once you agree; --cancel, before the
+            switch, takes the site back to this machine's database alone
 second      as root, on the first ScannerPulse machine with two database
             machines: adds NAME, a second ScannerPulse machine, which
             shares ADDRESS/PREFIX with this one; the database machines
@@ -266,6 +267,7 @@ enum DbMove {
     },
     Switch,
     Retire,
+    Cancel,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -673,6 +675,7 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db", "switchover"] => Some(Command::Db(DbCommand::Switchover)),
         ["db", "move", "--switch"] => Some(Command::DbMove(DbMove::Switch)),
         ["db", "move", "--retire"] => Some(Command::DbMove(DbMove::Retire)),
+        ["db", "move", "--cancel"] => Some(Command::DbMove(DbMove::Cancel)),
         ["db", "move", first, second, "--hub", hub] => Some(Command::DbMove(DbMove::Begin {
             nodes: [first.to_string(), second.to_string()],
             hub: hub.to_string(),
@@ -1056,6 +1059,15 @@ async fn run() -> ExitCode {
                     }
                     DbMove::Retire => {
                         scannerpulse::setup::db_move::retire(|question| {
+                            inquire::Confirm::new(question)
+                                .with_default(false)
+                                .prompt()
+                                .unwrap_or(false)
+                        })
+                        .await
+                    }
+                    DbMove::Cancel => {
+                        scannerpulse::setup::db_move::cancel(|question| {
                             inquire::Confirm::new(question)
                                 .with_default(false)
                                 .prompt()
@@ -2418,6 +2430,10 @@ mod tests {
         assert_eq!(
             parse(&["db", "move", "--retire"]),
             Some(Command::DbMove(DbMove::Retire))
+        );
+        assert_eq!(
+            parse(&["db", "move", "--cancel"]),
+            Some(Command::DbMove(DbMove::Cancel))
         );
         assert_eq!(parse(&["db", "move", "db1", "db2"]), None);
         assert_eq!(

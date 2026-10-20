@@ -127,14 +127,18 @@ pub struct Check {
     pub ok: bool,
 }
 
-/// The guide: the steps in order, the checks of the last, and whether the
-/// conversion is complete.
+/// The guide: the steps in order, the checks of the last, whether the
+/// conversion is complete, and, while the database moves, how to go back.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Guide {
     pub steps: Vec<Step>,
     pub checks: Vec<Check>,
     pub complete: bool,
+    pub back: Option<String>,
 }
+
+/// How to go back while the database moves, before the switch.
+pub const BACK: &str = "Until the switch, `sudo /usr/local/bin/scannerpulse db move --cancel` on this machine takes the site back to its own database alone; it says what to do with the machines that joined.";
 
 /// The newest request of `kind` ended as `how`.
 fn ended(seen: &Seen, kind: Kind, how: bool) -> bool {
@@ -431,6 +435,7 @@ pub fn guide(convert: &Convert, seen: &Seen) -> Guide {
         complete: done,
         steps: out,
         checks,
+        back: layout.is_some_and(|l| l.moving).then(|| BACK.to_string()),
     }
 }
 
@@ -504,6 +509,13 @@ mod tests {
         let guide = super::guide(&plan, &seen);
         let now = &guide.steps[1];
         assert_eq!((now.id, now.state), ("db1-join", State::Now));
+        // Until the switch, the move can be cancelled.
+        assert!(
+            guide
+                .back
+                .as_deref()
+                .is_some_and(|b| b.contains("db move --cancel"))
+        );
         assert_eq!(now.on.as_deref(), Some("db1.example.org"));
         assert_eq!(now.run[0], INSTALL);
         assert!(
@@ -515,11 +527,9 @@ mod tests {
             layout: Some(layout(&["db1.example.org"], false)),
             ..Seen::default()
         };
-        assert_eq!(
-            super::guide(&plan, &seen).steps[3].state,
-            State::Now,
-            "db2-join"
-        );
+        let guide = super::guide(&plan, &seen);
+        assert_eq!(guide.steps[3].state, State::Now, "db2-join");
+        assert_eq!(guide.back, None, "after the switch, nothing to cancel");
     }
 
     #[test]

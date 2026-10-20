@@ -5,6 +5,7 @@
 //! stops this machine's PostgreSQL cleanly and makes that copy the primary,
 //! with writes paused for the seconds it takes; the second joins after it;
 //! and `db move --retire` removes the old database once the person agrees.
+//! Until the switch, `db move --cancel` takes it all back (5E4).
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -989,6 +990,249 @@ pub async fn retire(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     Ok("This machine's old database is removed. Its old backups stay in the backups' folder until you remove them.".into())
 }
 
+/// Where Debian keeps the cluster's settings, which pg_autoctl moves into
+/// the data directory when it takes the database over.
+const DEBIAN_ETC: &str = "/etc/postgresql/17/main";
+
+/// A move may be cancelled until the switch: while it is under way, and
+/// while this machine's database still answers as the primary (`here`). A
+/// switch that has begun stopped it, or made it a standby, and the copy may
+/// hold newer writes.
+pub fn may_cancel(plan: &Plan, here: &node::Status) -> Result<(), String> {
+    if !plan.moving {
+        return Err("no move of the database is under way: there is nothing to cancel (after the switch, the database machines hold the site's database)".into());
+    }
+    if !here.answers || here.standby {
+        return Err("this machine's database does not answer as the primary: the switch may have begun, and the copy may hold newer writes, so nothing was changed; finish it with `sudo /usr/local/bin/scannerpulse db move --switch`".into());
+    }
+    Ok(())
+}
+
+/// The settings and the site's password file as setup wrote them for its
+/// own database: the database machines no longer named.
+pub fn back_steps(text: &str, password: &str) -> Result<Vec<Step>, String> {
+    let settings = crate::hostfile::changed(text, crate::primary::HOSTS, None)?;
+    Ok(vec![
+        super::change::settings_with(&settings, &[])?,
+        Step {
+            title: "Write the database's password file for this machine's database".into(),
+            action: Action::Write {
+                path: super::steps::pgpass_path(),
+                contents: format!("localhost:{PORT_PG}:{DATABASE}:{ACCOUNT}:{password}\n"),
+                mode: 0o600,
+                owner: format!("{ACCOUNT}:{ACCOUNT}"),
+            },
+        },
+    ])
+}
+
+/// The steps that give this machine's database back to itself alone: with
+/// a referee that took it over (`adopted`, the referee), it leaves the
+/// referee's formation, its data kept, the machines that joined it are
+/// taken out of it too, and PostgreSQL's own service runs it again with its
+/// own settings; otherwise its access rules, copying role and network
+/// opening are undone. Each runs again without harm.
+pub fn cancel_steps(system: &System, adopted: Option<&str>) -> Vec<Step> {
+    let data = system.postgres_data();
+    let mut steps = Vec::new();
+    if let Some(referee) = adopted {
+        steps.push(node::script(
+            "Take this machine's database out of the referee's formation (its data stays)",
+            "[ -f \"$UNIT\" ] || exit 0\nrunuser -u postgres -- env -u XDG_RUNTIME_DIR -u PGPASSFILE LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=\"$BIN:/usr/bin:/bin\" pg_autoctl drop node --pgdata \"$DATA\" || echo \"the referee was not told: its formation still names this machine until the referee is uninstalled\" >&2",
+            &[
+                ("UNIT", node::AUTOCTL_UNIT),
+                ("BIN", system.postgres_bin()),
+                ("DATA", data),
+            ],
+            None,
+        ));
+        // A new move needs an empty formation: a copy that joined is left a
+        // primary of its own there, cut off, until it is uninstalled.
+        steps.push(node::script(
+            "Take the machines that joined out of the referee's formation",
+            "runuser -u postgres -- env -u PGPASSFILE PGCONNECT_TIMEOUT=5 psql \"$MONITOR\" -qtAXc \"SELECT pgautofailover.remove_node(nodeid, true) FROM pgautofailover.node WHERE formationid = 'default'\" >/dev/null || echo \"the referee did not answer: remove its formation's machines with pg_autoctl there before a new move\" >&2",
+            &[("MONITOR", &node::monitor_uri(referee))],
+            None,
+        ));
+        steps.push(node::script(
+            "Stop pg_autoctl here, for good",
+            "systemctl disable --now pgautofailover 2>/dev/null; rm -f \"$UNIT\" && systemctl daemon-reload",
+            &[("UNIT", node::AUTOCTL_UNIT)],
+            None,
+        ));
+        let back = match system.family {
+            Family::Apt => {
+                "for f in postgresql.conf pg_hba.conf pg_ident.conf; do\n  if [ -f \"$DATA/$f\" ] && [ ! -f \"$ETC/$f\" ]; then mv \"$DATA/$f\" \"$ETC/$f\" || exit 1; fi\ndone\nsed -i -e \"/^include 'postgresql-auto-failover.conf'/d\" -e 's/^# \\(data_directory\\|hba_file\\|ident_file\\|include_dir\\) = /\\1 = /' \"$ETC/postgresql.conf\" &&\nsed -i '/# Auto-generated by pg_auto_failover$/d' \"$ETC/pg_hba.conf\" &&\n{ [ ! -f \"$ETC/start.conf.orig\" ] || mv \"$ETC/start.conf.orig\" \"$ETC/start.conf\"; } &&\nrm -f \"$DATA/postgresql-auto-failover.conf\" &&\nsed -i '/^synchronous_standby_names/d' \"$DATA/postgresql.auto.conf\""
+            }
+            Family::Dnf => {
+                "sed -i \"/^include 'postgresql-auto-failover.conf'/d\" \"$DATA/postgresql.conf\" &&\nsed -i '/# Auto-generated by pg_auto_failover$/d' \"$DATA/pg_hba.conf\" &&\nrm -f \"$DATA/postgresql-auto-failover.conf\" &&\nsed -i '/^synchronous_standby_names/d' \"$DATA/postgresql.auto.conf\""
+            }
+        };
+        steps.push(node::script(
+            "Give the database's settings back to PostgreSQL's own service, without the referee's",
+            back,
+            &[("DATA", data), ("ETC", DEBIAN_ETC)],
+            None,
+        ));
+        steps.push(node::script(
+            "Start PostgreSQL 17 with its own service again (writes pause until it answers)",
+            "systemctl enable --now \"$SERVICE\" || exit 1\nfor i in $(seq 60); do runuser -u postgres -- psql -tAXc 'SELECT 1' >/dev/null 2>&1 && exit 0; sleep 1; done\necho \"PostgreSQL did not answer within 60 s: see journalctl -u $SERVICE\" >&2; exit 1",
+            &[("SERVICE", system.postgres_cluster())],
+            None,
+        ));
+        steps.push(node::script(
+            "Remove pg_autoctl's roles and state here",
+            "runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 && rm -r -f \"$HOME_PG/.config/pg_autoctl\" \"$HOME_PG/.local/share/pg_autoctl\"",
+            &[("HOME_PG", system.postgres_home())],
+            Some(format!(
+                "{}DROP ROLE IF EXISTS pgautofailover_replicator;\nDROP ROLE IF EXISTS pgautofailover_monitor;\n",
+                super::steps::QUIET_SQL
+            )),
+        ));
+        steps.push(node::pgpass_step(
+            "Remove the copy's and the referee's passwords from the postgres account's file",
+            system,
+            &["pgautofailover_replicator", "autoctl_node"],
+            String::new(),
+        ));
+    } else {
+        steps.push(node::script(
+            "Close this machine's database to the database machines",
+            REPLACE_BLOCK,
+            &[("MARK", MARK), ("HBA", system.postgres_hba())],
+            Some(String::new()),
+        ));
+        steps.push(node::script(
+            "End the copies' connections, remove the copying role, and listen on this machine only",
+            "runuser -u postgres -- psql -q -v ON_ERROR_STOP=1",
+            &[],
+            Some(format!(
+                "{QUIET}SELECT pg_reload_conf();\n\
+                 SELECT pg_terminate_backend(pid) FROM pg_stat_replication;\n\
+                 SELECT 'DROP OWNED BY {R}' WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{R}') \\gexec\n\
+                 DROP ROLE IF EXISTS {R};\n\
+                 ALTER SYSTEM RESET listen_addresses;\n",
+                QUIET = super::steps::QUIET_SQL,
+                R = node::REPLICATOR,
+            )),
+        ));
+        steps.push(node::script(
+            "Restart PostgreSQL 17 if its settings need it (writes pause for a few seconds)",
+            "runuser -u postgres -- psql -qtAXc 'SELECT pg_reload_conf()' >/dev/null && sleep 1\nn=$(runuser -u postgres -- psql -tAXc 'SELECT count(*) FROM pg_settings WHERE pending_restart') || exit 1\n[ \"$n\" = 0 ] || systemctl restart \"$SERVICE\"",
+            &[("SERVICE", system.postgres_cluster())],
+            None,
+        ));
+    }
+    steps.push(super::steps::firewall(false, PORT_PG));
+    steps
+}
+
+/// The database machines of `plan` that have joined: each holds a copy,
+/// cut off by a cancel, and is uninstalled there.
+fn joined(plan: &Plan) -> Vec<&str> {
+    plan.nodes
+        .iter()
+        .filter(|machine| plan.joined.contains(machine))
+        .map(String::as_str)
+        .collect()
+}
+
+/// What is said once the move is cancelled: what to do with the machines
+/// that joined it.
+pub fn cancelled_text(plan: &Plan) -> String {
+    let joined = joined(plan);
+    let copies = if joined.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " On {}, run `sudo /usr/local/bin/scannerpulse uninstall` (its PostgreSQL stays until you remove it with the system's package tool): the copy there is cut off and is no longer the site's database.",
+            joined.join(" and ")
+        )
+    };
+    let referee = match &plan.referee {
+        Some(referee) if plan.joined.contains(referee) => format!(
+            " The referee {referee} holds no machine now: it may serve a new move, or be uninstalled."
+        ),
+        _ => String::new(),
+    };
+    format!(
+        "The move is cancelled: the site uses this machine's own database alone, as before.{copies}{referee} The conversion's plan stays: `sudo /usr/local/bin/scannerpulse setup` here changes or drops it."
+    )
+}
+
+/// `scannerpulse db move --cancel`, as root on the ScannerPulse machine,
+/// before the switch: the site back on this machine's own database alone,
+/// once the person agrees. Writes pause for the seconds it takes.
+pub async fn cancel(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
+    let path = Path::new(super::plan::PLAN);
+    let plan = Plan::read(path).map_err(|_| {
+        "no move of the database is under way: there is nothing to cancel".to_string()
+    })?;
+    may_cancel(&plan, &node::status())?;
+    let settings = read_settings()?;
+    let system = this_system()?;
+    let pgpass = std::fs::read_to_string(super::steps::pgpass_path())
+        .map_err(|error| format!("{}: {error}", super::steps::pgpass_path().display()))?;
+    let password =
+        app_password(&pgpass).ok_or("the site's password file has no line for its database")?;
+    let adopted = plan
+        .referee
+        .as_deref()
+        .filter(|_| Path::new(node::AUTOCTL_UNIT).exists());
+    let joined = joined(&plan);
+    let copies = if joined.is_empty() {
+        String::new()
+    } else {
+        format!(" {} must then be uninstalled there.", joined.join(" and "))
+    };
+    if !confirm(&format!(
+        "Cancel the move to {} and {}: the site goes back to this machine's own database alone (writes pause for a few seconds).{copies} Cancel it?",
+        plan.nodes[0], plan.nodes[1]
+    )) {
+        return Ok("Nothing was changed.".into());
+    }
+    let _lock = crate::update::exclusive(Path::new(crate::update::LOCK))?;
+    use tokio::signal::unix::{SignalKind, signal};
+    let _held = [
+        SignalKind::interrupt(),
+        SignalKind::hangup(),
+        SignalKind::terminate(),
+    ]
+    .into_iter()
+    .map(signal)
+    .collect::<std::io::Result<Vec<_>>>()
+    .map_err(|error| format!("cannot hold off signals: {error}"))?;
+    // The site stops first: with a referee, the copy may become a primary
+    // once this database leaves the formation, and the site, while it still
+    // names both, must write to neither.
+    let _site = Site;
+    systemctl(&[
+        "stop",
+        "scannerpulse-web.service",
+        "scannerpulse-ingest.service",
+    ])?;
+    let mut steps = back_steps(&settings, &password)?;
+    steps.extend(cancel_steps(&system, adopted));
+    super::apply::apply(&steps, &context(), true).await?;
+    for file in [path.to_path_buf(), path.with_file_name("layout.json")] {
+        match std::fs::remove_file(&file) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("{}: {error}", file.display()));
+            }
+            _ => {}
+        }
+    }
+    systemctl(&[
+        "start",
+        "scannerpulse-web.service",
+        "scannerpulse-ingest.service",
+    ])?;
+    if let Some(helper) = helper_restart() {
+        systemctl(&["try-restart", helper])?;
+    }
+    Ok(cancelled_text(&plan))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,6 +1242,197 @@ mod tests {
 
     fn plan() -> Plan {
         serde_json::from_str(r#"{"hub":"192.0.2.10","hub_key":"ssh-ed25519 AAAAhub","nodes":["db1.example.org","2001:db8::22"],"database":"scannerpulse","role":"scannerpulse","password":"app-secret-1","replication_password":"copy-secret-2","moving":true}"#).unwrap()
+    }
+
+    fn status(answers: bool, standby: bool) -> node::Status {
+        node::Status {
+            answers,
+            standby,
+            streaming: 0,
+            behind: 0,
+        }
+    }
+
+    #[test]
+    fn a_move_is_cancelled_only_before_the_switch() {
+        let moving = plan();
+        assert_eq!(may_cancel(&moving, &status(true, false)), Ok(()));
+        // The switch has begun: this database stopped, or follows the copy.
+        for here in [status(false, false), status(true, true)] {
+            let error = may_cancel(&moving, &here).unwrap_err();
+            assert!(error.contains("db move --switch"), "{error}");
+        }
+        let switched = Plan {
+            moving: false,
+            ..plan()
+        };
+        let error = may_cancel(&switched, &status(true, false)).unwrap_err();
+        assert!(error.contains("nothing to cancel"), "{error}");
+    }
+
+    #[test]
+    fn cancelled_the_site_names_this_machines_database_alone() {
+        let following = crate::hostfile::changed(
+            HERE,
+            crate::primary::HOSTS,
+            Some("localhost:5432 db1.example.org:5432"),
+        )
+        .unwrap();
+        let steps = back_steps(&following, "s3cret").unwrap();
+        let Action::Write { contents, .. } = &steps[0].action else {
+            panic!()
+        };
+        assert!(
+            !contents.contains("SCANNERPULSE_DATABASE_HOSTS"),
+            "{contents}"
+        );
+        assert_eq!(database_here(contents), Ok(()));
+        let Action::Write { contents, mode, .. } = &steps[1].action else {
+            panic!()
+        };
+        assert_eq!(
+            contents,
+            "localhost:5432:scannerpulse:scannerpulse:s3cret\n"
+        );
+        assert_eq!(*mode, 0o600);
+    }
+
+    fn scripts(steps: &[Step]) -> Vec<(String, String, String)> {
+        steps
+            .iter()
+            .map(|step| match &step.action {
+                Action::Run {
+                    args, input, env, ..
+                } => (
+                    step.title.clone(),
+                    args.join(" ")
+                        + &env
+                            .iter()
+                            .map(|(k, v)| format!(" {k}={v}"))
+                            .collect::<String>(),
+                    input.clone().unwrap_or_default(),
+                ),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn by_hand_the_cancel_closes_the_database_to_the_machines_again() {
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let all = scripts(&cancel_steps(&debian, None));
+        assert!(all[0].1.contains(&format!("MARK={MARK}")), "{:?}", all[0]);
+        assert!(all[0].1.contains("HBA=/etc/postgresql/17/main/pg_hba.conf"));
+        assert_eq!(all[0].2, "", "the block goes, nothing comes in its place");
+        let sql = &all[1].2;
+        assert!(
+            sql.contains("pg_terminate_backend(pid) FROM pg_stat_replication"),
+            "{sql}"
+        );
+        assert!(sql.contains("DROP OWNED BY replicator"), "{sql}");
+        assert!(sql.contains("DROP ROLE IF EXISTS replicator;"), "{sql}");
+        assert!(
+            sql.contains("ALTER SYSTEM RESET listen_addresses;"),
+            "{sql}"
+        );
+        assert!(all[2].1.contains("pending_restart"), "{:?}", all[2]);
+        assert!(all[3].0.starts_with("Close port 5432"), "{:?}", all[3]);
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
+    fn with_a_referee_the_cancel_gives_the_database_back_to_its_own_service() {
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let all = scripts(&cancel_steps(&debian, Some("ref.example.org")));
+        let titles: Vec<&str> = all.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Take this machine's database out of the referee's formation (its data stays)",
+                "Take the machines that joined out of the referee's formation",
+                "Stop pg_autoctl here, for good",
+                "Give the database's settings back to PostgreSQL's own service, without the referee's",
+                "Start PostgreSQL 17 with its own service again (writes pause until it answers)",
+                "Remove pg_autoctl's roles and state here",
+                "Remove the copy's and the referee's passwords from the postgres account's file",
+                "Close port 5432 in the firewall, if firewalld runs",
+            ]
+        );
+        // Its data stays: never --destroy.
+        assert!(
+            all[0].1.contains("pg_autoctl drop node --pgdata"),
+            "{:?}",
+            all[0]
+        );
+        assert!(!all[0].1.contains("--destroy"));
+        // A new move finds the formation empty.
+        assert!(
+            all[1]
+                .1
+                .contains("pgautofailover.remove_node(nodeid, true)"),
+            "{:?}",
+            all[1]
+        );
+        assert!(
+            all[1].1.contains("@ref.example.org:5432/pg_auto_failover"),
+            "{:?}",
+            all[1]
+        );
+        // Debian's own settings, moved into the data directory, go back, and
+        // no standby is waited for.
+        let back = &all[3].1;
+        for part in [
+            "mv \"$DATA/$f\" \"$ETC/$f\"",
+            "/^include 'postgresql-auto-failover.conf'/d",
+            "data_directory\\|hba_file\\|ident_file\\|include_dir",
+            "start.conf.orig",
+            "/^synchronous_standby_names/d",
+            "ETC=/etc/postgresql/17/main",
+            "DATA=/var/lib/postgresql/17/main",
+        ] {
+            assert!(back.contains(part), "{part}: {back}");
+        }
+        assert!(
+            all[4].1.contains("SERVICE=postgresql@17-main"),
+            "{:?}",
+            all[4]
+        );
+        assert!(
+            all[5]
+                .2
+                .contains("DROP ROLE IF EXISTS pgautofailover_replicator;")
+        );
+        // Red Hat: pg_autoctl left the settings in place.
+        let rocky = detect("ID=\"rocky\"\nVERSION_ID=\"9.8\"\n", "x86_64").unwrap();
+        let all = scripts(&cancel_steps(&rocky, Some("ref.example.org")));
+        assert!(!all[3].1.contains("start.conf"), "{:?}", all[3]);
+        assert!(all[3].1.contains("/^synchronous_standby_names/d"));
+        assert!(all[4].1.contains("SERVICE=postgresql-17"), "{:?}", all[4]);
+    }
+
+    #[test]
+    fn once_cancelled_the_machines_that_joined_are_named_for_uninstalling() {
+        let mut plan = Plan {
+            referee: Some("ref.example.org".into()),
+            ..plan()
+        };
+        plan.mark_joined("ref.example.org");
+        plan.mark_joined("db1.example.org");
+        let text = cancelled_text(&plan);
+        assert!(
+            text.contains("On db1.example.org, run `sudo /usr/local/bin/scannerpulse uninstall`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("The referee ref.example.org holds no machine now"),
+            "{text}"
+        );
+        assert!(
+            text.contains("scannerpulse setup` here changes or drops it"),
+            "{text}"
+        );
+        let none = cancelled_text(&super::tests::plan());
+        assert!(!none.contains("uninstall"), "{none}");
     }
 
     #[test]
