@@ -297,7 +297,9 @@ async fn a_lease_lost_during_the_repair_keeps_the_source(pool: PgPool) -> sqlx::
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn an_unreadable_file_is_rejected_and_left_in_place(pool: PgPool) -> sqlx::Result<()> {
+async fn an_unreadable_file_is_rejected_and_deleted_from_its_recorders_folder(
+    pool: PgPool,
+) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     let no_audio = site.arrive("20310115_120000_x.mp3", b"not audio").await;
     let no_date = site.arrive("recording.mp3", &bravo()).await;
@@ -307,7 +309,10 @@ async fn an_unreadable_file_is_rejected_and_left_in_place(pool: PgPool) -> sqlx:
         done.iter().all(|o| matches!(o, Outcome::Rejected(_))),
         "{done:?}"
     );
-    assert!(no_audio.exists() && no_date.exists());
+    assert!(
+        !no_audio.exists() && !no_date.exists(),
+        "nothing stays in a recorder's folder"
+    );
     let (state, reason) = site.state("20310115_120000_x.mp3").await;
     assert_eq!(state, "rejected");
     assert!(reason.unwrap().contains("frame"));
@@ -319,6 +324,20 @@ async fn an_unreadable_file_is_rejected_and_left_in_place(pool: PgPool) -> sqlx:
             .contains("date")
     );
     assert!(site.calls().await.is_empty());
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_rejected_file_that_changed_since_it_was_seen_stays_to_be_read_again(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    let path = site.arrive("recording.mp3", &bravo()).await;
+    fs::write(&path, b"longer than before, so it changed").unwrap();
+    let done = outcomes(site.filer().pass(10).await?);
+    assert!(matches!(done[..], [Outcome::Later { .. }]), "{done:?}");
+    assert!(path.exists());
+    assert_eq!(site.state("recording.mp3").await.0, "waiting");
     Ok(())
 }
 

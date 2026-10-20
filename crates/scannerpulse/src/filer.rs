@@ -9,6 +9,7 @@
 //! The next pass repairs a crash: before step 1 the filer looks for an exact
 //! copy of the file in its folder, and records it instead of copying again.
 //! Only the lease holder files, and it checks its lease before every step.
+//! A file that cannot be filed is deleted too, and recorded as rejected.
 
 use std::collections::HashMap;
 use std::fs;
@@ -155,7 +156,7 @@ impl Filer {
         let path = Path::new(&row.source_path).join(&row.rel_path);
         let (call, data) = match reader::read_path(&path, self.zone) {
             Ok(read) => read,
-            Err(ReadError::Rejected(why)) => return self.reject(row, why).await,
+            Err(ReadError::Rejected(why)) => return self.reject_file(row, &path, why).await,
             Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
                 return self.missing(row).await;
             }
@@ -172,7 +173,7 @@ impl Filer {
         let rel =
             match archive::rel_path(call.local_start.date(), &archive::folder(talkgroup), name) {
                 Ok(rel) => rel,
-                Err(why) => return self.reject(row, why).await,
+                Err(why) => return self.reject_file(row, &path, why).await,
             };
         let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
         let digest = archive::sha256(&data);
@@ -283,6 +284,35 @@ impl Filer {
             ))),
             Err(RecordError::Database(error)) => Err(error),
         }
+    }
+
+    /// A file that cannot be filed: deleted from its recorder's folder, since
+    /// nothing may stay there, then recorded as rejected with the reason. A
+    /// file that changed since the watcher saw it stays, to be read again.
+    /// Deleted first: a stop between the two leaves a row that ends as
+    /// missing, never a file left behind.
+    async fn reject_file(&self, row: &Waiting, path: &Path, why: String) -> sqlx::Result<Outcome> {
+        if !self.fence.held() {
+            return Ok(Outcome::LeaseLost);
+        }
+        let unchanged = match (row.size.and_then(|n| u64::try_from(n).ok()), row.file_mtime) {
+            (Some(size), Some(mtime)) => remove_if_unchanged(path, size, mtime),
+            _ => Ok(false),
+        };
+        match unchanged {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(later(format!(
+                    "{} changed since it was seen; it is read again",
+                    path.display()
+                )));
+            }
+            Err(error) => crate::log::warn(format!(
+                "{} is rejected ({why}) but could not be deleted: {error}",
+                path.display()
+            )),
+        }
+        self.reject(row, why).await
     }
 
     async fn reject(&self, row: &Waiting, why: String) -> sqlx::Result<Outcome> {
@@ -417,10 +447,12 @@ fn note_time(rel_path: &str, call: &FileCall) {
 }
 
 /// Deletes the file when its size and modification time are still `size` and
-/// `mtime`. False when it changed, and then it stays.
+/// `mtime`, to the microsecond the database keeps. False when it changed, and
+/// then it stays.
 pub fn remove_if_unchanged(path: &Path, size: u64, mtime: DateTime<Utc>) -> io::Result<bool> {
     let meta = fs::metadata(path)?;
-    if meta.len() != size || DateTime::<Utc>::from(meta.modified()?) != mtime {
+    let modified = DateTime::<Utc>::from(meta.modified()?);
+    if meta.len() != size || modified.timestamp_micros() != mtime.timestamp_micros() {
         return Ok(false);
     }
     fs::remove_file(path)?;

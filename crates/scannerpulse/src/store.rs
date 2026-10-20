@@ -230,6 +230,8 @@ pub struct Waiting {
     pub source_path: String,
     pub rel_path: String,
     pub size: Option<i64>,
+    /// Its modification time when the watcher last saw it.
+    pub file_mtime: Option<DateTime<Utc>>,
     pub seen_at: DateTime<Utc>,
     /// The call it was filed as, when it was filed before and seen again.
     pub call_id: Option<i64>,
@@ -247,7 +249,7 @@ pub async fn waiting(
     skip: &[i64],
 ) -> sqlx::Result<Vec<Waiting>> {
     sqlx::query_as(
-        "SELECT f.id, f.source_id, s.path AS source_path, f.rel_path, f.size, f.seen_at, \
+        "SELECT f.id, f.source_id, s.path AS source_path, f.rel_path, f.size, f.file_mtime, f.seen_at, \
                 f.call_id, f.call_started_at, c.id IS NOT NULL AS same_file \
          FROM ingest_files f \
          JOIN sources s ON s.id = f.source_id \
