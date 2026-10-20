@@ -77,7 +77,7 @@ pub fn apart(recordings: &Folder, archive: &Folder) -> Result<(), String> {
 }
 
 /// Records the archive as the primary location and the recordings folder as
-/// the source, or points the existing ones at these folders.
+/// the first recorder, watched, or points the existing ones at these folders.
 pub async fn record(
     conn: &mut sqlx::PgConnection,
     recordings: &Path,
@@ -92,7 +92,8 @@ pub async fn record(
     .await?;
     sqlx::query(
         "INSERT INTO sources (name, kind, path) VALUES ('recordings', 'sdrtrunk', $1) \
-         ON CONFLICT (name) DO UPDATE SET path = EXCLUDED.path, enabled = true",
+         ON CONFLICT (name) DO UPDATE SET path = EXCLUDED.path, enabled = true, \
+             intake = 'watched', removed_at = NULL",
     )
     .bind(recordings.display().to_string())
     .execute(&mut *conn)
