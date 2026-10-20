@@ -99,8 +99,8 @@ steps, with the site up throughout:
    a closed terminal waits for it to finish, and filing starts again however
    it ends.
 
-The share's folder may not be the recordings folder or the backups' folder,
-nor sit inside one or hold one: the command refuses it.
+The share's folder may not be the recordings folder, nor sit inside it or
+hold it, nor be the backups' folder or sit inside it: the command refuses it.
 
 The old archive stays as it was until you remove it; the same command the
 other way moves back. The backups' folder (`.scannerpulse-backups`) is not
@@ -116,6 +116,31 @@ copied: `scannerpulse backups location FOLDER` moves the backups.
   example with `uid=scannerpulse,gid=scannerpulse` among the mount options. The
   account exists only once setup has made it: setup stops at its check, you
   remount, and you run setup again.
+
+## The database moved to database machines
+
+An install set up Simple keeps its database on its own machine. It moves to
+two database machines of its own, the standby promoted by hand, with the site
+up except for a few seconds:
+1. On this machine, `sudo /usr/local/bin/scannerpulse db move DB1 DB2 --hub
+   ADDRESS`, ADDRESS being this machine's address as the database machines
+   reach it. It opens this machine's PostgreSQL to them (one restart, a few
+   seconds) and says what to run next.
+2. On DB1, run the install line, then `sudo /usr/local/bin/scannerpulse setup`,
+   choose Advanced, then "join an existing install", and give ADDRESS. DB1
+   copies this machine's database and follows it. The first command, run
+   again, says how far behind it is.
+3. `sudo /usr/local/bin/scannerpulse db move --switch` stops this machine's
+   PostgreSQL cleanly, makes DB1 the primary once it has everything, and
+   points the site at both machines. Writes pause for the seconds it takes;
+   Ctrl-C or a closed terminal waits for it to finish.
+4. Join DB2 the same way: it becomes DB1's standby.
+5. Once you are satisfied, `sudo /usr/local/bin/scannerpulse db move --retire`
+   removes this machine's old database. Its backups stay in the backups'
+   folder until you remove them; each database machine takes a nightly dump.
+
+The move does not take a referee yet: the standby is promoted by hand
+(`scannerpulse db promote`, `db switchover`).
 
 ## Reverse proxies
 
