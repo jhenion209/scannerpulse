@@ -29,7 +29,9 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
     let total = steps.len();
     for (n, step) in steps.iter().enumerate() {
         let n = n + 1;
-        println!("[{n}/{total}] {}", step.title);
+        // A terminal gone (a hang-up the caller holds off) must not stop the
+        // steps half way.
+        let _ = writeln!(std::io::stdout(), "[{n}/{total}] {}", step.title);
         let fail = |why: String| {
             format!(
                 "setup stopped at step {n} of {total}, {}: {why}",
@@ -45,7 +47,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 unless,
             } => {
                 if unless.as_deref().is_some_and(Path::exists) {
-                    println!("      already done");
+                    let _ = writeln!(std::io::stdout(), "      already done");
                     continue;
                 }
                 run(program, args, input.as_deref(), env, quiet).map_err(fail)?;
