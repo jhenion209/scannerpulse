@@ -386,6 +386,19 @@ pub fn adopt_steps(plan: &Plan, system: &System) -> Vec<Step> {
         ),
     ));
     steps.push(super::steps::firewall(true, PORT_PG));
+    // While the site still runs: pg_autoctl, once this database has stopped,
+    // would retry the referee for ever, and a formation that holds another
+    // machine already would refuse this one.
+    steps.push(node::script(
+        "Check that this machine reaches the referee, which holds no database machine yet",
+        "[ -f \"$UNIT\" ] && exit 0\nn=$(runuser -u postgres -- env -u PGPASSFILE PGCONNECT_TIMEOUT=5 psql \"$MONITOR\" -tAXc \"SELECT count(*) FROM pgautofailover.node WHERE nodehost <> '$NAME'\") || { echo \"this machine cannot sign in to the referee ($MONITOR): nothing was stopped\" >&2; exit 1; }\n[ \"$n\" = 0 ] || { echo \"the referee holds $n database machine(s) already: this machine's database must join it first, so nothing was stopped\" >&2; exit 1; }",
+        &[
+            ("UNIT", node::AUTOCTL_UNIT),
+            ("MONITOR", &monitor),
+            ("NAME", &plan.hub),
+        ],
+        None,
+    ));
     steps.push(node::script(
         "Stop this machine's PostgreSQL, for pg_autoctl to run it",
         "[ -f \"$UNIT\" ] && exit 0\nsystemctl stop \"$SERVICE\" && systemctl disable \"$SERVICE\" 2>/dev/null; true",
@@ -1244,6 +1257,22 @@ mod tests {
             Some(Path::new("/etc/systemd/system/pgautofailover.service"))
         );
         assert!(at("Stop this machine's PostgreSQL, for pg_autoctl to run it") < at(join));
+        // Before anything stops: this machine signs in to the referee, and
+        // the referee holds no other database machine yet.
+        let check =
+            "Check that this machine reaches the referee, which holds no database machine yet";
+        assert!(at(check) < at("Stop this machine's PostgreSQL, for pg_autoctl to run it"));
+        let Action::Run { args, env, .. } = &all[at(check)].action else {
+            panic!()
+        };
+        assert!(args[1].contains("pgautofailover.node"), "{}", args[1]);
+        assert!(args[1].contains("nothing was stopped"), "{}", args[1]);
+        assert!(args[1].contains("-u PGPASSFILE"), "{}", args[1]);
+        assert!(env.contains(&("NAME".to_string(), "192.0.2.10".to_string())));
+        assert!(env.contains(&(
+            "UNIT".to_string(),
+            "/etc/systemd/system/pgautofailover.service".to_string()
+        )));
         assert!(at(join) < at("Start pg_autoctl, now and at boot"));
         let copy = "Give the copying role its password";
         assert!(at("Start pg_autoctl, now and at boot") < at(copy));
