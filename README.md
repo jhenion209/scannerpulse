@@ -363,6 +363,22 @@ again: that lets the first machine reach it for the next update. A program
 copied in by hand needs `sudo /usr/local/bin/scannerpulse db-update` before
 that restart.
 
+**More recorders.** Setup's recordings folder is the first recorder. Add
+others on the admin page's Recorders area, or with `scannerpulse recorder
+add NAME FOLDER [--when-asked]`, after mounting each SDRTrunk machine's
+share on every ScannerPulse machine, where the scannerpulse account can read
+it and delete files (as root, the command checks that it can). A watched
+recorder's files are filed as they arrive. One added `--when-asked` keeps its
+files in its folder until `scannerpulse recorder bring-in NAME` (Bring in
+now) takes the files the folder holds at that moment. Every file taken, and
+every file that cannot be filed (no date and time in its name, no MPEG
+audio, over 64 MiB), is deleted from the recorder's folder; the reason of a
+rejected file stays on the Status area. `recorder pause`, `watch`, `ask` and
+`remove` change one: a removed recorder's files stay in its folder, its
+calls in the archive, and its name stays taken. The Recorders area shows each
+recorder's files of the day and names any ScannerPulse machine that cannot
+read its folder; `recorder list` prints the same.
+
 ## Commands
 
 `scannerpulse --help` lists them. Every command first reads the machine's
@@ -377,6 +393,8 @@ already set in the environment wins. So far:
   `web` reads the same to show them on the admin page (whether a push
   address is set, never the address).
 - `db-update` creates or updates the database schema.
+- `recorder list|add|watch|ask|pause|bring-in|remove` (and
+  `/api/admin/recorders`) are described under Install, "More recorders".
 - `db promote`, `db rejoin` and `db switchover`, as root, change the two
   database machines' roles (above); `node serve`, `node status` and `node
   backup` are a database machine's (or the referee's) own, and `join info`
