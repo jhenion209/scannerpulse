@@ -10,6 +10,7 @@ export const AREAS = [
   { id: 'transcription', label: 'Transcription' },
   { id: 'reports', label: 'Reports' },
   { id: 'data', label: 'Data' },
+  { id: 'recorders', label: 'Recorders' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'settings', label: 'Settings' },
   { id: 'favorites', label: 'Favorites' },
