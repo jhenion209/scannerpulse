@@ -181,3 +181,62 @@ fn a_name_that_is_not_utf8_is_left_alone() {
     watcher.rescan(t0);
     assert_eq!(names(&watcher.settle(t0 + WAIT)), ["a.mp3"]);
 }
+
+#[test]
+fn a_change_of_sources_forgets_the_files_of_a_source_gone_or_moved() {
+    let (a, b, c) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    fs::write(a.path().join("a.mp3"), b"1").unwrap();
+    fs::write(b.path().join("b.mp3"), b"1").unwrap();
+    let mut watcher = Watcher::new(vec![source(1, a.path()), source(2, b.path())], WAIT);
+    let t0 = Instant::now();
+    watcher.rescan(t0);
+    assert!(
+        !watcher.set_sources(vec![source(1, a.path()), source(2, b.path())]),
+        "the same folders are no change"
+    );
+    assert!(watcher.set_sources(vec![source(1, a.path()), source(2, c.path())]));
+    assert_eq!(names(&watcher.settle(t0 + WAIT)), ["a.mp3"]);
+    let paths: Vec<&Path> = watcher.paths().collect();
+    assert_eq!(paths, [a.path(), c.path()]);
+}
+
+#[test]
+fn a_rescan_says_what_each_source_holds_or_why_it_cannot_be_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.mp3", "b.mp3", "notes.txt"] {
+        fs::write(dir.path().join(name), b"1").unwrap();
+    }
+    let gone = dir.path().join("gone");
+    let mut watcher = Watcher::new(vec![source(1, dir.path()), source(2, &gone)], WAIT);
+    watcher.rescan(Instant::now());
+    let listings = watcher.listings();
+    assert_eq!(listings[0], (1, Ok(2)));
+    assert_eq!(listings[1].0, 2);
+    let why = listings[1].1.as_ref().unwrap_err();
+    assert!(why.starts_with("cannot be listed"), "{why}");
+}
+
+#[test]
+fn bringing_in_takes_the_files_a_folder_held_when_it_was_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now();
+    for (name, age) in [("old.mp3", 60), ("new.mp3", 0)] {
+        let path = dir.path().join(name);
+        fs::write(&path, b"12345").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(age))
+            .unwrap();
+    }
+    let mut watcher = Watcher::new(Vec::new(), WAIT);
+    let found = watcher.list_folder(dir.path()).unwrap();
+    let seen = scannerpulse::watcher::to_bring_in(&found, now - Duration::from_secs(30));
+    let taken: Vec<(&str, i64)> = seen.iter().map(|s| (s.rel_path.as_str(), s.size)).collect();
+    assert_eq!(taken, [("old.mp3", 5)]);
+}

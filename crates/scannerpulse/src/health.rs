@@ -1,8 +1,8 @@
-//! Path health. Every 10 s the host reads the archive root and each enabled
-//! source, with a 5 s limit, each in a thread of its own, so that a hung mount
-//! cannot block the process. When the archive, or every source, has failed
-//! for 60 s, the host is unhealthy: it gives up the lease and takes none until
-//! its paths answer again.
+//! Path health. Every 10 s the host reads the archive root and each watched
+//! recorder's folder, with a 5 s limit, each in a thread of its own, so that
+//! a hung mount cannot block the process. When the archive, or every watched
+//! folder, has failed for 60 s, the host is unhealthy: it gives up the lease
+//! and takes none until its paths answer again.
 
 use std::fs;
 use std::io;
@@ -78,6 +78,21 @@ impl Health {
 
     pub fn timings(&self) -> HealthTimings {
         self.timings
+    }
+
+    /// Checks these sources from now on; a source checked before keeps its
+    /// state, so that a change of recorders does not hide a failing one.
+    pub fn set_sources(&mut self, sources: &[&Path]) {
+        let mut old = std::mem::take(&mut self.sources);
+        self.sources = sources
+            .iter()
+            .map(
+                |path| match old.iter().position(|check| check.path == *path) {
+                    Some(at) => old.swap_remove(at),
+                    None => Check::new(path),
+                },
+            )
+            .collect();
     }
 
     /// One round: reads every path, and returns when each has answered or

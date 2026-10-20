@@ -1,8 +1,10 @@
-//! The watcher, on every host: finds the mp3 files in the enabled sources and
-//! records each one in `ingest_files` once it has stopped changing. It acts on
-//! file system events where they are delivered, and lists every source again
-//! every `ingest.rescan_seconds`, because a network share does not always
-//! deliver events.
+//! The watcher, on every host: finds the mp3 files in the watched recorders'
+//! folders and records each one in `ingest_files` once it has stopped
+//! changing. It acts on file system events where they are delivered, and
+//! lists every folder again every `ingest.rescan_seconds`, because a network
+//! share does not always deliver events. A recorder taken in when asked is
+//! only counted, until it is asked: then the files it held at that moment are
+//! recorded once.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -37,6 +39,9 @@ pub struct Watcher {
     files: HashMap<(i16, String), Sighting>,
     /// Names that are not UTF-8, reported once each.
     reported: HashSet<PathBuf>,
+    /// What the last rescan found in each source: its audio files, or why it
+    /// could not be listed.
+    listings: Vec<(i16, Result<usize, String>)>,
 }
 
 impl Watcher {
@@ -46,7 +51,41 @@ impl Watcher {
             stable_for,
             files: HashMap::new(),
             reported: HashSet::new(),
+            listings: Vec::new(),
         }
+    }
+
+    /// Watches `sources` from now on, forgetting the files of any source
+    /// gone or moved. True when the folders to watch changed, so that the
+    /// file system watch must be made again.
+    pub fn set_sources(&mut self, sources: Vec<Source>) -> bool {
+        let folders = |list: &[Source]| -> Vec<(i16, PathBuf)> {
+            list.iter().map(|s| (s.id, s.path.clone())).collect()
+        };
+        let (before, after) = (folders(&self.sources), folders(&sources));
+        // A file is known by its source and its path inside it: a source
+        // whose folder moved starts afresh.
+        let kept: HashSet<i16> = before
+            .iter()
+            .filter(|folder| after.contains(folder))
+            .map(|(id, _)| *id)
+            .collect();
+        self.files.retain(|key, _| kept.contains(&key.0));
+        self.listings.retain(|(id, _)| kept.contains(id));
+        self.sources = sources;
+        before != after
+    }
+
+    /// What the last rescan found in each watched source: its audio files, or
+    /// why it could not be listed.
+    pub fn listings(&self) -> &[(i16, Result<usize, String>)] {
+        &self.listings
+    }
+
+    /// The audio files in a folder that is not watched (a recorder taken in
+    /// when asked), with their paths inside it.
+    pub fn list_folder(&mut self, folder: &Path) -> std::io::Result<Vec<(String, fs::Metadata)>> {
+        list(folder, &mut self.reported)
     }
 
     /// The source paths, for the file system watch.
@@ -77,6 +116,7 @@ impl Watcher {
     pub fn rescan(&mut self, now: Instant) -> Vec<Batch> {
         let mut still_there = HashSet::new();
         let mut listed = HashSet::new();
+        self.listings.clear();
         for source in self.sources.clone() {
             let found = match list(&source.path, &mut self.reported) {
                 Ok(found) => found,
@@ -85,9 +125,12 @@ impl Watcher {
                         "cannot list the source {}: {error}",
                         source.path.display()
                     ));
+                    self.listings
+                        .push((source.id, Err(format!("cannot be listed: {error}"))));
                     continue;
                 }
             };
+            self.listings.push((source.id, Ok(found.len())));
             listed.insert(source.id);
             for (rel_path, meta) in found {
                 still_there.insert((source.id, rel_path.clone()));
@@ -185,6 +228,23 @@ impl Watcher {
         let source = self.sources.iter().find(|source| source.id == key.0)?;
         Some(source.path.join(&key.1))
     }
+}
+
+/// The files to bring in from a recorder taken in when asked: those its
+/// folder held when it was asked (`asked`). A file written since waits for
+/// the next request.
+pub fn to_bring_in(found: &[(String, fs::Metadata)], asked: SystemTime) -> Vec<Seen> {
+    found
+        .iter()
+        .filter_map(|(rel_path, meta)| {
+            let mtime = meta.modified().ok()?;
+            (mtime <= asked).then(|| Seen {
+                rel_path: rel_path.clone(),
+                size: i64::try_from(meta.len()).unwrap_or(i64::MAX),
+                file_mtime: mtime.into(),
+            })
+        })
+        .collect()
 }
 
 fn push(batches: &mut Vec<Batch>, key: &(i16, String), sighting: &Sighting) {

@@ -72,7 +72,6 @@ impl Site {
             self.pool.clone(),
             self.fence.clone(),
             self.location.clone(),
-            vec![self.source_row.clone()],
             ZONE,
             Duration::from_secs(900),
         )
@@ -285,7 +284,6 @@ async fn a_lease_lost_during_the_repair_keeps_the_source(pool: PgPool) -> sqlx::
         site.pool.clone(),
         Arc::new(LosingFence(Mutex::new(2))),
         site.location.clone(),
-        vec![site.source_row.clone()],
         ZONE,
         Duration::from_secs(900),
     );

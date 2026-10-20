@@ -8,6 +8,7 @@ use id3::TagLike;
 use scannerpulse::health::HealthTimings;
 use scannerpulse::ingest::{self, Config};
 use scannerpulse::lease::{self, Timings};
+use scannerpulse::recorders::{self, Change};
 use sqlx::PgPool;
 
 const NAME: &str = "20310115_120000SYSC_East_Charlie__TO_330_FROM_5150.mp3";
@@ -413,5 +414,160 @@ async fn a_rescan_request_is_a_notice_every_host_hears(pool: PgPool) -> sqlx::Re
         .await
         .expect("the notice within 5 s")?;
     assert_eq!(note.channel(), ingest::RESCAN_CHANNEL);
+    Ok(())
+}
+
+const LATER: &str = "20310115_120500SYSC_East_Charlie__TO_330_FROM_5150.mp3";
+
+async fn calls(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM calls")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Waits up to 20 s for `n` calls.
+async fn until_calls(pool: &PgPool, n: i64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while calls(pool).await < n {
+        assert!(
+            Instant::now() < deadline,
+            "{n} call(s) not filed within 20 s"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Waits up to 20 s until host-a's watcher found `files` audio files in the
+/// recorder's folder.
+async fn until_counted(pool: &PgPool, source: i16, files: i32) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let found: Option<Option<i32>> = sqlx::query_scalar(
+            "SELECT files FROM source_health WHERE host = 'host-a' AND source_id = $1",
+        )
+        .bind(source)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if found == Some(Some(files)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{files} file(s) not counted within 20 s: {found:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn stopped(
+    stop: tokio::sync::oneshot::Sender<()>,
+    daemon: tokio::task::JoinHandle<Result<(), String>>,
+) {
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("ingest did not stop within 10 s")
+        .unwrap()
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_added_while_ingest_runs_is_watched_without_a_restart(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (root, live) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (_, live_id) = common::seed_places(&pool, root.path(), live.path()).await;
+    set_zone(&pool).await;
+    let (stop, daemon) = start(config(&pool));
+    until_held(&pool).await?;
+    let east = tempfile::tempdir().unwrap();
+    let mut conn = pool.acquire().await?;
+    let east_id = recorders::add(&mut conn, "east", east.path(), false, recorders::check_here)
+        .await
+        .unwrap();
+    fs::write(east.path().join(NAME), charlie()).unwrap();
+    until_calls(&pool, 1).await;
+    let source: i16 = sqlx::query_scalar("SELECT source_id FROM calls")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(source, east_id);
+    assert!(!east.path().join(NAME).exists(), "filed and deleted");
+    until_counted(&pool, live_id, 0).await;
+    until_counted(&pool, east_id, 0).await;
+    stopped(stop, daemon).await;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_taken_in_when_asked_files_only_what_it_held_when_asked(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (root, live) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    common::seed_places(&pool, root.path(), live.path()).await;
+    set_zone(&pool).await;
+    let north = tempfile::tempdir().unwrap();
+    fs::write(north.path().join(NAME), charlie()).unwrap();
+    let mut conn = pool.acquire().await?;
+    let north_id = recorders::add(
+        &mut conn,
+        "north",
+        north.path(),
+        true,
+        recorders::check_here,
+    )
+    .await
+    .unwrap();
+    let (stop, daemon) = start(config(&pool));
+    until_held(&pool).await?;
+    until_counted(&pool, north_id, 1).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(calls(&pool).await, 0, "nothing is taken before it is asked");
+    recorders::change(&mut conn, north_id, Change::BringIn)
+        .await
+        .unwrap();
+    until_calls(&pool, 1).await;
+    assert!(!north.path().join(NAME).exists());
+    let noted: bool =
+        sqlx::query_scalar("SELECT brought_in_at = bring_in_at FROM sources WHERE id = $1")
+            .bind(north_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(noted);
+    fs::write(north.path().join(LATER), charlie()).unwrap();
+    until_counted(&pool, north_id, 1).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        calls(&pool).await,
+        1,
+        "a file written since waits to be asked for"
+    );
+    assert!(north.path().join(LATER).exists());
+    stopped(stop, daemon).await;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn with_its_only_recorder_paused_ingest_runs_and_files_once_it_is_watched(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (root, live) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (_, live_id) = common::seed_places(&pool, root.path(), live.path()).await;
+    set_zone(&pool).await;
+    let mut conn = pool.acquire().await?;
+    recorders::change(&mut conn, live_id, Change::Pause)
+        .await
+        .unwrap();
+    fs::write(live.path().join(NAME), charlie()).unwrap();
+    let (stop, daemon) = start(config(&pool));
+    until_held(&pool).await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(calls(&pool).await, 0, "a paused recorder's file stays");
+    recorders::change(&mut conn, live_id, Change::Watch)
+        .await
+        .unwrap();
+    until_calls(&pool, 1).await;
+    stopped(stop, daemon).await;
     Ok(())
 }

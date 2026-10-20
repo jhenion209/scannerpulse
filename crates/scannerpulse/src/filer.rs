@@ -25,7 +25,7 @@ use sqlx::PgPool;
 use crate::archive::{self, Place};
 use crate::localtime::TimeHow;
 use crate::reader::{self, FileCall, ReadError};
-use crate::store::{self, Location, MISSING, NewCall, RecordError, Source, Waiting, limited};
+use crate::store::{self, Location, MISSING, NewCall, RecordError, Waiting, limited};
 
 /// Whether this host may file now, and under which name it holds the lease.
 /// The lease answers `held` from its local deadline, without a database call.
@@ -68,7 +68,6 @@ pub struct Filer {
     pool: PgPool,
     fence: Arc<dyn Fence>,
     location: Location,
-    sources: HashMap<i16, Source>,
     zone: Tz,
     missing_grace: Duration,
     /// The limit on each database call.
@@ -85,7 +84,6 @@ impl Filer {
         pool: PgPool,
         fence: Arc<dyn Fence>,
         location: Location,
-        sources: Vec<Source>,
         zone: Tz,
         missing_grace: Duration,
     ) -> Filer {
@@ -93,7 +91,6 @@ impl Filer {
             pool,
             fence,
             location,
-            sources: sources.into_iter().map(|s| (s.id, s)).collect(),
             zone,
             missing_grace,
             db_limit: DEFAULT_DB_LIMIT,
@@ -155,10 +152,7 @@ impl Filer {
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost);
         }
-        let Some(source) = self.sources.get(&row.source_id) else {
-            return Ok(later(format!("source {} is not enabled", row.source_id)));
-        };
-        let path = source.path.join(&row.rel_path);
+        let path = Path::new(&row.source_path).join(&row.rel_path);
         let (call, data) = match reader::read_path(&path, self.zone) {
             Ok(read) => read,
             Err(ReadError::Rejected(why)) => return self.reject(row, why).await,

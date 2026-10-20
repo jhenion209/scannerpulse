@@ -69,6 +69,93 @@ pub async fn primary_location(db: impl PgExecutor<'_>) -> sqlx::Result<Option<Lo
     }))
 }
 
+/// A recorder as the watcher lists it: watched, or taken in when asked, with
+/// the time of a request to bring its files in that no watcher has listed it
+/// for yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub source: Source,
+    pub asked: bool,
+    pub bring_in: Option<DateTime<Utc>>,
+}
+
+/// The recorders the watcher lists: the watched ones and those taken in when
+/// asked, not the paused or removed ones.
+pub async fn listed_recorders(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<Listed>> {
+    type Row = (i16, String, String, bool, Option<DateTime<Utc>>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, name, path, intake = 'asked', \
+                CASE WHEN brought_in_at IS DISTINCT FROM bring_in_at THEN bring_in_at END \
+         FROM sources WHERE removed_at IS NULL AND (enabled OR intake = 'asked') ORDER BY id",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, path, asked, bring_in)| Listed {
+            source: Source {
+                id,
+                name,
+                path: path.into(),
+            },
+            asked,
+            bring_in,
+        })
+        .collect())
+}
+
+/// Notes that a watcher listed a recorder for the request of `at`; a newer
+/// request stays to be listed.
+pub async fn brought_in(
+    db: impl PgExecutor<'_>,
+    source_id: i16,
+    at: DateTime<Utc>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sources SET brought_in_at = $2 WHERE id = $1 AND bring_in_at = $2")
+        .bind(source_id)
+        .bind(at)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// What `host`'s watcher found in each recorder's folder: the number of audio
+/// files, or why it could not list it.
+pub async fn folder_health(
+    db: impl PgExecutor<'_>,
+    host: &str,
+    found: &[(i16, Result<usize, String>)],
+) -> sqlx::Result<()> {
+    let ids: Vec<i16> = found.iter().map(|(id, _)| *id).collect();
+    let files: Vec<Option<i32>> = found
+        .iter()
+        .map(|(_, f)| {
+            f.as_ref()
+                .ok()
+                .map(|n| i32::try_from(*n).unwrap_or(i32::MAX))
+        })
+        .collect();
+    let problems: Vec<Option<String>> = found
+        .iter()
+        .map(|(_, f)| f.as_ref().err().cloned())
+        .collect();
+    sqlx::query(
+        "INSERT INTO source_health (host, source_id, ok, problem, files, checked_at) \
+         SELECT $1, u.id, u.problem IS NULL, u.problem, u.files, now() \
+         FROM unnest($2::smallint[], $3::text[], $4::int[]) AS u (id, problem, files) \
+         WHERE EXISTS (SELECT 1 FROM sources s WHERE s.id = u.id AND s.removed_at IS NULL) \
+         ON CONFLICT (host, source_id) DO UPDATE SET ok = EXCLUDED.ok, problem = EXCLUDED.problem, \
+             files = EXCLUDED.files, checked_at = EXCLUDED.checked_at",
+    )
+    .bind(host)
+    .bind(ids)
+    .bind(problems)
+    .bind(files)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn enabled_sources(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<Source>> {
     let rows: Vec<(i16, String, String)> =
         sqlx::query_as("SELECT id, name, path FROM sources WHERE enabled ORDER BY id")
@@ -93,7 +180,8 @@ pub struct Seen {
     pub file_mtime: DateTime<Utc>,
 }
 
-/// Records what the watcher sees in a source; each path at most once. A new
+/// Records what the watcher sees in a source; each path at most once, and
+/// nothing for a removed recorder (another host may not know yet). A new
 /// file becomes a waiting row. A known file refreshes `seen_at`. A rejected
 /// file stays rejected unless its size or modification time changed, or it was
 /// rejected as missing: a missing file that comes back waits again. A filed
@@ -111,6 +199,7 @@ pub async fn upsert_seen(
         "INSERT INTO ingest_files AS f (source_id, rel_path, size, file_mtime, first_seen, seen_at, state) \
          SELECT $1, u.rel_path, u.size, u.file_mtime, now(), now(), 'waiting' \
          FROM unnest($2::text[], $3::bigint[], $4::timestamptz[]) AS u (rel_path, size, file_mtime) \
+         WHERE EXISTS (SELECT 1 FROM sources s WHERE s.id = $1 AND s.removed_at IS NULL) \
          ON CONFLICT (source_id, rel_path) DO UPDATE SET \
              seen_at = now(), size = EXCLUDED.size, file_mtime = EXCLUDED.file_mtime, \
              state = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
@@ -137,6 +226,8 @@ pub async fn upsert_seen(
 pub struct Waiting {
     pub id: i64,
     pub source_id: i16,
+    /// Its recorder's folder.
+    pub source_path: String,
     pub rel_path: String,
     pub size: Option<i64>,
     pub seen_at: DateTime<Utc>,
@@ -148,19 +239,22 @@ pub struct Waiting {
     pub same_file: bool,
 }
 
-/// Waiting files, oldest first, leaving out the ids in `skip`.
+/// Waiting files, oldest first, leaving out the ids in `skip` and the files
+/// of removed recorders.
 pub async fn waiting(
     db: impl PgExecutor<'_>,
     limit: i64,
     skip: &[i64],
 ) -> sqlx::Result<Vec<Waiting>> {
     sqlx::query_as(
-        "SELECT f.id, f.source_id, f.rel_path, f.size, f.seen_at, f.call_id, f.call_started_at, \
-                c.id IS NOT NULL AS same_file \
+        "SELECT f.id, f.source_id, s.path AS source_path, f.rel_path, f.size, f.seen_at, \
+                f.call_id, f.call_started_at, c.id IS NOT NULL AS same_file \
          FROM ingest_files f \
+         JOIN sources s ON s.id = f.source_id \
          LEFT JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
              AND c.file_mtime IS NOT DISTINCT FROM f.file_mtime \
-         WHERE f.state = 'waiting' AND f.id <> ALL($2) ORDER BY f.first_seen, f.id LIMIT $1",
+         WHERE f.state = 'waiting' AND s.removed_at IS NULL AND f.id <> ALL($2) \
+         ORDER BY f.first_seen, f.id LIMIT $1",
     )
     .bind(limit)
     .bind(skip)

@@ -449,3 +449,117 @@ async fn a_recorded_call_is_queued_when_long_enough_and_its_talkgroup_is_on(
     );
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn waiting_files_carry_their_recorders_folder_and_skip_removed_recorders(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (_, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    let other: i16 = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, path) VALUES ('east', 'sdrtrunk', '/east') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await?;
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
+    store::upsert_seen(&pool, other, &[seen("b.mp3", 5)]).await?;
+    let rows = |rows: Vec<store::Waiting>| {
+        rows.into_iter()
+            .map(|r| (r.source_path, r.rel_path))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(store::waiting(&pool, 10, &[]).await?),
+        [
+            ("/in".to_string(), "a.mp3".to_string()),
+            ("/east".to_string(), "b.mp3".to_string())
+        ]
+    );
+    sqlx::query("UPDATE sources SET removed_at = now(), enabled = false WHERE id = $1")
+        .bind(other)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        rows(store::waiting(&pool, 10, &[]).await?),
+        [("/in".to_string(), "a.mp3".to_string())]
+    );
+    // A host that has not heard of the removal records nothing more.
+    store::upsert_seen(&pool, other, &[seen("c.mp3", 5)]).await?;
+    let c: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest_files WHERE rel_path = 'c.mp3'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(c, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_watcher_lists_watched_and_asked_recorders_and_notes_what_it_brought_in(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (_, live) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    let asked_at = utc("2031-01-15T18:00:00Z");
+    let ids: Vec<i16> = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, path, enabled, intake, bring_in_at, removed_at) VALUES \
+         ('paused', 'sdrtrunk', '/p', false, 'watched', NULL, NULL), \
+         ('asked', 'sdrtrunk', '/a', false, 'asked', $1, NULL), \
+         ('gone', 'sdrtrunk', '/g', false, 'asked', NULL, now()) RETURNING id",
+    )
+    .bind(asked_at)
+    .fetch_all(&pool)
+    .await?;
+    let asked = ids[1];
+    let listed = store::listed_recorders(&pool).await?;
+    let seen: Vec<(i16, bool, Option<DateTime<Utc>>)> = listed
+        .iter()
+        .map(|l| (l.source.id, l.asked, l.bring_in))
+        .collect();
+    assert_eq!(seen, [(live, false, None), (asked, true, Some(asked_at))]);
+    // A request newer than the one listed stays to be listed.
+    store::brought_in(&pool, asked, utc("2031-01-15T17:00:00Z")).await?;
+    assert_eq!(
+        store::listed_recorders(&pool).await?[1].bring_in,
+        Some(asked_at)
+    );
+    store::brought_in(&pool, asked, asked_at).await?;
+    assert_eq!(store::listed_recorders(&pool).await?[1].bring_in, None);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn each_host_writes_what_it_found_in_each_folder(pool: PgPool) -> sqlx::Result<()> {
+    let (_, live) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    let gone: i16 = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, path, enabled, removed_at) \
+         VALUES ('gone', 'sdrtrunk', '/g', false, now()) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await?;
+    store::folder_health(&pool, "host-a", &[(live, Ok(3)), (gone, Ok(1))]).await?;
+    store::folder_health(
+        &pool,
+        "host-b",
+        &[(live, Err("cannot be listed: gone".into()))],
+    )
+    .await?;
+    store::folder_health(&pool, "host-a", &[(live, Ok(4))]).await?;
+    type Row = (String, i16, bool, Option<String>, Option<i32>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT host, source_id, ok, problem, files FROM source_health ORDER BY host",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        [
+            ("host-a".to_string(), live, true, None, Some(4)),
+            (
+                "host-b".to_string(),
+                live,
+                false,
+                Some("cannot be listed: gone".to_string()),
+                None
+            ),
+        ],
+        "a removed recorder gets no row"
+    );
+    Ok(())
+}

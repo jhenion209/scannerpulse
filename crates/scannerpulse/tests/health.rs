@@ -80,3 +80,23 @@ async fn a_hung_path_fails_without_blocking_and_gets_no_second_probe() {
     health.check().await;
     assert!(!health.healthy());
 }
+
+#[tokio::test]
+async fn a_change_of_sources_keeps_the_state_of_a_source_checked_before() {
+    let (archive, good) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let gone = archive.path().join("gone");
+    let mut health = Health::new(archive.path(), &[&gone], quick(), read_dir_probe);
+    health.check().await;
+    sleep(quick().fail_after).await;
+    health.check().await;
+    assert!(!health.healthy(), "its only source failed");
+    health.set_sources(&[&gone, good.path()]);
+    assert!(health.healthy(), "a source that has not failed was added");
+    health.set_sources(&[&gone]);
+    assert!(!health.healthy(), "the failing source kept its state");
+    health.set_sources(&[]);
+    assert!(
+        health.healthy(),
+        "no watched recorder: the archive alone decides"
+    );
+}

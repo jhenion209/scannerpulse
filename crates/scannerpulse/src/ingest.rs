@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
@@ -23,7 +24,7 @@ use crate::localtime::TimeHow;
 use crate::log;
 use crate::queue;
 use crate::settings::{self, IngestSettings, SettingsError, Transcription};
-use crate::store::{self, Location, Source, Waiting, limited};
+use crate::store::{self, Listed, Location, Source, Waiting, limited};
 use crate::transcriber::{self, Transcriber};
 use crate::watcher::{self, Batch, Watcher};
 
@@ -166,12 +167,11 @@ async fn setup(pool: &PgPool, limit: Duration) -> Result<Setup, SetupError> {
         .await
         .map_err(SetupError::Database)?
         .ok_or_else(|| SetupError::Fatal("there is no primary location for the archive".into()))?;
+    // No watched recorder is no fault: one taken in when asked may be added
+    // or watched later, and the watcher follows the recorders as they change.
     let sources = limited(limit, store::enabled_sources(pool))
         .await
         .map_err(SetupError::Database)?;
-    if sources.is_empty() {
-        return Err(SetupError::Fatal("no source is enabled".into()));
-    }
     Ok(Setup {
         settings,
         transcription,
@@ -350,7 +350,7 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         sources,
     } = setup;
     log::info(format!(
-        "ingest on {}: archive {}, {} source(s)",
+        "ingest on {}: archive {}, {} watched recorder(s)",
         config.host,
         location.root.display(),
         sources.len()
@@ -374,11 +374,16 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         health::read_dir_probe,
     );
     let watcher = Watcher::new(sources.clone(), config.stable_for);
+    let (folders_tx, folders_rx) = watch::channel(
+        sources
+            .iter()
+            .map(|s| s.path.clone())
+            .collect::<Vec<PathBuf>>(),
+    );
     let filer = Filer::new(
         pool.clone(),
         lease.clone(),
         location,
-        sources,
         settings.time_zone,
         settings.missing_source_grace,
     )
@@ -405,7 +410,12 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
     let tasks = [
         (
             "health",
-            tokio::spawn(health_loop(health, healthy.clone(), release_rx.clone())),
+            tokio::spawn(health_loop(
+                health,
+                healthy.clone(),
+                folders_rx,
+                release_rx.clone(),
+            )),
         ),
         (
             "maintenance",
@@ -425,10 +435,14 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
             tokio::spawn(watch_loop(
                 pool.clone(),
                 config.db_limit,
+                config.host.clone(),
                 watcher,
-                settings.rescan,
+                Rescans {
+                    every: settings.rescan,
+                    asked: rescans,
+                },
                 config.stable_for,
-                rescans,
+                folders_tx,
                 stop_rx.clone(),
             )),
         ),
@@ -733,18 +747,27 @@ fn report(row: &Waiting, outcome: &Outcome, counts: &Counts) {
     }
 }
 
+/// When the watcher lists every folder: every `every`, and at once when an
+/// admin asks.
+struct Rescans {
+    every: Duration,
+    asked: mpsc::UnboundedReceiver<()>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn watch_loop(
     pool: PgPool,
     db_limit: Duration,
+    host: String,
     mut watcher: Watcher,
-    rescan_every: Duration,
+    mut rescans: Rescans,
     stable_for: Duration,
-    mut rescans: mpsc::UnboundedReceiver<()>,
+    folders: watch::Sender<Vec<PathBuf>>,
     mut stop: watch::Receiver<bool>,
 ) {
     let (events_tx, mut events) = mpsc::unbounded_channel::<PathBuf>();
-    // Kept alive for as long as the loop runs.
-    let _events = start_events(&watcher, events_tx);
+    // Kept alive until the watched folders change.
+    let mut _events = start_events(&watcher, events_tx.clone());
     let tick = (stable_for / 2).clamp(Duration::from_millis(100), Duration::from_secs(1));
     let mut next_rescan = Instant::now();
     loop {
@@ -752,20 +775,71 @@ async fn watch_loop(
         while let Ok(path) = events.try_recv() {
             watcher.touch(&path, now);
         }
-        // An admin asked for a rescan.
-        if rescans.try_recv().is_ok() {
-            while rescans.try_recv().is_ok() {}
+        // An admin asked for a rescan, or changed a recorder.
+        if rescans.asked.try_recv().is_ok() {
+            while rescans.asked.try_recv().is_ok() {}
             next_rescan = now;
         }
+        // The requests to bring files in whose files are in `batches`.
+        let mut brought = Vec::new();
         let batches = if now >= next_rescan {
-            next_rescan = now + rescan_every;
-            watcher.rescan(now)
+            next_rescan = now + rescans.every;
+            // The recorders may have changed since the last rescan.
+            let asked = match limited(db_limit, store::listed_recorders(&pool)).await {
+                Ok(listed) => {
+                    let (asked, watched): (Vec<Listed>, Vec<Listed>) =
+                        listed.into_iter().partition(|l| l.asked);
+                    if watcher.set_sources(watched.into_iter().map(|l| l.source).collect()) {
+                        _events = start_events(&watcher, events_tx.clone());
+                        let watched: Vec<PathBuf> =
+                            watcher.paths().map(Path::to_path_buf).collect();
+                        log::info(format!("{} watched recorder(s) now", watched.len()));
+                        let _ = folders.send(watched);
+                    }
+                    asked
+                }
+                Err(error) => {
+                    log::warn(format!(
+                        "the recorders cannot be read ({error}); the watcher keeps the folders it watches"
+                    ));
+                    Vec::new()
+                }
+            };
+            let mut batches = watcher.rescan(now);
+            let mut found = watcher.listings().to_vec();
+            for listed in &asked {
+                list_asked(
+                    &mut watcher,
+                    listed,
+                    stable_for,
+                    &mut found,
+                    &mut batches,
+                    &mut brought,
+                );
+            }
+            if let Err(error) = limited(db_limit, store::folder_health(&pool, &host, &found)).await
+            {
+                log::warn(format!("what the folders hold cannot be written: {error}"));
+            }
+            batches
         } else {
             watcher.settle(now)
         };
-        if !batches.is_empty() {
+        if !batches.is_empty() || !brought.is_empty() {
             match limited(db_limit, record(&pool, &batches)).await {
-                Ok(()) => watcher.recorded(&batches),
+                Ok(()) => {
+                    watcher.recorded(&batches);
+                    for (source_id, at) in brought {
+                        if let Err(error) =
+                            limited(db_limit, store::brought_in(&pool, source_id, at)).await
+                        {
+                            log::warn(format!(
+                                "a recorder's files were brought in, but that could not be noted ({error}); \
+                                 they are listed again"
+                            ));
+                        }
+                    }
+                }
                 Err(error) => {
                     log::warn(format!(
                         "the watcher cannot write to the database ({error}); trying again in 5 s"
@@ -781,6 +855,43 @@ async fn watch_loop(
             break;
         }
     }
+}
+
+/// Lists a recorder taken in when asked: counts its files and, once a request
+/// to bring them in is `stable_for` old, adds the files it held at that
+/// moment to `batches` and the request to `brought`. A file written in the
+/// moment of the request may still have been growing: the wait lets it settle.
+fn list_asked(
+    watcher: &mut Watcher,
+    listed: &Listed,
+    stable_for: Duration,
+    found: &mut Vec<(i16, Result<usize, String>)>,
+    batches: &mut Vec<Batch>,
+    brought: &mut Vec<(i16, DateTime<Utc>)>,
+) {
+    let id = listed.source.id;
+    let files = match watcher.list_folder(&listed.source.path) {
+        Ok(files) => files,
+        Err(error) => {
+            found.push((id, Err(format!("cannot be listed: {error}"))));
+            return;
+        }
+    };
+    found.push((id, Ok(files.len())));
+    let Some(at) = listed.bring_in else {
+        return;
+    };
+    if Utc::now() < at + stable_for {
+        return;
+    }
+    let seen = watcher::to_bring_in(&files, at.into());
+    if !seen.is_empty() {
+        batches.push(Batch {
+            source_id: id,
+            files: seen,
+        });
+    }
+    brought.push((id, at));
 }
 
 /// Reads the maintenance switch every `MAINTENANCE_EVERY`; a value that
@@ -924,10 +1035,15 @@ async fn record(pool: &PgPool, batches: &[Batch]) -> sqlx::Result<()> {
 async fn health_loop(
     mut health: Health,
     healthy: Arc<AtomicBool>,
+    mut folders: watch::Receiver<Vec<PathBuf>>,
     mut stop: watch::Receiver<bool>,
 ) {
     let mut was_healthy = true;
     loop {
+        if folders.has_changed().unwrap_or(false) {
+            let watched = folders.borrow_and_update().clone();
+            health.set_sources(&watched.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+        }
         health.check().await;
         let now_healthy = health.healthy();
         healthy.store(now_healthy, Ordering::SeqCst);
@@ -936,7 +1052,7 @@ async fn health_loop(
                 log::info("the archive and the sources answer again");
             } else {
                 log::error(
-                    "the archive, or every source, has failed for too long: \
+                    "the archive, or every watched recorder's folder, has failed for too long: \
                      this host gives up the lease",
                 );
             }
