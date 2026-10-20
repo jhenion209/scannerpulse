@@ -29,7 +29,13 @@ export interface GuideStep {
 export interface ConvertInfo {
   /** Null until setup's planner has saved a plan. */
   plan: ConvertPlan | null;
-  guide?: { steps: GuideStep[]; checks: { text: string; ok: boolean }[]; complete: boolean };
+  guide?: {
+    steps: GuideStep[];
+    checks: { text: string; ok: boolean }[];
+    complete: boolean;
+    /** While the database moves, how to go back before the switch. */
+    back: string | null;
+  };
 }
 
 /** How to begin, on one machine with no plan yet. */

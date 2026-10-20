@@ -13,13 +13,13 @@ const step = (id: string, state: GuideStep['state']): GuideStep => ({
 
 describe("the conversion's guide in words", () => {
   it('names the step to take now, and its place', () => {
-    const guide = { steps: [step('a', 'done'), step('b', 'now'), step('c', 'later')], checks: [], complete: false };
+    const guide = { steps: [step('a', 'done'), step('b', 'now'), step('c', 'later')], checks: [], complete: false, back: null };
     expect(progressText(guide)).toBe('Step 2 of 3: Step b.');
     expect(stateText('now')).toBe('now');
   });
 
   it('says when the conversion is complete', () => {
-    const guide = { steps: [step('a', 'done')], checks: [{ text: 'x', ok: true }], complete: true };
+    const guide = { steps: [step('a', 'done')], checks: [{ text: 'x', ok: true }], complete: true, back: null };
     expect(progressText(guide)).toContain('The conversion is complete');
   });
 

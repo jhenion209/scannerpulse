@@ -58,6 +58,7 @@ test("the conversion's guide opens the step to take now, and asks the root helpe
           ],
           checks: [],
           complete: false,
+          back: 'Until the switch, `sudo /usr/local/bin/scannerpulse db move --cancel` on this machine takes the site back to its own database alone.',
         },
       },
     }),
@@ -85,6 +86,8 @@ test("the conversion's guide opens the step to take now, and asks the root helpe
   // Only the step to take now says what it does; a done one's commands stay closed.
   await expect(page.getByText('What db-switch does.')).toBeVisible();
   await expect(page.getByText('What db1-join does.')).toHaveCount(0);
+  // Until the switch, how to go back.
+  await expect(page.getByText('db move --cancel', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Switch the database to db1.example.org' }).click();
   await expect(page.getByText('Make db1.example.org the primary now?', { exact: false })).toBeVisible();
   expect(asked).toBeNull();

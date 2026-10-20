@@ -71,6 +71,7 @@
         </li>
       {/each}
     </ol>
+    {#if guide.back}<p>{guide.back}</p>{/if}
   {/if}
 {:else if info && one}
   <p>{planText}</p>
