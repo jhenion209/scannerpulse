@@ -125,7 +125,8 @@ referee, with the site up except for a few seconds:
 1. On this machine, `sudo /usr/local/bin/scannerpulse db move DB1 DB2 --hub
    ADDRESS`, ADDRESS being this machine's address as the database machines
    reach it. It opens this machine's PostgreSQL to them (one restart, a few
-   seconds) and says what to run next.
+   seconds), has the site name both this database and DB1, so that it
+   follows DB1 once it is the primary, and says what to run next.
 2. On DB1, run the install line, then `sudo /usr/local/bin/scannerpulse setup`,
    choose Advanced, then "join an existing install", and give ADDRESS. DB1
    copies this machine's database and follows it. The first command, run
@@ -146,6 +147,30 @@ restart, a few seconds). DB1 joins as its standby. `--switch` asks the
 referee to make DB1 the primary; this machine's database follows it as a
 standby the referee never promotes, until `--retire` takes it out of the
 referee's watch and removes it.
+
+## Converting an install on one machine, guided
+
+An install set up Simple becomes highly available without being set up
+again, with the site up except for the pauses each step names:
+1. On it, `sudo /usr/local/bin/scannerpulse setup` asks the choices a new
+   install's Advanced setup asks: the two database machines, a referee or a
+   standby promoted by hand, a second ScannerPulse machine and the address the
+   two share, and, with a second machine, the archive's new folder on a
+   network share mounted here. It saves them in
+   `/etc/scannerpulse/convert.json` and changes nothing else. Run it again to
+   change or drop the plan before the database starts to move.
+2. The admin page's Layout area then shows the steps in order, and opens the
+   next only once the one before is checked: the archive's copy and switch,
+   the database's move, the second machine, and a final check (both machines
+   answer, the standby is in step, the referee answers), with a test
+   switchover on request.
+3. A step on another machine says what to run there: the install line, then
+   setup's "join an existing install". A change on this machine waits for an
+   admin's approval in the admin page; the root helper here then makes it,
+   and the page shows each line it says.
+
+The commands above (`archive move`, `db move`) and `second` do the same steps
+by hand, and the guide follows them either way.
 
 ## Reverse proxies
 

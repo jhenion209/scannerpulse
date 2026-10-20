@@ -6,8 +6,9 @@ indexes them in PostgreSQL, and serves a web interface to browse, search and
 listen.
 
 **Status: early development.** A release installs one machine with its
-database (Simple setup); high availability, a database elsewhere and the
-other advanced choices come in later versions.
+database (Simple setup), or a highly available install on several machines
+(Advanced setup), and converts an install on one machine to high
+availability, guided by the admin page.
 
 ## Install
 
@@ -282,6 +283,12 @@ second. The same command finishes a setup that stopped after this machine's
 site had started (when the second's name did not resolve here yet, say);
 setup says so. The shared address is IPv4, as the site listens on IPv4.
 
+**An install on one machine** converts to high availability without being
+set up again: `sudo /usr/local/bin/scannerpulse setup`, run again on it,
+plans the conversion (the same choices, and the archive's share), and the
+admin page's Layout area then guides each step, the changes on that machine
+made by its root helper once an admin approves them (`docs/deploying.md`).
+
 - [docs/deploying.md](docs/deploying.md) explains the shared address, where to
   put the referee, the archive share, reverse proxies (HAProxy, nginx and Caddy,
   each tried), port forwarding to the shared address, and name resolution: each
@@ -375,7 +382,8 @@ already set in the environment wins. So far:
   backup` are a database machine's (or the referee's) own, and `join info`
   and `join done` the first machine's side of a join.
 - `archive move` and `db move`, as root, move an install on one machine to a
-  network share and to two database machines (`docs/deploying.md`).
+  network share and to two database machines (`docs/deploying.md`); the
+  conversion's guide has the root helper run them once an admin approves.
 - `ingest` watches the source folders and files each new call into the
   archive. Two hosts can run it side by side: a lease in the database lets one
   of them work at a time, and the other takes over when it stops. It reads
