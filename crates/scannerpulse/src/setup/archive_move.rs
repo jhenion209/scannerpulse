@@ -190,18 +190,22 @@ pub fn moved_unit(text: &str, old: &Path, new: &Path) -> Option<String> {
     found.then(|| lines.join("\n") + "\n")
 }
 
-/// The new folder may not be the recordings folder or the backups' folder,
-/// nor inside one, nor hold one: the watcher would take the archive's files
-/// for new recordings, and the filer delete them as filed.
+/// The new folder may not be a recordings folder, nor inside one, nor hold
+/// one: the watcher would take the archive's files for new recordings, and
+/// the filer delete them as filed. Nor may it be the backups' folder or
+/// inside it; it may hold it, as setup's own layout does.
 pub fn apart_from(new: &Path, sources: &[PathBuf], backups: Option<&Path>) -> Result<(), String> {
-    for other in sources.iter().map(PathBuf::as_path).chain(backups) {
-        if new.starts_with(other) || other.starts_with(new) {
-            return Err(format!(
-                "{} and {} must not be the same folder or inside each other",
-                new.display(),
-                other.display()
-            ));
-        }
+    let nested = sources
+        .iter()
+        .map(PathBuf::as_path)
+        .find(|source| new.starts_with(source) || source.starts_with(new))
+        .or(backups.filter(|backups| new.starts_with(backups)));
+    if let Some(other) = nested {
+        return Err(format!(
+            "{} and {} must not be the same folder or inside each other",
+            new.display(),
+            other.display()
+        ));
     }
     Ok(())
 }
@@ -614,6 +618,9 @@ mod tests {
         let sources = vec![PathBuf::from("/srv/recordings")];
         let backups = Some(PathBuf::from("/srv/backups"));
         assert!(apart_from(Path::new("/srv/shared"), &sources, backups.as_deref()).is_ok());
+        // Setup's own layout, moved back to: the backups inside the archive.
+        let inside = Some(PathBuf::from("/srv/archive/.scannerpulse-backups"));
+        assert!(apart_from(Path::new("/srv/archive"), &sources, inside.as_deref()).is_ok());
         // Inside the recordings folder, the watcher would take the archive's
         // files for new recordings, and the filer would delete them.
         for refused in ["/srv/recordings/archive", "/srv", "/srv/backups/archive"] {
