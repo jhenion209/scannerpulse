@@ -120,8 +120,8 @@ copied: `scannerpulse backups location FOLDER` moves the backups.
 ## The database moved to database machines
 
 An install set up Simple keeps its database on its own machine. It moves to
-two database machines of its own, the standby promoted by hand, with the site
-up except for a few seconds:
+two database machines of its own, the standby promoted by hand or by a
+referee, with the site up except for a few seconds:
 1. On this machine, `sudo /usr/local/bin/scannerpulse db move DB1 DB2 --hub
    ADDRESS`, ADDRESS being this machine's address as the database machines
    reach it. It opens this machine's PostgreSQL to them (one restart, a few
@@ -139,8 +139,13 @@ up except for a few seconds:
    removes this machine's old database. Its backups stay in the backups'
    folder until you remove them; each database machine takes a nightly dump.
 
-The move does not take a referee yet: the standby is promoted by hand
-(`scannerpulse db promote`, `db switchover`).
+**With a referee** (`--referee REF` after ADDRESS), the referee joins first,
+the same way. The first command, run again, then makes this machine's
+database the referee's first primary: pg_autoctl runs it from then on (one
+restart, a few seconds). DB1 joins as its standby. `--switch` asks the
+referee to make DB1 the primary; this machine's database follows it as a
+standby the referee never promotes, until `--retire` takes it out of the
+referee's watch and removes it.
 
 ## Reverse proxies
 
