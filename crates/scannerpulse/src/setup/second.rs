@@ -318,6 +318,7 @@ pub(super) mod tests {
             recordings: "/srv/recordings".into(),
             ready: true,
             joined: Vec::new(),
+            moving: false,
         }
     }
 

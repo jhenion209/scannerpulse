@@ -21,7 +21,8 @@ pub const DUMPS: &str = "/var/backups/scannerpulse";
 pub const REPLICATOR: &str = "replicator";
 
 /// The marker of setup's lines in PostgreSQL's access rules.
-const MARK: &str = "# scannerpulse: the ScannerPulse machine, and both database machines";
+pub(super) const MARK: &str =
+    "# scannerpulse: the ScannerPulse machine, and both database machines";
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NodeFile {
@@ -106,7 +107,7 @@ pub fn authorized_line(hub_key: &str, hub: &[IpAddr], binary: &Path) -> String {
 
 /// The SQL that makes the copying role, which the standby (and a rewind)
 /// signs in as.
-fn replicator_sql(password: &str) -> String {
+pub(super) fn replicator_sql(password: &str) -> String {
     let quoted = password.replace('\'', "''");
     const QUIET: &str = super::steps::QUIET_SQL;
     format!(
@@ -338,17 +339,39 @@ fn by_hand(
         &[REPLICATOR],
         format!("*:*:*:{REPLICATOR}:{}\n", plan.replication_password),
     ));
-    // The copy's values: it copies the other machine.
-    let other = &plan.nodes[1 - index];
+    // The copy's values: it copies the other machine, or, while the
+    // database moves here, the ScannerPulse machine.
+    let moving = index == 0 && plan.moving;
+    let primary = if moving {
+        &plan.hub
+    } else {
+        &plan.nodes[1 - index]
+    };
     let copy_vars = [
         ("DATA", data),
         ("BIN", system.postgres_bin()),
         ("SERVICE", system.postgres_cluster()),
-        ("PRIMARY", other.as_str()),
+        ("PRIMARY", primary.as_str()),
         ("NODE", NODE),
         ("DATABASE", super::steps::DATABASE),
     ];
-    if index == 0 {
+    if moving {
+        // The database moves here: a copy of the ScannerPulse machine's own,
+        // which this machine follows until `db move --switch`.
+        steps.push(script(
+            "Copy the ScannerPulse machine's database, and follow it",
+            COPY,
+            &copy_vars,
+            None,
+        ));
+        // Its WAL went to its own pgBackRest, which this machine has not.
+        steps.push(script(
+            "Leave the ScannerPulse machine's backups behind",
+            "runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 && systemctl restart \"$SERVICE\"",
+            &[("SERVICE", system.postgres_cluster())],
+            Some("ALTER SYSTEM RESET archive_mode;\nALTER SYSTEM RESET archive_command;\n".into()),
+        ));
+    } else if index == 0 {
         // A standby since a change of roles whose copy was cut short has no
         // cluster: it copies the other machine, the primary, again.
         steps.push(script(
@@ -1341,7 +1364,7 @@ pub fn ask(node: &str, command: &str, input: &[u8]) -> Result<String, String> {
 }
 
 /// A status's text as a status; a machine that gives none does not answer.
-fn as_status(answer: Result<String, String>) -> Status {
+pub(super) fn as_status(answer: Result<String, String>) -> Status {
     answer
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -1478,6 +1501,7 @@ mod tests {
             recordings: String::new(),
             ready: false,
             joined: Vec::new(),
+            moving: false,
         }
     }
 
@@ -1519,6 +1543,64 @@ mod tests {
             .write_all(input.as_deref().unwrap_or("").as_bytes())
             .unwrap();
         assert!(child.wait().unwrap().success(), "{}", step.title);
+    }
+
+    #[test]
+    fn the_first_machine_of_a_move_copies_the_scannerpulse_machines_database() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let moving = Plan {
+            moving: true,
+            ..plan()
+        };
+        let all = steps(
+            &moving,
+            0,
+            &debian,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        let at = |title: &str| {
+            all.iter()
+                .position(|s| s.title == title)
+                .unwrap_or_else(|| panic!("{title}"))
+        };
+        let copy = at("Copy the ScannerPulse machine's database, and follow it");
+        let Action::Run { env, args, .. } = &all[copy].action else {
+            panic!()
+        };
+        assert!(env.contains(&("PRIMARY".to_string(), "192.0.2.10".to_string())));
+        assert!(args[1].contains("pg_basebackup"));
+        // Its database and roles come with the copy.
+        assert!(!all.iter().any(|s| s.title.starts_with("Make the database")));
+        // The ScannerPulse machine's WAL archiving (to its pgBackRest) stays
+        // behind, before this machine can become the primary.
+        let leave = at("Leave the ScannerPulse machine's backups behind");
+        assert!(leave > copy);
+        let Action::Run { input, .. } = &all[leave].action else {
+            panic!()
+        };
+        let input = input.as_deref().unwrap_or_default();
+        assert!(input.contains("ALTER SYSTEM RESET archive_mode"), "{input}");
+        assert!(
+            input.contains("ALTER SYSTEM RESET archive_command"),
+            "{input}"
+        );
+        // The second machine joins as before: a copy of the first.
+        let second = steps(
+            &moving,
+            1,
+            &debian,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        assert!(
+            second
+                .iter()
+                .any(|s| s.title == "Copy the primary's data, and follow it")
+        );
     }
 
     #[test]

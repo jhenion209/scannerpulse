@@ -315,7 +315,7 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
     let mut said = None;
     while let Some(first) = joining.plan.awaited_before(joining.place) {
         if said.as_deref() != Some(first) {
-            println!("Waiting for {first} to join first.");
+            println!("{}", waiting_text(&joining.plan, first));
             said = Some(first.to_string());
         }
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -379,6 +379,9 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
                 "database machine {}: {}",
                 index + 1,
                 match (index, plan.referee.is_some()) {
+                    (0, _) if plan.moving => {
+                        "it copies the ScannerPulse machine's database, and becomes the primary at the switch"
+                    }
                     (0, _) => "it starts as the primary",
                     (_, true) => "the standby of the first, promoted by the referee",
                     (_, false) => "the standby of the first, promoted by hand",
@@ -415,6 +418,20 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
         plan.hub
     );
     Ok(())
+}
+
+/// What a joining machine says while it waits for `first`: a machine to
+/// join, or the switch that moves the database to the first database
+/// machine.
+fn waiting_text(plan: &Plan, first: &str) -> String {
+    if plan.moving && first == plan.hub {
+        format!(
+            "Waiting for the database to move to {}: run `sudo /usr/local/bin/scannerpulse db move --switch` on {first}.",
+            plan.nodes[0]
+        )
+    } else {
+        format!("Waiting for {first} to join first.")
+    }
 }
 
 /// This machine's names, as the plan may give them: its host name, and the
@@ -494,6 +511,19 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_waiting_for_the_move_is_told_of_the_switch() {
+        let plan: Plan = serde_json::from_str(r#"{"hub":"192.0.2.10","hub_key":"k","nodes":["db1.example.org","db2.example.org"],"database":"d","role":"r","password":"p","replication_password":"q","moving":true}"#).unwrap();
+        assert_eq!(
+            waiting_text(&plan, "db1.example.org"),
+            "Waiting for db1.example.org to join first."
+        );
+        assert_eq!(
+            waiting_text(&plan, "192.0.2.10"),
+            "Waiting for the database to move to db1.example.org: run `sudo /usr/local/bin/scannerpulse db move --switch` on 192.0.2.10."
+        );
+    }
+
+    #[test]
     fn a_machine_not_in_the_plan_is_told_the_plans_machines() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.json");
@@ -514,6 +544,7 @@ mod tests {
             recordings: String::new(),
             ready: false,
             joined: Vec::new(),
+            moving: false,
         };
         plan.write(&path).unwrap();
         let none = |_: &str| Vec::new();

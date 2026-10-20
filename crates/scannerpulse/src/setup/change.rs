@@ -42,7 +42,7 @@ fn settings_file(text: &str, name: &str, value: Option<&str>) -> Result<Step, St
 
 /// The settings file, rewritten with each name set to its value (or
 /// removed).
-fn settings_with(text: &str, changes: &[(&str, Option<&str>)]) -> Result<Step, String> {
+pub(super) fn settings_with(text: &str, changes: &[(&str, Option<&str>)]) -> Result<Step, String> {
     let mut contents = text.to_string();
     for (name, value) in changes {
         contents = crate::hostfile::changed(&contents, name, *value)?;

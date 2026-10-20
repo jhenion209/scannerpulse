@@ -5,6 +5,7 @@ pub mod apply;
 pub mod archive_move;
 pub mod ask;
 pub mod change;
+pub mod db_move;
 pub mod folders;
 pub mod join;
 pub mod keepalived;

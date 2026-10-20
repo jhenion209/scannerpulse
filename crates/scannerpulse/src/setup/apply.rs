@@ -97,6 +97,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 recordings: recordings.display().to_string(),
                 ready: false,
                 joined: Vec::new(),
+                moving: false,
             })
             .map_err(fail)?,
             Action::Ready => super::plan::Plan::update(Path::new(super::plan::PLAN), |plan| {
@@ -229,7 +230,7 @@ pub async fn first_admin(
 /// Writes the plan of the database machines with this machine's public
 /// key. A plan for the same machines keeps who has joined and the
 /// replication role's password, so setup can run again.
-fn write_plan(mut fresh: super::plan::Plan) -> Result<(), String> {
+pub(super) fn write_plan(mut fresh: super::plan::Plan) -> Result<(), String> {
     use super::plan::{PLAN, Plan, SSH};
     let key_path = format!("{SSH}/id_ed25519.pub");
     fresh.hub_key = std::fs::read_to_string(&key_path)
@@ -499,6 +500,7 @@ mod tests {
                 recordings: "/srv/recordings".into(),
                 ready: true,
                 joined: Vec::new(),
+                moving: false,
             },
         )
     }

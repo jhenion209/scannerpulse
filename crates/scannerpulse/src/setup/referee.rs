@@ -141,6 +141,7 @@ mod tests {
             recordings: String::new(),
             ready: false,
             joined: Vec::new(),
+            moving: false,
         }
     }
 

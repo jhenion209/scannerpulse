@@ -53,6 +53,12 @@ pub struct Plan {
     /// The machines that have joined.
     #[serde(default)]
     pub joined: Vec<String>,
+    /// The database is moving here from the first ScannerPulse machine's own
+    /// PostgreSQL (`scannerpulse db move`): the first database machine copies
+    /// it and follows it until `db move --switch` makes it the primary; the
+    /// second joins after that.
+    #[serde(default)]
+    pub moving: bool,
 }
 
 /// A machine's place in the plan.
@@ -218,12 +224,16 @@ impl Plan {
                 .or((!self.ready).then_some(self.hub.as_str()));
         }
         let mine = self.name(place);
-        self.referee
+        let before = self
+            .referee
             .iter()
             .chain(&self.nodes)
             .take_while(|n| n.as_str() != mine)
             .find(|n| !self.joined.contains(n))
-            .map(String::as_str)
+            .map(String::as_str);
+        // While the database moves, the second database machine also waits
+        // for the switch on the hub.
+        before.or((self.moving && place == Place::Node(1)).then_some(self.hub.as_str()))
     }
 
     /// `waiting`, then the second ScannerPulse machine if it has not
@@ -297,6 +307,7 @@ mod tests {
             recordings: String::new(),
             ready: false,
             joined: Vec::new(),
+            moving: false,
         }
     }
 
@@ -416,6 +427,19 @@ mod tests {
         plan.mark_joined("ref.example.org");
         assert_eq!(plan.awaited_before(Place::Node(0)), None);
         assert_eq!(plan.awaited_before(Place::Node(1)), Some("db1.example.org"));
+        // A database moving from the first ScannerPulse machine: the second
+        // also waits for the switch there, which makes the first the primary.
+        let mut moving = super::tests::plan();
+        moving.moving = true;
+        assert_eq!(moving.awaited_before(Place::Node(0)), None);
+        assert_eq!(
+            moving.awaited_before(Place::Node(1)),
+            Some("db1.example.org")
+        );
+        moving.mark_joined("db1.example.org");
+        assert_eq!(moving.awaited_before(Place::Node(1)), Some("192.0.2.10"));
+        moving.moving = false;
+        assert_eq!(moving.awaited_before(Place::Node(1)), None);
         // Promoted by hand: the second waits for the first only.
         assert_eq!(super::tests::plan().awaited_before(Place::Node(0)), None);
         assert_eq!(

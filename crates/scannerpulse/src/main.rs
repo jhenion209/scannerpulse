@@ -244,6 +244,14 @@ enum DbCommand {
     Switchover,
 }
 
+/// Moving the database from this machine to two database machines.
+#[derive(Debug, PartialEq, Eq)]
+enum DbMove {
+    Begin { nodes: [String; 2], hub: String },
+    Switch,
+    Retire,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     DbUpdate {
@@ -284,6 +292,7 @@ enum Command {
     Join(Joined),
     Node(NodeCommand),
     Db(DbCommand),
+    DbMove(DbMove),
     /// `archive move NEW [--switch]`: the archive compared with NEW, or moved there.
     ArchiveMove {
         new: PathBuf,
@@ -646,6 +655,12 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["db", "promote"] => Some(Command::Db(DbCommand::Promote)),
         ["db", "rejoin"] => Some(Command::Db(DbCommand::Rejoin)),
         ["db", "switchover"] => Some(Command::Db(DbCommand::Switchover)),
+        ["db", "move", "--switch"] => Some(Command::DbMove(DbMove::Switch)),
+        ["db", "move", "--retire"] => Some(Command::DbMove(DbMove::Retire)),
+        ["db", "move", first, second, "--hub", hub] => Some(Command::DbMove(DbMove::Begin {
+            nodes: [first.to_string(), second.to_string()],
+            hub: hub.to_string(),
+        })),
         ["archive", "move", new] => Some(Command::ArchiveMove {
             new: PathBuf::from(new),
             switch: false,
@@ -986,6 +1001,36 @@ async fn run() -> ExitCode {
                 scannerpulse::setup::node::db_switchover(|line| println!("{line}"))
             }
         })),
+        Some(Command::DbMove(command)) => {
+            let result = match as_root() {
+                Err(error) => Err(error),
+                Ok(()) => match command {
+                    DbMove::Begin { nodes, hub } => match connect().await {
+                        Ok(mut conn) => {
+                            scannerpulse::setup::db_move::begin(&mut conn, nodes, hub).await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    },
+                    // A terminal gone mid-switch must not panic it.
+                    DbMove::Switch => {
+                        scannerpulse::setup::db_move::switch(|line| {
+                            let _ = writeln!(std::io::stdout(), "{line}");
+                        })
+                        .await
+                    }
+                    DbMove::Retire => {
+                        scannerpulse::setup::db_move::retire(|question| {
+                            inquire::Confirm::new(question)
+                                .with_default(false)
+                                .prompt()
+                                .unwrap_or(false)
+                        })
+                        .await
+                    }
+                },
+            };
+            node_answer(result.map_err(|error| format!("db move: {error}")))
+        }
         Some(Command::ArchiveMove { new, switch }) => {
             let result = match as_root() {
                 Ok(()) => match connect().await {
@@ -2170,7 +2215,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Admin, Asr, Change, Command, Data, DbCommand, Favorites, Jobs, Joined, NodeCommand,
+        Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
         Settings, parse, talkgroup_list,
     };
 
@@ -2321,6 +2366,22 @@ mod tests {
             Some(Command::Db(DbCommand::Switchover))
         );
         assert_eq!(parse(&["db", "failover"]), None);
+        assert_eq!(
+            parse(&["db", "move", "db1", "db2", "--hub", "192.0.2.10"]),
+            Some(Command::DbMove(DbMove::Begin {
+                nodes: ["db1".into(), "db2".into()],
+                hub: "192.0.2.10".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["db", "move", "--switch"]),
+            Some(Command::DbMove(DbMove::Switch))
+        );
+        assert_eq!(
+            parse(&["db", "move", "--retire"]),
+            Some(Command::DbMove(DbMove::Retire))
+        );
+        assert_eq!(parse(&["db", "move", "db1", "db2"]), None);
     }
 
     #[test]
