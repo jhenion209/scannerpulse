@@ -1426,7 +1426,7 @@ fn shared_address(shared: &str) -> Result<(), String> {
 
 /// The machines of a plan are each a machine of their own, by name or by
 /// the addresses their names give.
-fn distinct_machines(
+pub(super) fn distinct_machines(
     machines: &[(&str, &str)],
     resolve: impl Fn(&str) -> Vec<std::net::IpAddr>,
 ) -> Result<(), String> {

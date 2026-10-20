@@ -260,6 +260,15 @@ fn refuse_on_second(change: &Change, second: bool) -> Result<(), String> {
     }
 }
 
+/// A second ScannerPulse machine joins an install whose database is on the
+/// database machines, not one still moving there.
+fn not_moving(plan: &super::plan::Plan) -> Result<(), String> {
+    if plan.moving {
+        return Err("the database is still moving to the database machines: finish the move first (`sudo /usr/local/bin/scannerpulse db move --switch`)".into());
+    }
+    Ok(())
+}
+
 /// Makes `change` on this machine, as root, saying each step.
 pub async fn run_change(change: Change) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
@@ -381,6 +390,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                     "a second ScannerPulse machine goes with two database machines, which this install does not have".to_string()
                 }
             })?;
+            not_moving(&plan)?;
             let le_web = crate::hostfile::parse(&text)?
                 .iter()
                 .any(|(name, value)| name == "SCANNERPULSE_ACME" && value == "web");
@@ -437,7 +447,7 @@ pub async fn run_change(change: Change) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{letsencrypt_steps, location_steps, push_steps, tls_install_steps};
+    use super::{letsencrypt_steps, location_steps, not_moving, push_steps, tls_install_steps};
     use crate::acme::Proof;
     use crate::setup::steps::Action;
     use crate::setup::system::detect;
@@ -644,5 +654,14 @@ mod tests {
             refuse_on_second(&Change::Location("/srv/backups".into()), true),
             Ok(())
         );
+    }
+
+    #[test]
+    fn a_second_machine_waits_for_the_database_move() {
+        let mut plan: crate::setup::plan::Plan = serde_json::from_str(r#"{"hub":"192.0.2.10","hub_key":"k","nodes":["db1.example.org","db2.example.org"],"database":"d","role":"r","password":"p","replication_password":"q","moving":true}"#).unwrap();
+        let error = not_moving(&plan).unwrap_err();
+        assert!(error.contains("db move --switch"), "{error}");
+        plan.moving = false;
+        assert_eq!(not_moving(&plan), Ok(()));
     }
 }

@@ -151,12 +151,15 @@ pub fn hub_steps(plan: &Plan, system: &System, binary: &Path, nodes: &[IpAddr]) 
 }
 
 /// The switch itself: this machine's PostgreSQL stops cleanly (`stop_here`
-/// gives where its last checkpoint starts), and `node0`, its copy, is made
-/// the primary once it has replayed past it. When a step fails, one
-/// primary is left and the person is told what to run next.
+/// gives where its last checkpoint starts) and is kept from starting at
+/// boot (`boot_here(false)`), so a reboot after the promotion never brings
+/// it back; then `node0`, its copy, is made the primary once it has
+/// replayed past that point. When a step fails, one primary is left and
+/// the person is told what to run next.
 fn switch_roles(
     node0: &str,
     stop_here: impl FnOnce() -> Result<String, String>,
+    boot_here: impl Fn(bool) -> Result<(), String>,
     start_here: impl Fn() -> Result<(), String>,
     ask: impl Fn(&str, &str) -> Result<String, String>,
     say: impl Fn(&str),
@@ -174,15 +177,24 @@ fn switch_roles(
         Ok(last) => last,
         Err(error) => return Err(start_again(format!("it did not stop: {error}"))),
     };
+    if let Err(error) = boot_here(false) {
+        return Err(start_again(format!(
+            "it could not be kept from starting at boot: {error}"
+        )));
+    }
     say(&format!("Making {node0} the primary"));
     if let Err(error) = ask(node0, &format!("promote after {last}")) {
         // Started again only while the copy is still a standby: one whose
         // promotion went ahead would make two primaries.
         let now = node::as_status(ask(node0, "status"));
         if now.answers && now.standby {
-            return Err(start_again(format!(
-                "{node0} was not made the primary: {error}"
-            )));
+            let why = format!("{node0} was not made the primary: {error}");
+            return Err(match boot_here(true) {
+                Ok(()) => start_again(why),
+                Err(again) => start_again(format!(
+                    "{why}; this machine's PostgreSQL is still kept from starting at boot ({again})"
+                )),
+            });
         }
         return Err(format!(
             "{node0} may be the primary now ({error}), so this machine's PostgreSQL was left stopped: once {node0} answers as the primary, run `sudo /usr/local/bin/scannerpulse db move --switch` again to finish"
@@ -191,10 +203,55 @@ fn switch_roles(
     Ok(())
 }
 
-/// The old database kept from starting at boot, and its backups stopped:
-/// the site no longer uses it. pgBackRest's settings for it go too, as
-/// `uninstall` would reach for it through them.
-pub fn hold_steps(system: &System) -> Vec<Step> {
+/// Debian's file that says whether PostgreSQL 17's cluster starts at boot.
+const START_CONF: &str = "/etc/postgresql/17/main/start.conf";
+
+/// Lets this machine's old database start at boot (`start`), or keeps it
+/// from starting; on Debian through `start_conf`.
+pub fn boot(system: &System, start: bool, start_conf: &Path) -> Result<(), String> {
+    match system.family {
+        Family::Apt => std::fs::write(start_conf, if start { "auto\n" } else { "manual\n" })
+            .map_err(|error| format!("{}: {error}", start_conf.display())),
+        Family::Dnf => systemctl(&[
+            if start { "enable" } else { "disable" },
+            system.postgres_cluster(),
+        ]),
+    }
+}
+
+/// The units that read the settings and are not the site's: restarted
+/// after the switch, so that they reach the database machines too.
+const RESTARTED: [&str; 1] = ["scannerpulse-agent.service"];
+
+/// The two database machines and this machine (`hub`) are each a machine
+/// of their own, by name or by the addresses their names give, and each
+/// name is a plain one.
+fn machines_apart(
+    nodes: &[String; 2],
+    hub: &str,
+    resolve: impl Fn(&str) -> Vec<IpAddr>,
+) -> Result<(), String> {
+    for name in nodes.iter().map(String::as_str).chain([hub]) {
+        if !super::join::plain(name) {
+            return Err(format!(
+                "{name:?} is not a name or an address: letters, digits, dots, dashes and colons"
+            ));
+        }
+    }
+    super::ask::distinct_machines(
+        &[
+            ("database machine 1", &nodes[0]),
+            ("database machine 2", &nodes[1]),
+            ("this machine", hub),
+        ],
+        resolve,
+    )
+}
+
+/// The old database's backups stopped: the site no longer uses it.
+/// pgBackRest's settings for it go too, as `uninstall` would reach for it
+/// through them.
+pub fn hold_steps() -> Vec<Step> {
     vec![
         run(
             "Stop the nightly backups of this machine's old database",
@@ -206,19 +263,6 @@ pub fn hold_steps(system: &System) -> Vec<Step> {
             "rm",
             &["-f", crate::backup::PGBACKREST_CONF],
         ),
-        match system.family {
-            Family::Apt => node::script(
-                "Keep the old database from starting at boot",
-                "echo manual > /etc/postgresql/17/main/start.conf",
-                &[],
-                None,
-            ),
-            Family::Dnf => run(
-                "Keep the old database from starting at boot",
-                "systemctl",
-                &["disable", system.postgres_cluster()],
-            ),
-        },
     ]
 }
 
@@ -293,9 +337,7 @@ pub async fn begin(
         return Err("run this on the install's first ScannerPulse machine".into());
     }
     database_here(&settings)?;
-    if nodes[0] == nodes[1] {
-        return Err("the two database machines must be two machines".into());
-    }
+    machines_apart(&nodes, &hub, super::plan::resolve)?;
     if let Ok(kept) = Plan::read(path)
         && !(kept.moving && kept.nodes == nodes)
     {
@@ -389,6 +431,29 @@ pub async fn begin(
     ))
 }
 
+/// Whether the site signs in with `settings` (its database's address) and
+/// `password`, and its database answers.
+async fn signs_in(settings: &str, password: &str) -> Result<(), String> {
+    use sqlx::Connection;
+    let url = crate::hostfile::parse(settings)?
+        .into_iter()
+        .find(|(name, _)| name == "DATABASE_URL")
+        .map(|(_, url)| url)
+        .ok_or("no DATABASE_URL")?;
+    let options: sqlx::postgres::PgConnectOptions = url
+        .parse()
+        .map_err(|error: sqlx::Error| error.to_string())?;
+    let ask = async {
+        let mut conn = sqlx::PgConnection::connect_with(&options.password(password)).await?;
+        sqlx::query("SELECT 1").execute(&mut conn).await?;
+        conn.close().await
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), ask).await {
+        Err(_) => Err("no answer within 10 s".into()),
+        Ok(answer) => answer.map_err(|error| error.to_string()),
+    }
+}
+
 /// Starts the site's services when dropped, so that a switch that ends
 /// early, by an error or a panic, does not leave the site stopped.
 struct Site;
@@ -448,6 +513,19 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
             ));
         }
     }
+    // The site must be able to sign in to the copy as its role, over TLS,
+    // before anything stops: its access rules, its certificate and the
+    // network all come into it.
+    let pgpass = std::fs::read_to_string(super::steps::pgpass_path())
+        .map_err(|error| format!("{}: {error}", super::steps::pgpass_path().display()))?;
+    let password =
+        app_password(&pgpass).ok_or("the site's password file has no line for its database")?;
+    let moved = moved_settings(&settings, &plan.nodes)?;
+    signs_in(&moved, &password).await.map_err(|error| {
+        format!(
+            "the site cannot sign in to {node0} ({error}), so nothing was changed: join {node0} again, then try again"
+        )
+    })?;
     // Ctrl-C, a closed terminal or a stop wait for the end of the switch,
     // and the guard starts the site again however it ends.
     use tokio::signal::unix::{SignalKind, signal};
@@ -467,26 +545,33 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
         "scannerpulse-web.service",
         "scannerpulse-ingest.service",
     ])?;
-    if !finishing {
+    let start_conf = Path::new(START_CONF);
+    if finishing {
+        boot(&system, false, start_conf)?;
+    } else {
         switch_roles(
             &node0,
             node::stop,
+            |start| boot(&system, start, start_conf),
             node::start,
             |node, command| node::ask(node, command, &[]),
             &say,
         )?;
     }
+    // From here the database is on the copy: a step that fails is finished
+    // by the same command again.
+    let finish = |error: String| {
+        format!(
+            "{error}; the database is on {node0} now: run `sudo /usr/local/bin/scannerpulse db move --switch` again to finish"
+        )
+    };
     say("Pointing the site at the database machines");
     let backups = crate::hostfile::parse(&settings)?
         .into_iter()
         .find(|(name, _)| name == "SCANNERPULSE_BACKUPS")
         .map(|(_, value)| value);
-    let pgpass = std::fs::read_to_string(super::steps::pgpass_path())
-        .map_err(|error| format!("{}: {error}", super::steps::pgpass_path().display()))?;
-    let password =
-        app_password(&pgpass).ok_or("the site's password file has no line for its database")?;
     let mut steps = vec![
-        super::change::settings_with(&moved_settings(&settings, &plan.nodes)?, &[])?,
+        super::change::settings_with(&moved, &[]).map_err(finish)?,
         Step {
             title: "Write the database's password file".into(),
             action: Action::Write {
@@ -497,15 +582,20 @@ pub async fn switch(say: impl Fn(&str)) -> Result<String, String> {
             },
         },
     ];
-    steps.extend(hold_steps(&system));
-    super::apply::apply(&steps, &context(), true).await?;
-    Plan::update(Path::new(super::plan::PLAN), |plan| plan.moving = false)?;
+    steps.extend(hold_steps());
+    super::apply::apply(&steps, &context(), true)
+        .await
+        .map_err(finish)?;
+    Plan::update(Path::new(super::plan::PLAN), |plan| plan.moving = false).map_err(finish)?;
     say("Starting the site again");
     systemctl(&[
         "start",
         "scannerpulse-web.service",
         "scannerpulse-ingest.service",
     ])?;
+    let mut restart = vec!["try-restart"];
+    restart.extend(RESTARTED);
+    systemctl(&restart)?;
     let kept = backups
         .map(|folder| format!(", and its backups stay in {folder}"))
         .unwrap_or_default();
@@ -659,6 +749,12 @@ mod tests {
                 asked.borrow_mut().push("stop here".into());
                 stop.map(String::from).map_err(String::from)
             },
+            |start| {
+                asked
+                    .borrow_mut()
+                    .push(if start { "release here" } else { "hold here" }.into());
+                Ok(())
+            },
             || {
                 asked.borrow_mut().push("start here".into());
                 Ok(())
@@ -679,9 +775,15 @@ mod tests {
     fn the_switch_stops_this_machine_and_promotes_its_copy() {
         let (result, asked) = switched(Ok("0/313CE18"), |_| Ok("promoted".into()));
         assert_eq!(result, Ok(()));
+        // Held from starting at boot before the promotion: a reboot after
+        // it never brings the old primary back.
         assert_eq!(
             asked,
-            ["stop here", "db1.example.org promote after 0/313CE18"]
+            [
+                "stop here",
+                "hold here",
+                "db1.example.org promote after 0/313CE18"
+            ]
         );
     }
 
@@ -700,7 +802,7 @@ mod tests {
         });
         let error = result.unwrap_err();
         assert!(error.contains("nothing moved"), "{error}");
-        assert_eq!(asked.last().unwrap(), "start here");
+        assert_eq!(asked[asked.len() - 2..], ["release here", "start here"]);
         // The answer was lost but the promotion went ahead: this machine
         // stays stopped, so there are never two primaries.
         let (result, asked) = switched(Ok("0/3"), |command| match command {
@@ -709,18 +811,61 @@ mod tests {
         });
         let error = result.unwrap_err();
         assert!(!asked.contains(&"start here".to_string()));
+        assert!(!asked.contains(&"release here".to_string()));
         assert!(error.contains("left stopped"), "{error}");
         assert!(error.contains("db move --switch"), "{error}");
     }
 
     #[test]
+    fn the_old_database_is_kept_from_starting_at_boot_and_let_again() {
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("start.conf");
+        std::fs::write(&conf, "# Automatic startup\nauto\n").unwrap();
+        boot(&debian, false, &conf).unwrap();
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "manual\n");
+        boot(&debian, true, &conf).unwrap();
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "auto\n");
+    }
+
+    #[test]
+    fn the_machines_must_be_three_machines() {
+        // As `plan::resolve`: an address is itself.
+        let dns = |name: &str| match name {
+            "db1.example.org" => vec!["192.0.2.21".parse().unwrap()],
+            _ => name.parse().into_iter().collect(),
+        };
+        let pair = |a: &str, b: &str| [a.to_string(), b.to_string()];
+        for (nodes, hub) in [
+            (pair("db1.example.org", "192.0.2.21"), "192.0.2.10"),
+            (pair("DB1.example.org", "db1.example.org"), "192.0.2.10"),
+            (pair("db1.example.org", "db2.example.org"), "192.0.2.21"),
+        ] {
+            let error = machines_apart(&nodes, hub, dns).unwrap_err();
+            assert!(error.contains("same machine"), "{error}");
+        }
+        let error =
+            machines_apart(&pair("db1.example.org", "db2.example.org"), "a b", dns).unwrap_err();
+        assert!(error.contains("not a name or an address"), "{error}");
+        assert_eq!(
+            machines_apart(
+                &pair("db1.example.org", "db2.example.org"),
+                "192.0.2.10",
+                dns
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_root_helper_reads_the_moved_settings_too() {
+        assert!(RESTARTED.contains(&"scannerpulse-agent.service"));
+    }
+
+    #[test]
     fn the_old_database_is_kept_from_starting_and_then_removed() {
         let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
-        let held = format!("{:?}", hold_steps(&debian));
-        assert!(
-            held.contains("/etc/postgresql/17/main/start.conf"),
-            "{held}"
-        );
+        let held = format!("{:?}", hold_steps());
         assert!(held.contains("scannerpulse-backup.timer"), "{held}");
         // pgBackRest's settings go at the switch: `uninstall` would reach
         // for the old database through them.
@@ -728,11 +873,6 @@ mod tests {
         let gone = format!("{:?}", retire_steps(&debian));
         assert!(gone.contains("pg_dropcluster"), "{gone}");
         let rocky = detect("ID=\"rocky\"\nVERSION_ID=\"9.4\"\n", "x86_64").unwrap();
-        let held = format!("{:?}", hold_steps(&rocky));
-        assert!(
-            held.contains("disable") && held.contains("postgresql-17"),
-            "{held}"
-        );
         let Action::Run { env, .. } = &retire_steps(&rocky)[0].action else {
             panic!()
         };

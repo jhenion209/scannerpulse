@@ -321,12 +321,13 @@ fn by_hand(
         data,
         "ALTER SYSTEM SET listen_addresses = '*';\nALTER SYSTEM SET wal_log_hints = on;\n".into(),
     ));
-    steps.push(script(
+    let rules = script(
         "Let the ScannerPulse machine and both database machines in",
         REPLACE_BLOCK,
         &[("MARK", MARK), ("HBA", system.postgres_hba())],
         Some(hba(plan, hub, nodes)),
-    ));
+    );
+    steps.push(rules.clone());
     steps.push(script(
         "Restart PostgreSQL 17",
         "[ -f \"$DATA/PG_VERSION\" ] || exit 0\nsystemctl restart \"$SERVICE\"",
@@ -360,10 +361,14 @@ fn by_hand(
         // which this machine follows until `db move --switch`.
         steps.push(script(
             "Copy the ScannerPulse machine's database, and follow it",
-            COPY,
+            COPY_MOVING,
             &copy_vars,
             None,
         ));
+        // On the Red Hat family the access rules live in the data directory,
+        // which the copy brought from the ScannerPulse machine: setup's own
+        // go in again, read at the restart that follows.
+        steps.push(rules);
         // Its WAL went to its own pgBackRest, which this machine has not.
         steps.push(script(
             "Leave the ScannerPulse machine's backups behind",
@@ -738,6 +743,29 @@ if [ -f "$DATA/PG_VERSION" ]; then
     fi
     echo "this machine's PostgreSQL holds databases of its own: setup will not replace them" >&2; exit 1
   fi
+fi
+systemctl stop "$SERVICE"
+find "$DATA" -mindepth 1 -delete
+runuser -u postgres -- "$BIN/pg_basebackup" -d "host=$PRIMARY port=5432 user=replicator sslmode=require" -D "$DATA" -R -X stream -c fast
+systemctl start "$SERVICE"
+"#;
+
+/// The first machine's copy while the database moves to it: a standby that
+/// receives is left as it is; one that no longer does (it fell further
+/// behind than the WAL the ScannerPulse machine keeps) is copied again; a
+/// primary before the switch is refused, as the database is still the
+/// ScannerPulse machine's.
+const COPY_MOVING: &str = r#"set -e
+if [ -f "$DATA/PG_VERSION" ]; then
+  state=$(runuser -u postgres -- psql -tAXc "SELECT pg_is_in_recovery() || ' ' || (SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming')" 2>/dev/null || echo none)
+  case $state in
+    "t 1") echo "already a standby"; exit 0 ;;
+    f*)
+      n=$(runuser -u postgres -- psql -tAXc "SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1')")
+      if [ "$n" != 0 ]; then
+        echo "this machine answers as a primary while the database moves, so it holds writes the ScannerPulse machine does not: setup will not replace them. To start over, remove its data ($DATA) and join again" >&2; exit 1
+      fi ;;
+  esac
 fi
 systemctl stop "$SERVICE"
 find "$DATA" -mindepth 1 -delete
@@ -1193,17 +1221,39 @@ pub fn db_promote() -> Result<String, String> {
     if psql("SELECT pg_is_in_recovery()")? != "t" {
         return Err("this machine is the primary already".into());
     }
-    if other_is_standby(node.other()) == Some(false) {
-        return Err(format!(
-            "{} still answers as the primary: for a planned change of roles, run `scannerpulse db switchover` on the ScannerPulse machine",
-            node.other()
-        ));
-    }
+    may_promote(
+        other_is_standby(node.other()),
+        other_is_standby(&node.hub),
+        node.other(),
+        &node.hub,
+    )?;
     promote()?;
     Ok(format!(
         "This machine is the primary now; the ScannerPulse machines move to it within seconds. When {} is back, run `sudo /usr/local/bin/scannerpulse db rejoin` there.",
         node.other()
     ))
+}
+
+/// Whether a standby may be promoted by hand, by what the other database
+/// machine and the ScannerPulse machine answer (`Some(false)`: a primary):
+/// never while one of them is the primary, so two never write at once.
+fn may_promote(
+    other: Option<bool>,
+    hub: Option<bool>,
+    other_name: &str,
+    hub_name: &str,
+) -> Result<(), String> {
+    if other == Some(false) {
+        return Err(format!(
+            "{other_name} still answers as the primary: for a planned change of roles, run `scannerpulse db switchover` on the ScannerPulse machine"
+        ));
+    }
+    if hub == Some(false) {
+        return Err(format!(
+            "{hub_name} still answers as the primary: the database is still moving from it, and `sudo /usr/local/bin/scannerpulse db move --switch` there makes this machine the primary"
+        ));
+    }
+    Ok(())
 }
 
 /// `scannerpulse db rejoin`, as root on a former primary (or a standby that
@@ -1572,6 +1622,10 @@ mod tests {
         };
         assert!(env.contains(&("PRIMARY".to_string(), "192.0.2.10".to_string())));
         assert!(args[1].contains("pg_basebackup"));
+        // A copy that no longer receives (it fell behind) is made again; a
+        // primary before the switch is wrong, and refused.
+        assert!(args[1].contains("pg_stat_wal_receiver"), "{}", args[1]);
+        assert!(args[1].contains("while the database moves"), "{}", args[1]);
         // Its database and roles come with the copy.
         assert!(!all.iter().any(|s| s.title.starts_with("Make the database")));
         // The ScannerPulse machine's WAL archiving (to its pgBackRest) stays
@@ -1601,6 +1655,46 @@ mod tests {
                 .iter()
                 .any(|s| s.title == "Copy the primary's data, and follow it")
         );
+        // On the Red Hat family the access rules live in the data directory,
+        // which the copy replaces with the ScannerPulse machine's: setup's
+        // rules are written again after it.
+        let rocky = detect("ID=\"rocky\"\nVERSION_ID=\"9.4\"\n", "x86_64").unwrap();
+        let all = steps(
+            &moving,
+            0,
+            &rocky,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        let copy = all
+            .iter()
+            .position(|s| s.title == "Copy the ScannerPulse machine's database, and follow it")
+            .unwrap();
+        let rules = "Let the ScannerPulse machine and both database machines in";
+        assert!(
+            all.iter().skip(copy + 1).any(|s| s.title == rules),
+            "{:?}",
+            all.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_standby_is_not_promoted_while_another_machine_is_the_primary() {
+        assert_eq!(may_promote(Some(true), None, "db2", "192.0.2.10"), Ok(()));
+        assert_eq!(may_promote(None, None, "db2", "192.0.2.10"), Ok(()));
+        let error = may_promote(Some(false), None, "db2", "192.0.2.10").unwrap_err();
+        assert!(
+            error.contains("db2 still answers as the primary"),
+            "{error}"
+        );
+        // While the database moves, the ScannerPulse machine is the primary.
+        let error = may_promote(None, Some(false), "db2", "192.0.2.10").unwrap_err();
+        assert!(
+            error.contains("192.0.2.10 still answers as the primary"),
+            "{error}"
+        );
+        assert!(error.contains("db move --switch"), "{error}");
     }
 
     #[test]
