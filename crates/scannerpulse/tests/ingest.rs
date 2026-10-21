@@ -85,7 +85,11 @@ async fn a_file_put_into_the_source_is_filed_and_the_lease_released_at_the_stop(
     };
     assert_eq!(rel_path, format!("2031-01-15/330-Charlie Ops/{NAME}"));
     assert_eq!(fs::read(root.path().join(&rel_path)).unwrap(), charlie());
-    assert!(!source.path().join(NAME).exists());
+    // The file leaves its folder just after its call is committed.
+    while source.path().join(NAME).exists() {
+        assert!(Instant::now() < deadline, "the file stayed in its folder");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let status = lease::status(&pool).await?;
     assert!(status.valid());
     assert!(status.holder.unwrap().starts_with("host-a "));
