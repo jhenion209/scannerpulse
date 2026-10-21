@@ -935,12 +935,24 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run()),
+        Ok(runtime) => run_to_end(runtime, run()),
         Err(error) => {
             eprintln!("scannerpulse: cannot start: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Runs a command to its end, then leaves without waiting for blocking
+/// threads: a read on a hung share (a preview's) never ends, and dropping the
+/// runtime would wait for it.
+fn run_to_end(
+    runtime: tokio::runtime::Runtime,
+    command: impl Future<Output = ExitCode>,
+) -> ExitCode {
+    let code = runtime.block_on(command);
+    runtime.shutdown_background();
+    code
 }
 
 async fn run() -> ExitCode {
@@ -2593,8 +2605,41 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 mod tests {
     use super::{
         Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
-        RecorderCommand, Settings, Waiting, parse, recorders, talkgroup_list,
+        RecorderCommand, Settings, Waiting, parse, recorders, run_to_end, talkgroup_list,
     };
+    use std::process::ExitCode;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn a_command_ends_though_a_read_of_a_hung_share_still_waits() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (answer, waits) = mpsc::channel::<()>();
+        let (ended, ends) = mpsc::channel();
+        std::thread::spawn(move || {
+            let code = run_to_end(runtime, async move {
+                // A read left waiting on a hung share, as a preview leaves one.
+                let (started, running) = tokio::sync::oneshot::channel();
+                tokio::task::spawn_blocking(move || {
+                    let _ = started.send(());
+                    let _ = waits.recv();
+                });
+                let _ = running.await;
+                ExitCode::SUCCESS
+            });
+            let _ = ended.send(code);
+        });
+        let code = ends.recv_timeout(Duration::from_secs(5));
+        let _ = answer.send(());
+        assert_eq!(
+            code,
+            Ok(ExitCode::SUCCESS),
+            "the command waited for the read"
+        );
+    }
 
     #[test]
     fn setup_takes_an_answers_file_and_a_dry_run_in_either_order() {
