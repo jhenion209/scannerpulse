@@ -1712,7 +1712,7 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                 seen.sample.len()
             );
             println!(
-                "{} filed ({} new talkgroups, {} placeholders named, {} name proposals), {} replace a shorter recording, {} duplicates deleted, {} staged, {} rejected, {} cannot be read now",
+                "{} filed ({} new talkgroups, {} placeholders named, {} name proposals), {} replacing a shorter recording, {} duplicates deleted, {} staged, {} rejected, {} cannot be read now",
                 c.filed + c.new_talkgroup + c.named + c.proposal,
                 c.new_talkgroup,
                 c.named,
