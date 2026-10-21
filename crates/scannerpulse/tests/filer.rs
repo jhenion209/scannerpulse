@@ -581,16 +581,21 @@ async fn another_file_under_a_filed_name_is_not_taken_as_filed(pool: PgPool) -> 
 }
 
 static SLOW_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Set when the test is done with the hung share: its read then ends.
+static ANSWER: AtomicBool = AtomicBool::new(false);
 
 /// A recorder's share that has stopped answering: a read in its folder
-/// `hung` takes 5 s.
+/// `hung` lasts until the test sets `ANSWER` (a fixed time could run out while
+/// the other file's copy waits for a slow disk).
 fn slow_read(
     path: &std::path::Path,
     zone: chrono_tz::Tz,
 ) -> Result<(reader::FileCall, Vec<u8>), reader::ReadError> {
     if path.parent().is_some_and(|folder| folder.ends_with("hung")) {
         SLOW_READS.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_secs(5));
+        while !ANSWER.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     reader::read_path(path, zone)
 }
@@ -649,5 +654,6 @@ async fn a_recorder_whose_share_hangs_holds_up_no_other_recorder(pool: PgPool) -
         "{again:?}"
     );
     assert_eq!(SLOW_READS.load(Ordering::SeqCst), 1);
+    ANSWER.store(true, Ordering::SeqCst);
     Ok(())
 }
