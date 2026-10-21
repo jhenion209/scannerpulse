@@ -234,9 +234,68 @@ fn bringing_in_takes_the_files_a_folder_held_when_it_was_asked() {
             .set_modified(now - Duration::from_secs(age))
             .unwrap();
     }
-    let mut watcher = Watcher::new(Vec::new(), WAIT);
-    let found = watcher.list_folder(dir.path()).unwrap();
+    let found = scannerpulse::watcher::list_folder(dir.path())
+        .unwrap()
+        .found;
     let seen = scannerpulse::watcher::to_bring_in(&found, now - Duration::from_secs(30));
     let taken: Vec<(&str, i64)> = seen.iter().map(|s| (s.rel_path.as_str(), s.size)).collect();
     assert_eq!(taken, [("old.mp3", 5)]);
+}
+
+static SLOW_LISTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A recorder's share that has stopped answering: listing the folder `hung`
+/// takes a second.
+fn slow_list(path: &Path) -> std::io::Result<scannerpulse::watcher::Listing> {
+    if path.ends_with("hung") {
+        SLOW_LISTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    scannerpulse::watcher::list_folder(path)
+}
+
+#[tokio::test]
+async fn a_folder_that_does_not_answer_holds_up_no_other_and_is_left_until_it_does() {
+    use scannerpulse::watcher::{Hung, list_all};
+    use std::sync::atomic::Ordering;
+    let (good, parent) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    fs::write(good.path().join("a.mp3"), b"12345").unwrap();
+    let hung_folder = parent.path().join("hung");
+    fs::create_dir(&hung_folder).unwrap();
+    let folders = vec![(1, good.path().to_path_buf()), (2, hung_folder.clone())];
+    let mut hung = Hung::default();
+    let started = Instant::now();
+    let listed = list_all(
+        folders.clone(),
+        slow_list,
+        &mut hung,
+        Duration::from_millis(200),
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_millis(800),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(listed[0].0, 1);
+    assert_eq!(listed[0].1.as_ref().unwrap().found.len(), 1);
+    let why = listed[1].1.as_ref().unwrap_err().to_string();
+    assert!(why.contains("did not answer within"), "{why}");
+    let again = list_all(
+        folders.clone(),
+        slow_list,
+        &mut hung,
+        Duration::from_millis(200),
+    )
+    .await;
+    let why = again[1].1.as_ref().unwrap_err().to_string();
+    assert!(why.contains("still does not answer"), "{why}");
+    assert_eq!(
+        SLOW_LISTS.load(Ordering::SeqCst),
+        1,
+        "not listed again while it hangs"
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let answered = list_all(folders, slow_list, &mut hung, Duration::from_secs(5)).await;
+    assert!(answered[1].1.is_ok(), "listed again once its thread ended");
 }

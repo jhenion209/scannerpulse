@@ -26,7 +26,7 @@ use crate::queue;
 use crate::settings::{self, IngestSettings, SettingsError, Transcription};
 use crate::store::{self, Listed, Location, Source, Waiting, limited};
 use crate::transcriber::{self, Transcriber};
-use crate::watcher::{self, Batch, Watcher};
+use crate::watcher::{self, Batch, FOLDER_LIMIT, Hung, Listing, Watcher};
 
 /// How long ingest waits before it tries the database again.
 pub const RETRY: Duration = Duration::from_secs(5);
@@ -770,6 +770,8 @@ async fn watch_loop(
     let mut _events = start_events(&watcher, events_tx.clone());
     let tick = (stable_for / 2).clamp(Duration::from_millis(100), Duration::from_secs(1));
     let mut next_rescan = Instant::now();
+    // The folders whose share stopped answering: left alone until it does.
+    let mut hung = Hung::default();
     loop {
         let now = Instant::now();
         while let Ok(path) = events.try_recv() {
@@ -805,12 +807,25 @@ async fn watch_loop(
                     Vec::new()
                 }
             };
-            let mut batches = watcher.rescan(now);
+            // Every folder is listed in a thread of its own: a share that
+            // stopped answering holds up no other recorder.
+            let mut folders_to_list = watcher.folders();
+            folders_to_list.extend(asked.iter().map(|l| (l.source.id, l.source.path.clone())));
+            let mut listed = watcher::list_all(
+                folders_to_list,
+                watcher::list_folder,
+                &mut hung,
+                FOLDER_LIMIT,
+            )
+            .await;
+            let asked_listings = listed.split_off(listed.len() - asked.len());
+            let mut batches = watcher.rescan_with(now, listed);
             let mut found = watcher.listings().to_vec();
-            for listed in &asked {
+            for (listed, (_, listing)) in asked.iter().zip(asked_listings) {
                 list_asked(
                     &mut watcher,
                     listed,
+                    listing,
                     stable_for,
                     &mut found,
                     &mut batches,
@@ -821,9 +836,10 @@ async fn watch_loop(
             {
                 log::warn(format!("what the folders hold cannot be written: {error}"));
             }
+            batches.extend(settle(&mut watcher, &mut hung, now).await);
             batches
         } else {
-            watcher.settle(now)
+            settle(&mut watcher, &mut hung, now).await
         };
         if !batches.is_empty() || !brought.is_empty() {
             match limited(db_limit, record(&pool, &batches)).await {
@@ -861,22 +877,26 @@ async fn watch_loop(
 /// to bring them in is `stable_for` old, adds the files it held at that
 /// moment to `batches` and the request to `brought`. A file written in the
 /// moment of the request may still have been growing: the wait lets it settle.
+#[allow(clippy::too_many_arguments)]
 fn list_asked(
     watcher: &mut Watcher,
     listed: &Listed,
+    listing: std::io::Result<Listing>,
     stable_for: Duration,
     found: &mut Vec<(i16, Result<usize, String>)>,
     batches: &mut Vec<Batch>,
     brought: &mut Vec<(i16, DateTime<Utc>)>,
 ) {
     let id = listed.source.id;
-    let files = match watcher.list_folder(&listed.source.path) {
-        Ok(files) => files,
+    let listing = match listing {
+        Ok(listing) => listing,
         Err(error) => {
             found.push((id, Err(format!("cannot be listed: {error}"))));
             return;
         }
     };
+    watcher.report(&listing.bad_names);
+    let files = listing.found;
     found.push((id, Ok(files.len())));
     let Some(at) = listed.bring_in else {
         return;
@@ -892,6 +912,16 @@ fn list_asked(
         });
     }
     brought.push((id, at));
+}
+
+/// The files that have settled, their sizes read a thread per folder.
+async fn settle(watcher: &mut Watcher, hung: &mut Hung, now: Instant) -> Vec<Batch> {
+    let due = watcher.due(now);
+    if due.is_empty() {
+        return Vec::new();
+    }
+    let stats = watcher::stat_all(due, watcher::stat_file, hung, FOLDER_LIMIT).await;
+    watcher.settle_with(now, stats)
 }
 
 /// Reads the maintenance switch every `MAINTENANCE_EVERY`; a value that

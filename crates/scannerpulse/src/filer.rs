@@ -27,6 +27,7 @@ use crate::archive::{self, Place};
 use crate::localtime::TimeHow;
 use crate::reader::{self, FileCall, ReadError};
 use crate::store::{self, Location, MISSING, NewCall, RecordError, Waiting, limited};
+use crate::watcher::{self, Hung};
 
 /// Whether this host may file now, and under which name it holds the lease.
 /// The lease answers `held` from its local deadline, without a database call.
@@ -78,7 +79,14 @@ pub struct Filer {
     /// The shortest call that is queued for transcription; below 0 while
     /// transcription is off.
     transcribe_from: Option<Arc<AtomicI32>>,
+    read: Reader,
+    folder_limit: Duration,
+    /// The recorders' folders whose share stopped answering a read.
+    hung: Hung,
 }
+
+/// How a recorder's file is read ([`reader::read_path`]).
+pub type Reader = fn(&Path, Tz) -> Result<(FileCall, Vec<u8>), ReadError>;
 
 impl Filer {
     pub fn new(
@@ -97,7 +105,24 @@ impl Filer {
             db_limit: DEFAULT_DB_LIMIT,
             retry_at: HashMap::new(),
             transcribe_from: None,
+            read: reader::read_path,
+            folder_limit: watcher::FOLDER_LIMIT,
+            hung: Hung::default(),
         }
+    }
+
+    /// Reads the recorders' files with `read` (default [`reader::read_path`]).
+    pub fn with_reader(mut self, read: Reader) -> Filer {
+        self.read = read;
+        self
+    }
+
+    /// Sets how long a file's read may take (default
+    /// [`watcher::FOLDER_LIMIT`]); its folder is then left alone until the
+    /// read ends.
+    pub fn with_folder_limit(mut self, limit: Duration) -> Filer {
+        self.folder_limit = limit;
+        self
     }
 
     /// Queues the filed calls for transcription by `rule`: the shortest call
@@ -154,7 +179,28 @@ impl Filer {
             return Ok(Outcome::LeaseLost);
         }
         let path = Path::new(&row.source_path).join(&row.rel_path);
-        let (call, data) = match reader::read_path(&path, self.zone) {
+        // In a thread of its own: a recorder's share that stopped answering
+        // holds up no other recorder's files. ponytail: the deletion after
+        // filing stays on this task; a share that hangs between the read
+        // and the deletion still holds the filer.
+        let (read, zone, file) = (self.read, self.zone, path.clone());
+        let job: watcher::Job<Result<(FileCall, Vec<u8>), ReadError>> =
+            Box::new(move || Ok(read(&file, zone)));
+        let folder = PathBuf::from(&row.source_path);
+        let answered = watcher::run_bounded(vec![(folder, job)], &mut self.hung, self.folder_limit)
+            .await
+            .pop()
+            .unwrap_or_else(|| Err(io::Error::other("the read was not run")));
+        let read = match answered {
+            Ok(read) => read,
+            Err(error) => {
+                return Ok(later(format!(
+                    "{}: its folder {} {error}",
+                    row.rel_path, row.source_path
+                )));
+            }
+        };
+        let (call, data) = match read {
             Ok(read) => read,
             Err(ReadError::Rejected(why)) => return self.reject_file(row, &path, why).await,
             Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {

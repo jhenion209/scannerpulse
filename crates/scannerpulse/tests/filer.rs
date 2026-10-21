@@ -579,3 +579,79 @@ async fn another_file_under_a_filed_name_is_not_taken_as_filed(pool: PgPool) -> 
     assert_eq!(site.state(NAME).await.0, "waiting");
     Ok(())
 }
+
+static SLOW_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A recorder's share that has stopped answering: a read in its folder
+/// `hung` takes 5 s.
+fn slow_read(
+    path: &std::path::Path,
+    zone: chrono_tz::Tz,
+) -> Result<(reader::FileCall, Vec<u8>), reader::ReadError> {
+    if path.parent().is_some_and(|folder| folder.ends_with("hung")) {
+        SLOW_READS.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    reader::read_path(path, zone)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_whose_share_hangs_holds_up_no_other_recorder(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    let parent = tempfile::tempdir().unwrap();
+    let hung_folder = parent.path().join("hung");
+    fs::create_dir(&hung_folder).unwrap();
+    let hung: i16 = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, path) VALUES ('east', 'sdrtrunk', $1) RETURNING id",
+    )
+    .bind(hung_folder.to_str().unwrap())
+    .fetch_one(&site.pool)
+    .await?;
+    let late = "20310115_120500SYSB_South_Bravo__TO_215_FROM_4021.mp3";
+    fs::write(hung_folder.join(late), bravo()).unwrap();
+    let meta = fs::metadata(hung_folder.join(late)).unwrap();
+    let seen = Seen {
+        rel_path: late.to_string(),
+        size: meta.len() as i64,
+        file_mtime: meta.modified().unwrap().into(),
+    };
+    store::upsert_seen(&site.pool, hung, &[seen]).await?;
+    site.arrive(NAME, &bravo()).await;
+    let mut filer = site
+        .filer()
+        .with_reader(slow_read)
+        .with_folder_limit(Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let done = filer.pass(10).await?;
+    // The other recorder's file is filed meanwhile (its copy into the
+    // archive takes its own time on a busy disk).
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the pass waited for the hung share: {:?}",
+        started.elapsed()
+    );
+    let by_name: Vec<(String, String)> = done
+        .iter()
+        .map(|(row, outcome)| (row.rel_path.clone(), format!("{outcome:?}")))
+        .collect();
+    let hung_outcome = &by_name.iter().find(|(name, _)| name == late).unwrap().1;
+    assert!(
+        hung_outcome.contains("did not answer within"),
+        "{hung_outcome}"
+    );
+    let live_outcome = &by_name.iter().find(|(name, _)| name == NAME).unwrap().1;
+    assert!(live_outcome.starts_with("Filed"), "{live_outcome}");
+    // While the first read still hangs, the folder is not read again.
+    let row = store::waiting(&site.pool, 10, &[])
+        .await?
+        .into_iter()
+        .find(|row| row.rel_path == late)
+        .unwrap();
+    let again = filer.file_one(&row).await?;
+    assert!(
+        format!("{again:?}").contains("does not answer"),
+        "{again:?}"
+    );
+    assert_eq!(SLOW_READS.load(Ordering::SeqCst), 1);
+    Ok(())
+}
