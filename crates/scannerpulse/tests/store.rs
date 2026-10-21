@@ -148,8 +148,44 @@ async fn a_filed_file_still_in_the_source_waits_again(pool: PgPool) -> sqlx::Res
     )
     .await?;
     assert_eq!(row(&pool, "a.mp3").await.0, "done");
+    let call = || async {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT call_id FROM ingest_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
     store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
     assert_eq!(row(&pool, "a.mp3").await.0, "waiting");
+    assert_eq!(
+        call().await,
+        Some(1),
+        "unchanged, it is still the call's file"
+    );
+    // Another file under the name is another call.
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 6)]).await?;
+    assert_eq!(call().await, None);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_copy_deleted_as_a_duplicate_stays_so_until_it_changes(pool: PgPool) -> sqlx::Result<()> {
+    let (_, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
+    sqlx::query(
+        "UPDATE ingest_files SET state = 'duplicate', reason = 'a copy', call_id = 1, \
+         call_started_at = '2031-01-15T18:00:00Z'",
+    )
+    .execute(&pool)
+    .await?;
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
+    let (state, reason, ..) = row(&pool, "a.mp3").await;
+    assert_eq!(
+        (state.as_str(), reason.as_deref()),
+        ("duplicate", Some("a copy"))
+    );
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 6)]).await?;
+    let (state, reason, ..) = row(&pool, "a.mp3").await;
+    assert_eq!((state.as_str(), reason), ("waiting", None));
     Ok(())
 }
 
@@ -478,7 +514,12 @@ async fn only_old_rows_of_filed_files_are_pruned(pool: PgPool) -> sqlx::Result<(
     store::upsert_seen(
         &pool,
         source,
-        &[seen("old.mp3", 5), seen("new.mp3", 5), seen("wait.mp3", 5)],
+        &[
+            seen("old.mp3", 5),
+            seen("new.mp3", 5),
+            seen("wait.mp3", 5),
+            seen("copy.mp3", 5),
+        ],
     )
     .await?;
     for name in ["old.mp3", "new.mp3"] {
@@ -489,10 +530,13 @@ async fn only_old_rows_of_filed_files_are_pruned(pool: PgPool) -> sqlx::Result<(
         )
         .await?;
     }
-    sqlx::query("UPDATE ingest_files SET seen_at = now() - interval '8 days' WHERE rel_path IN ('old.mp3', 'wait.mp3')")
+    sqlx::query("UPDATE ingest_files SET state = 'duplicate' WHERE rel_path = 'copy.mp3'")
         .execute(&pool)
         .await?;
-    assert_eq!(store::prune_done(&pool, 7).await?, 1);
+    sqlx::query("UPDATE ingest_files SET seen_at = now() - interval '8 days' WHERE rel_path IN ('old.mp3', 'wait.mp3', 'copy.mp3')")
+        .execute(&pool)
+        .await?;
+    assert_eq!(store::prune_done(&pool, 7).await?, 2);
     let left: Vec<String> =
         sqlx::query_scalar("SELECT rel_path FROM ingest_files ORDER BY rel_path")
             .fetch_all(&pool)

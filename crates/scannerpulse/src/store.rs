@@ -183,10 +183,12 @@ pub struct Seen {
 /// Records what the watcher sees in a source; each path at most once, and
 /// nothing for a removed recorder (another host may not know yet). A new
 /// file becomes a waiting row. A known file refreshes `seen_at`. A rejected
-/// file stays rejected unless its size or modification time changed, or it was
-/// rejected as missing: a missing file that comes back waits again. A filed
-/// file that is still in the source waits again, so that the filer finds its
-/// archive copy and deletes it.
+/// file, or one deleted as a duplicate, stays so unless its size or
+/// modification time changed, or it was rejected as missing: a missing file
+/// that comes back waits again. A filed file that is still in the source
+/// waits again, with its call, so that the filer deletes it. A row keeps its
+/// call only while the file is unchanged: another file under the name is
+/// another call.
 pub async fn upsert_seen(
     db: impl PgExecutor<'_>,
     source_id: i16,
@@ -203,15 +205,20 @@ pub async fn upsert_seen(
          ON CONFLICT (source_id, rel_path) DO UPDATE SET \
              seen_at = now(), size = EXCLUDED.size, file_mtime = EXCLUDED.file_mtime, \
              state = CASE WHEN f.state = 'staged' THEN 'staged' \
-                          WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
+                          WHEN f.state IN ('rejected', 'duplicate') AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
                            AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                            AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
-                          THEN 'rejected' ELSE 'waiting' END, \
+                          THEN f.state ELSE 'waiting' END, \
              reason = CASE WHEN f.state = 'staged' THEN f.reason \
-                           WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
+                           WHEN f.state IN ('rejected', 'duplicate') AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
                             AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                             AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
-                           THEN f.reason END",
+                           THEN f.reason END, \
+             call_id = CASE WHEN f.size IS NOT DISTINCT FROM EXCLUDED.size \
+                             AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime THEN f.call_id END, \
+             call_started_at = CASE WHEN f.size IS NOT DISTINCT FROM EXCLUDED.size \
+                                     AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
+                                    THEN f.call_started_at END",
     )
     .bind(source_id)
     .bind(paths)
@@ -325,10 +332,12 @@ pub async fn mark_done(
     Ok(())
 }
 
-/// Deletes the rows of files filed more than `days` days ago.
+/// Deletes the rows of files filed, or deleted as duplicates, more than
+/// `days` days ago.
 pub async fn prune_done(db: impl PgExecutor<'_>, days: u32) -> sqlx::Result<u64> {
     let done = sqlx::query(
-        "DELETE FROM ingest_files WHERE state = 'done' AND seen_at < now() - make_interval(days => $1)",
+        "DELETE FROM ingest_files WHERE state IN ('done', 'duplicate') \
+         AND seen_at < now() - make_interval(days => $1)",
     )
     .bind(i32::try_from(days).unwrap_or(i32::MAX))
     .execute(db)
@@ -692,4 +701,310 @@ async fn lookups(
         None => None,
     };
     Ok((talkgroup, site, mapped))
+}
+
+/// The clock difference allowed between two recorders: a file's start comes
+/// from its name, to the second.
+pub const CLOCK_ALLOWANCE: Duration = Duration::from_secs(1);
+
+/// Whether a person worked on the call `c`: a transcript a person saved, a
+/// transcription label, or a place in an evaluation set.
+const KEPT: &str = "(EXISTS (SELECT 1 FROM transcripts t WHERE t.call_id = c.id \
+                            AND t.started_at = c.started_at AND t.origin = 'human') \
+                    OR EXISTS (SELECT 1 FROM transcript_labels l WHERE l.call_id = c.id \
+                               AND l.started_at = c.started_at) \
+                    OR EXISTS (SELECT 1 FROM eval_calls e WHERE e.call_id = c.id \
+                               AND e.started_at = c.started_at))";
+
+/// A call another recorder filed that a file is a copy of: the same
+/// talkgroup, recordings that overlap in time within [`CLOCK_ALLOWANCE`], and
+/// the same radio when both name one.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SameCall {
+    pub id: i64,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: i32,
+    pub source_id: i16,
+    /// The name of the recorder its recording came from.
+    pub recorder: String,
+    pub talkgroup_id: i32,
+    pub location_id: i16,
+    pub rel_path: String,
+    /// A person worked on it; it keeps its recording.
+    pub kept: bool,
+}
+
+impl SameCall {
+    /// Whether a copy `duration_ms` long replaces the call's recording: it is
+    /// longer, and no person worked on the call. Otherwise it is deleted.
+    pub fn replaced_by(&self, duration_ms: i32) -> bool {
+        !self.kept && duration_ms > self.duration_ms
+    }
+}
+
+/// The talkgroup `number` of the system named `system`, or of the system
+/// that name is a spelling of; `None` when there is none.
+pub async fn talkgroup_of(
+    db: impl PgExecutor<'_>,
+    system: &str,
+    number: i64,
+) -> sqlx::Result<Option<i32>> {
+    sqlx::query_scalar(
+        "SELECT t.id FROM talkgroups t WHERE t.number = $2 AND t.system_id = \
+         (SELECT id FROM systems WHERE name = $1 \
+          UNION ALL SELECT system_id FROM system_spellings WHERE name = $1 LIMIT 1)",
+    )
+    .bind(system)
+    .bind(number)
+    .fetch_optional(db)
+    .await
+}
+
+/// The call of `talkgroup_id` that the call of a file from the recorder
+/// `source_id` is a copy of, if any: of the calls another recorder filed
+/// whose recordings overlap the file's, the one that overlaps it most. A
+/// recorder never sends two copies of one call, so a call that has, or had,
+/// a copy from `source_id` is not one. A call longer than an hour does not
+/// occur, which bounds the search.
+pub async fn same_call(
+    db: impl PgExecutor<'_>,
+    talkgroup_id: i32,
+    call: &FileCall,
+    source_id: i16,
+) -> sqlx::Result<Option<SameCall>> {
+    let allowance = i32::try_from(CLOCK_ALLOWANCE.as_millis()).unwrap_or(i32::MAX);
+    sqlx::query_as(&format!(
+        "SELECT c.id, c.started_at, coalesce(c.duration_ms, 0) AS duration_ms, c.source_id, \
+                s.name AS recorder, c.talkgroup_id, c.location_id, c.rel_path, {KEPT} AS kept \
+         FROM calls c JOIN sources s ON s.id = c.source_id \
+         WHERE c.talkgroup_id = $1 \
+           AND c.started_at > $2 - interval '1 hour' \
+           AND c.started_at < $2 + ($3 + $5) * interval '1 millisecond' \
+           AND c.started_at + (coalesce(c.duration_ms, 0) + $5) * interval '1 millisecond' > $2 \
+           AND c.source_id <> $4 AND NOT ($4 = ANY (coalesce(c.copies_from, '{{}}'))) \
+           AND ($6::bigint IS NULL OR c.radio_id IS NULL OR c.radio_id = $6) \
+         ORDER BY least(c.started_at + coalesce(c.duration_ms, 0) * interval '1 millisecond', \
+                        $2 + $3 * interval '1 millisecond') - greatest(c.started_at, $2) DESC, \
+                  c.started_at, c.id \
+         LIMIT 1"
+    ))
+    .bind(talkgroup_id)
+    .bind(call.started_at)
+    .bind(call.duration_ms)
+    .bind(source_id)
+    .bind(allowance)
+    .bind(call.described.radio_id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Records, in one fenced transaction, that the waiting file `row_id` of the
+/// recorder `source_id` (`file`: its size and modification time) was a copy
+/// of `same` and was deleted: its row is a duplicate of the call, which
+/// remembers the recorder.
+pub async fn duplicate(
+    conn: &mut PgConnection,
+    holder: &str,
+    row_id: i64,
+    same: &SameCall,
+    source_id: i16,
+    file: (i64, DateTime<Utc>),
+    reason: &str,
+) -> Result<(), RecordError> {
+    let mut tx = fenced(conn, holder).await?;
+    sqlx::query(
+        "UPDATE ingest_files SET state = 'duplicate', reason = $2, call_id = $3, \
+         call_started_at = $4, size = $5, file_mtime = $6 \
+         WHERE id = $1 AND state IN ('waiting', 'staged')",
+    )
+    .bind(row_id)
+    .bind(reason)
+    .bind(same.id)
+    .bind(same.started_at)
+    .bind(file.0)
+    .bind(file.1)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE calls SET copies_from = coalesce(copies_from, '{}') || $3::smallint \
+         WHERE id = $1 AND started_at = $2 AND source_id <> $3 \
+           AND NOT ($3 = ANY (coalesce(copies_from, '{}')))",
+    )
+    .bind(same.id)
+    .bind(same.started_at)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Points the call `same` at its longer copy `new`, in one fenced
+/// transaction: the recorder, the archive path, the length and everything
+/// else the copy says about the call; its id and start stay. The call
+/// remembers the recorder of the recording replaced, whose archive file
+/// becomes a leftover for the filer to delete; the waiting file `row_id`, of
+/// `size` bytes, is done as the call. A call transcribed by the machine, or
+/// queued, is transcribed again, as is one the filing rule now queues; its
+/// transcript stays until the new one replaces it. False, with nothing
+/// written, when the call changed since `same` was read: another path,
+/// recorder, length or talkgroup, or a person's work.
+pub async fn replace(
+    conn: &mut PgConnection,
+    holder: &str,
+    row_id: i64,
+    same: &SameCall,
+    new: &NewCall<'_>,
+    size: i64,
+) -> Result<bool, RecordError> {
+    let mut tx = fenced(conn, holder).await?;
+    let now: Option<(String, i16, i16, i32, Option<i32>, bool)> = sqlx::query_as(&format!(
+        "SELECT c.rel_path, c.location_id, c.source_id, coalesce(c.duration_ms, 0), \
+                c.talkgroup_id, {KEPT} \
+         FROM calls c WHERE c.id = $1 AND c.started_at = $2 FOR UPDATE"
+    ))
+    .bind(same.id)
+    .bind(same.started_at)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let was = (
+        same.rel_path.clone(),
+        same.location_id,
+        same.source_id,
+        same.duration_ms,
+        Some(same.talkgroup_id),
+        false,
+    );
+    if now.as_ref() != Some(&was) {
+        return Ok(false);
+    }
+    let (talkgroup_id, site_id, mapped) =
+        lookups(&mut tx, &new.call.described, new.source_id).await?;
+    if talkgroup_id != Some(same.talkgroup_id) {
+        return Ok(false);
+    }
+    let call = new.call;
+    let d = &call.described;
+    sqlx::query(
+        "UPDATE calls SET duration_ms = $3, site_id = $4, radio_id = $5, radio_alias = $6, \
+                title = $7, source_id = $8, location_id = $9, rel_path = $10, file_mtime = $11, \
+                copies_from = CASE WHEN source_id = ANY (coalesce(copies_from, '{}')) \
+                                   THEN copies_from \
+                                   ELSE coalesce(copies_from, '{}') || source_id END \
+         WHERE id = $1 AND started_at = $2",
+    )
+    .bind(same.id)
+    .bind(same.started_at)
+    .bind(call.duration_ms)
+    .bind(site_id)
+    .bind(d.radio_id)
+    .bind(&d.radio_alias)
+    .bind(&d.title)
+    .bind(new.source_id)
+    .bind(new.location_id)
+    .bind(new.rel_path)
+    .bind(call.file_mtime)
+    .execute(&mut *tx)
+    .await?;
+    if mapped {
+        // The new file names a spelling of its system: the correction rewrites it.
+        sqlx::query(
+            "INSERT INTO mapped_calls (call_id, started_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(same.id)
+        .bind(same.started_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE talkgroups SET files_correct = false WHERE id = $1 AND files_correct")
+            .bind(same.talkgroup_id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query("DELETE FROM mapped_calls WHERE call_id = $1 AND started_at = $2")
+            .bind(same.id)
+            .bind(same.started_at)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query(
+        "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
+         SELECT c.id, c.started_at, now(), now(), 'queued' \
+         FROM calls c JOIN talkgroups t ON t.id = c.talkgroup_id \
+         WHERE c.id = $1 AND c.started_at = $2 \
+           AND (c.transcript_state <> 'untried' \
+                OR EXISTS (SELECT 1 FROM transcription_queue q \
+                           WHERE q.call_id = c.id AND q.started_at = c.started_at) \
+                OR ($3::int IS NOT NULL AND c.duration_ms >= $3 AND t.transcribe)) \
+         ON CONFLICT (call_id, started_at) DO UPDATE SET state = 'queued', attempts = 0, \
+             next_try_at = now(), last_error = NULL",
+    )
+    .bind(same.id)
+    .bind(same.started_at)
+    .bind(new.transcribe_from_ms)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(same.location_id)
+    .bind(&same.rel_path)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_files SET state = 'done', reason = NULL, call_id = $2, \
+         call_started_at = $3, size = $4, file_mtime = $5 WHERE id = $1",
+    )
+    .bind(row_id)
+    .bind(same.id)
+    .bind(same.started_at)
+    .bind(size)
+    .bind(call.file_mtime)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Up to `limit` archive files of the location that no call names any more.
+pub async fn leftovers(
+    db: impl PgExecutor<'_>,
+    location_id: i16,
+    limit: i64,
+) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT rel_path FROM archive_leftovers WHERE location_id = $1 ORDER BY rel_path LIMIT $2",
+    )
+    .bind(location_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+}
+
+/// Whether a call names the archive file.
+pub async fn named(
+    db: impl PgExecutor<'_>,
+    location_id: i16,
+    rel_path: &str,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM calls WHERE location_id = $1 AND rel_path = $2)",
+    )
+    .bind(location_id)
+    .bind(rel_path)
+    .fetch_one(db)
+    .await
+}
+
+/// Forgets a leftover once its file is gone, or a call names it again.
+pub async fn forget_leftover(
+    db: impl PgExecutor<'_>,
+    location_id: i16,
+    rel_path: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM archive_leftovers WHERE location_id = $1 AND rel_path = $2")
+        .bind(location_id)
+        .bind(rel_path)
+        .execute(db)
+        .await?;
+    Ok(())
 }
