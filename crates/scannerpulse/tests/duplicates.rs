@@ -5,8 +5,7 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -461,15 +460,14 @@ async fn a_call_a_person_worked_on_keeps_its_recording(pool: PgPool) -> sqlx::Re
 }
 
 /// Says "held" this many times, then never again: the lease is lost part way.
-struct LosingFence(AtomicUsize);
+struct LosingFence(Mutex<usize>);
 
 impl Fence for LosingFence {
     fn held(&self) -> bool {
-        self.0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok()
+        let mut left = self.0.lock().unwrap();
+        let held = *left > 0;
+        *left = left.saturating_sub(1);
+        held
     }
     fn holder(&self) -> &str {
         HOLDER
@@ -488,7 +486,7 @@ async fn a_lease_lost_after_the_copy_is_written_is_finished_by_the_next_holder(
     let id = filed_by_north(&site).await;
     let old = site.calls().await[0].4.clone();
     let path = site.arrive(site.south_id, &bravo("120000", 40, 4021)).await;
-    let mut losing = site.filer_with(Arc::new(LosingFence(AtomicUsize::new(3))));
+    let mut losing = site.filer_with(Arc::new(LosingFence(Mutex::new(3))));
     assert_eq!(outcomes(losing.pass(10).await?), [Outcome::LeaseLost]);
     assert_eq!(site.archived().len(), 2, "{:?}", site.archived());
     assert_eq!(site.calls().await[0].4, old);
