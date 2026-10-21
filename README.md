@@ -380,8 +380,27 @@ recorder's files of the day and names any ScannerPulse machine that cannot
 read its folder; `recorder list` prints the same. `recorder preview NAME`
 (Preview) reads up to 50 files spread over a recorder's folder and says, for
 each, what filing would do with it (filed, under a new talkgroup, with a name
-to approve, staged, or rejected and why), with the counts first. It changes
-nothing: it is the test of a new recorder.
+to approve, a copy of a call another recorder filed and which copy stays,
+staged, or rejected and why), with the counts first. It changes nothing: it
+is the test of a new recorder.
+
+**One call heard by two recorders is one call.** A file is a copy of a call
+another recorder filed when it is of the same talkgroup, from the same radio
+when both name one, and the two recordings overlap in time, allowing a second
+of difference between the recorders' clocks; of several such calls, the one
+it overlaps most. The longer recording stays, by the length measured from the
+MP3's frames; at equal length, the one filed first. A copy that is not longer
+is deleted from its recorder's folder and never reaches the archive, and the
+recorder's count of duplicates removed goes up. A longer copy replaces the
+call's recording: it is written into the archive under the call's start (the
+call keeps its id, its start, its links and its stars), the call takes the
+copy's recorder, length, site, radio and title, the old recording is deleted,
+and a call the machine transcribed is transcribed again (its transcript stays
+until the new one replaces it). A call a person worked on (a transcript a
+person saved, a transcription label, a place in an evaluation set) keeps its
+recording: a longer copy is deleted. A recorder never sends two copies of one
+call, so two transmissions in a row from one radio, both heard by both
+recorders, stay two calls.
 
 **Names wait for approval.** A file that names a known talkgroup otherwise
 is filed under the talkgroup, which keeps its name; the other name is a
