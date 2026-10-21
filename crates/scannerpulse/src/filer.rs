@@ -629,7 +629,11 @@ impl Filer {
             }
             Err(RecordError::Database(error)) => return Err(error),
         }
-        self.remove_leftover(&same.rel_path).await?;
+        // The filer deletes in its own location only: an old recording in
+        // another stays listed as a leftover.
+        if same.location_id == self.location.id {
+            self.remove_leftover(&same.rel_path).await?;
+        }
         drop(writing);
         if self.fence.held() {
             self.delete_source(folder, path, data, call).await;
