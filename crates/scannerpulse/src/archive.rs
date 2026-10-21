@@ -42,6 +42,16 @@ pub fn rel_path(date: NaiveDate, folder: &str, name: &str) -> Result<String, Str
     Ok(format!("{}/{folder}/{name}", date.format("%Y-%m-%d")))
 }
 
+/// The name a longer copy of a call takes in the archive: the date and time
+/// the call's file name `call_file` begins with, then the rest of the copy's
+/// own name `copy`. A call keeps its start when its recording is replaced, so
+/// the archive still gives it. `None` when either name has no start.
+pub fn copy_name(call_file: &str, copy: &str) -> Option<String> {
+    let start = crate::reader::start_prefix(call_file)?;
+    let own = crate::reader::start_prefix(copy)?;
+    Some(format!("{start}{}", &copy[own.len()..]))
+}
+
 /// The `n`th name to try for a file: `a.mp3`, then `a_1.mp3`, `a_2.mp3`, ...
 pub fn candidate(name: &str, n: u32) -> String {
     if n == 0 {

@@ -148,6 +148,11 @@ pub fn read_bytes(
     })
 }
 
+/// The date and time a file's name begins with, as the name writes them.
+pub fn start_prefix(name: &str) -> Option<&str> {
+    START.find(name).map(|found| found.as_str())
+}
+
 /// The local start time at the head of a file name: `YYYYMMDD_HHMMSS` or
 /// `YYYY-MM-DD_HHMMSS`.
 pub fn start_time(name: &str) -> Option<NaiveDateTime> {

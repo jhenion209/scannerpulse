@@ -43,6 +43,30 @@ fn a_name_that_would_leave_its_folder_is_refused() {
 }
 
 #[test]
+fn a_longer_copy_is_named_by_its_calls_start_and_its_own_rest() {
+    assert_eq!(
+        archive::copy_name(
+            "20310115_120000SYSB_South_Bravo__TO_215_FROM_4021_1.mp3",
+            "20310115_120001SYSB_North_Bravo__TO_215_FROM_4021.mp3"
+        )
+        .as_deref(),
+        Some("20310115_120000SYSB_North_Bravo__TO_215_FROM_4021.mp3")
+    );
+    assert_eq!(
+        archive::copy_name("2031-01-15_120000_a.mp3", "20310115_120001_b.mp3").as_deref(),
+        Some("2031-01-15_120000_b.mp3")
+    );
+    assert_eq!(
+        archive::copy_name("no-start.mp3", "20310115_120001_b.mp3"),
+        None
+    );
+    assert_eq!(
+        archive::copy_name("20310115_120000_a.mp3", "no-start.mp3"),
+        None
+    );
+}
+
+#[test]
 fn a_taken_name_gets_a_number_before_the_extension() {
     assert_eq!(candidate("a.mp3", 0), "a.mp3");
     assert_eq!(candidate("a.mp3", 1), "a_1.mp3");

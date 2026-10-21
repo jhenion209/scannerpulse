@@ -10,6 +10,14 @@
 //! copy of the file in its folder, and records it instead of copying again.
 //! Only the lease holder files, and it checks its lease before every step.
 //! A file that cannot be filed is deleted too, and recorded as rejected.
+//!
+//! A file that is a copy of a call another recorder filed is no new call:
+//! the longer recording is kept ([`store::same_call`]). A copy no longer than
+//! the call's recording is deleted; a longer one replaces it, in four steps
+//! each safe against a crash: it is written into the archive and checked;
+//! one transaction points the call at it, its id and start kept; the old
+//! recording is deleted from the archive; the file is deleted from its
+//! recorder's folder.
 
 use std::collections::HashMap;
 use std::fs;
@@ -55,6 +63,12 @@ pub enum Outcome {
     Rejected(String),
     /// Its system, of this name, is unknown: it waits in the staging folder.
     Staged(String),
+    /// A copy of this call from another recorder, no longer than the call's
+    /// recording, or of a call a person worked on: deleted.
+    Duplicate(i64),
+    /// A longer copy of this call from another recorder: the call's
+    /// recording now.
+    Replaced(i64),
     /// Not filed this time: it stays waiting and is tried again after `retry`.
     Later { why: String, retry: Duration },
     /// The lease was lost; nothing more is written.
@@ -146,6 +160,7 @@ impl Filer {
     /// files that wait for a retry. Stops at a lost lease. A database error
     /// ends the pass; the file it happened on stays waiting.
     pub async fn pass(&mut self, limit: i64) -> sqlx::Result<Vec<(Waiting, Outcome)>> {
+        self.sweep(limit).await?;
         let now = Instant::now();
         self.retry_at.retain(|_, at| *at > now);
         let skip: Vec<i64> = self.retry_at.keys().copied().collect();
@@ -179,6 +194,9 @@ impl Filer {
     async fn try_file(&mut self, row: &Waiting) -> sqlx::Result<Outcome> {
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost);
+        }
+        if let (Some(id), Some(started_at)) = (row.call_id, row.call_started_at) {
+            return self.dealt_with(row, (id, started_at)).await;
         }
         let (folder, path) = self.place_of(row);
         // In a thread of its own, as is the deletion: a recorder's share that
@@ -222,6 +240,28 @@ impl Filer {
             && !limited(self.db_limit, store::system_known(&self.pool, system)).await?
         {
             return self.stage(row, &folder, &path, &data, &call).await;
+        }
+        if let Some(same) = self.same_call(row, &call).await? {
+            if same.replaced_by(call.duration_ms) {
+                return self.replace(row, &folder, &path, &data, &call, same).await;
+            }
+            let why = if same.kept {
+                format!(
+                    "a copy of call {} from {}, which keeps its recording: a person worked on it",
+                    same.id, same.recorder
+                )
+            } else {
+                format!(
+                    "a copy of call {} from {}: {} long, the call's {}",
+                    same.id,
+                    same.recorder,
+                    seconds(call.duration_ms),
+                    seconds(same.duration_ms)
+                )
+            };
+            return self
+                .remove_copy(row, &folder, &path, &data, &call, &same, &why)
+                .await;
         }
         let name = file_name(&row.rel_path);
         let talkgroup = call
@@ -343,6 +383,313 @@ impl Filer {
             ))),
             Err(RecordError::Database(error)) => Err(error),
         }
+    }
+
+    /// A file dealt with before, as this call, and seen again unchanged: a
+    /// stop or a failed deletion left it in its recorder's folder. It is done
+    /// again and deleted, without a read: its call may have another file or
+    /// another recording since.
+    async fn dealt_with(
+        &mut self,
+        row: &Waiting,
+        call: (i64, DateTime<Utc>),
+    ) -> sqlx::Result<Outcome> {
+        let (folder, path) = self.place_of(row);
+        if !self.fence.held() {
+            return Ok(Outcome::LeaseLost);
+        }
+        limited(self.db_limit, store::mark_done(&self.pool, row.id, call)).await?;
+        if let (Some(size), Some(mtime), true) = (
+            row.size.and_then(|n| u64::try_from(n).ok()),
+            row.file_mtime,
+            self.fence.held(),
+        ) {
+            match self.remove_bounded(&folder, &path, size, mtime).await {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => crate::log::warn(format!(
+                    "{} was filed but could not be deleted: {error}",
+                    path.display()
+                )),
+            }
+        }
+        Ok(Outcome::AlreadyFiled(call.0))
+    }
+
+    /// The call another recorder filed that the file's call is a copy of.
+    async fn same_call(
+        &self,
+        row: &Waiting,
+        call: &FileCall,
+    ) -> sqlx::Result<Option<store::SameCall>> {
+        let (Some(system), Some(talkgroup)) = (
+            call.described.system.as_deref(),
+            call.described.talkgroup.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        let Some(talkgroup) = limited(
+            self.db_limit,
+            store::talkgroup_of(&self.pool, system, talkgroup.number),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        limited(
+            self.db_limit,
+            store::same_call(&self.pool, talkgroup, call, row.source_id),
+        )
+        .await
+    }
+
+    /// A copy of a call another recorder filed that does not replace its
+    /// recording: deleted from its recorder's folder, never written to the
+    /// archive, then recorded as a duplicate of the call, for the reason
+    /// `why`. Deleted first, as a rejected file is: a stop between the two
+    /// leaves a row that ends as missing, never a file left behind.
+    #[allow(clippy::too_many_arguments)]
+    async fn remove_copy(
+        &mut self,
+        row: &Waiting,
+        folder: &Path,
+        path: &Path,
+        data: &[u8],
+        call: &FileCall,
+        same: &store::SameCall,
+        why: &str,
+    ) -> sqlx::Result<Outcome> {
+        if !self.fence.held() {
+            return Ok(Outcome::LeaseLost);
+        }
+        match self
+            .remove_bounded(folder, path, data.len() as u64, call.file_mtime)
+            .await
+        {
+            Ok(true) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(false) => {
+                return Ok(later(format!(
+                    "{} changed since it was read; it is read again",
+                    path.display()
+                )));
+            }
+            Err(error) => {
+                return Ok(later(format!(
+                    "{} is a copy of call {} but could not be deleted: {error}",
+                    path.display(),
+                    same.id
+                )));
+            }
+        }
+        let recorded = tokio::time::timeout(self.db_limit, async {
+            let mut conn = self.pool.acquire().await?;
+            store::duplicate(
+                &mut conn,
+                self.fence.holder(),
+                row.id,
+                same,
+                row.source_id,
+                (data.len() as i64, call.file_mtime),
+                why,
+            )
+            .await
+        })
+        .await
+        .unwrap_or_else(|_| Err(RecordError::Database(store::timed_out(self.db_limit))));
+        match recorded {
+            Ok(()) => Ok(Outcome::Duplicate(same.id)),
+            Err(RecordError::LeaseLost) => Ok(Outcome::LeaseLost),
+            Err(RecordError::Database(error)) => Err(error),
+        }
+    }
+
+    /// A longer copy of a call another recorder filed: the call's recording
+    /// now. It is written into the archive under the call's start
+    /// ([`archive::copy_name`]) in its talkgroup folder of the day, the call
+    /// is pointed at it ([`store::replace`]), the old recording is deleted,
+    /// and then the file. A call that changed meanwhile leaves the copy to
+    /// be read again.
+    async fn replace(
+        &mut self,
+        row: &Waiting,
+        folder: &Path,
+        path: &Path,
+        data: &[u8],
+        call: &FileCall,
+        same: store::SameCall,
+    ) -> sqlx::Result<Outcome> {
+        let call_file = file_name(&same.rel_path);
+        let (Some(name), Some(start)) = (
+            archive::copy_name(call_file, file_name(&row.rel_path)),
+            reader::start_time(call_file),
+        ) else {
+            let why = format!(
+                "a copy of call {} from {}, whose file name gives no start to name a copy by",
+                same.id, same.recorder
+            );
+            return self
+                .remove_copy(row, folder, path, data, call, &same, &why)
+                .await;
+        };
+        let talkgroup = call
+            .described
+            .talkgroup
+            .as_ref()
+            .map(|tg| (tg.number, tg.name.as_str()));
+        let rel = match archive::rel_path(start.date(), &archive::folder(talkgroup), &name) {
+            Ok(rel) => rel,
+            Err(why) => return self.reject_file(row, folder, path, why).await,
+        };
+        let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let digest = archive::sha256(data);
+        let writing = archive::WRITES.lock().await;
+        let place =
+            match archive::place(&self.location.root, dir, &name, data.len() as u64, &digest) {
+                Ok(place) => place,
+                Err(error) => return Ok(later(format!("cannot look into the archive: {error}"))),
+            };
+        let rel = match place {
+            // Left by a stop before the transaction, unless a call has it.
+            Place::Copy(rel) => {
+                if limited(
+                    self.db_limit,
+                    store::named(&self.pool, self.location.id, &rel),
+                )
+                .await?
+                {
+                    return Ok(later(format!("a call has {rel} already")));
+                }
+                rel
+            }
+            Place::Free(rel) => {
+                let target = self.location.root.join(&rel);
+                if !self.fence.held() {
+                    return Ok(Outcome::LeaseLost);
+                }
+                if let Err(error) = archive::write_part(&target, data, &digest) {
+                    return Ok(later(format!("cannot copy into the archive: {error}")));
+                }
+                if !self.fence.held() {
+                    return Ok(Outcome::LeaseLost);
+                }
+                if let Err(error) = archive::finish_part(&target) {
+                    return Ok(later(format!(
+                        "cannot name the copy in the archive: {error}"
+                    )));
+                }
+                rel
+            }
+        };
+        if !self.fence.held() {
+            return Ok(Outcome::LeaseLost);
+        }
+        let new = NewCall {
+            call,
+            source_id: row.source_id,
+            location_id: self.location.id,
+            rel_path: &rel,
+            transcribe_from_ms: self
+                .transcribe_from
+                .as_ref()
+                .map(|rule| rule.load(Ordering::SeqCst))
+                .filter(|from| *from >= 0),
+        };
+        let replaced = tokio::time::timeout(self.db_limit, async {
+            let mut conn = self.pool.acquire().await?;
+            store::replace(
+                &mut conn,
+                self.fence.holder(),
+                row.id,
+                &same,
+                &new,
+                data.len() as i64,
+            )
+            .await
+        })
+        .await
+        .unwrap_or_else(|_| Err(RecordError::Database(store::timed_out(self.db_limit))));
+        match replaced {
+            Ok(true) => {}
+            Ok(false) => {
+                // No call has the copy: it goes, and the file is read again.
+                if let Err(error) = fs::remove_file(self.location.root.join(&rel)) {
+                    crate::log::warn(format!("cannot remove {rel}: {error}"));
+                }
+                return Ok(later(format!(
+                    "call {} changed while its longer copy was filed; it is read again",
+                    same.id
+                )));
+            }
+            Err(RecordError::LeaseLost) => return Ok(Outcome::LeaseLost),
+            Err(RecordError::Database(error)) if has_code(&error, "23505") => {
+                return Ok(later(format!(
+                    "a call has this archive path already: {error}"
+                )));
+            }
+            Err(RecordError::Database(error)) => return Err(error),
+        }
+        self.remove_leftover(&same.rel_path).await?;
+        drop(writing);
+        if self.fence.held() {
+            self.delete_source(folder, path, data, call).await;
+        }
+        Ok(Outcome::Replaced(same.id))
+    }
+
+    /// Deletes up to `limit` archive files whose call a longer copy has
+    /// replaced, which a stop left behind.
+    async fn sweep(&mut self, limit: i64) -> sqlx::Result<()> {
+        let leftovers = limited(
+            self.db_limit,
+            store::leftovers(&self.pool, self.location.id, limit),
+        )
+        .await?;
+        if leftovers.is_empty() || !self.fence.held() {
+            return Ok(());
+        }
+        let _writing = archive::WRITES.lock().await;
+        for rel in leftovers {
+            if !self.fence.held() {
+                break;
+            }
+            self.remove_leftover(&rel).await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes an archive file that no call names any more, then its folder
+    /// if that is empty, and forgets it. A call that names it again keeps it.
+    /// Called with the archive's writes held, so that no writer takes the
+    /// file between the check and the deletion.
+    async fn remove_leftover(&self, rel: &str) -> sqlx::Result<()> {
+        if !limited(
+            self.db_limit,
+            store::named(&self.pool, self.location.id, rel),
+        )
+        .await?
+        {
+            let path = self.location.root.join(rel);
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    if let Some(dir) = path.parent() {
+                        // Only an empty folder goes.
+                        let _ = fs::remove_dir(dir);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    // It stays listed, and the next pass tries again.
+                    crate::log::warn(format!("cannot remove {}: {error}", path.display()));
+                    return Ok(());
+                }
+            }
+        }
+        limited(
+            self.db_limit,
+            store::forget_leftover(&self.pool, self.location.id, rel),
+        )
+        .await
     }
 
     /// The folder and path of a waiting file: in its recorder's folder, or in
@@ -640,6 +987,11 @@ pub fn find_copies(root: &Path, day: NaiveDate, name: &str, size: u64) -> io::Re
         }
     }
     Ok(found)
+}
+
+/// A length in seconds, to the tenth: `4.2 s`.
+fn seconds(ms: i32) -> String {
+    format!("{:.1} s", f64::from(ms) / 1000.0)
 }
 
 /// The last part of a path inside a source.

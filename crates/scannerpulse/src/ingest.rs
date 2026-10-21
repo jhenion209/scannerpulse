@@ -188,6 +188,10 @@ pub struct Minute {
     pub rejected: u64,
     /// Files of an unknown system, put in the staging folder.
     pub staged: u64,
+    /// Copies of calls other recorders filed: deleted, or the call's
+    /// recording now.
+    pub duplicates: u64,
+    pub replaced: u64,
     /// Filed calls whose local time lay in the spring gap.
     pub shifted: u64,
     /// Filed calls in the repeated hour whose instant was a guess.
@@ -209,6 +213,8 @@ impl Minute {
             Outcome::AlreadyFiled(_) => self.found += 1,
             Outcome::Rejected(_) => self.rejected += 1,
             Outcome::Staged(_) => self.staged += 1,
+            Outcome::Duplicate(_) => self.duplicates += 1,
+            Outcome::Replaced(_) => self.replaced += 1,
             Outcome::Later { .. } | Outcome::LeaseLost => {}
         }
     }
@@ -221,6 +227,8 @@ impl Minute {
             found,
             rejected,
             staged,
+            duplicates,
+            replaced,
             shifted,
             guessed,
         } = self;
@@ -229,8 +237,13 @@ impl Minute {
         } else {
             String::new()
         };
+        let copies = if duplicates + replaced > 0 {
+            format!(", {duplicates} duplicates deleted, {replaced} replaced by a longer copy")
+        } else {
+            String::new()
+        };
         format!(
-            "last minute ({role}): {filed} filed, {found} found filed, {rejected} rejected, {staged} staged{times}; {files}"
+            "last minute ({role}): {filed} filed, {found} found filed, {rejected} rejected, {staged} staged{copies}{times}; {files}"
         )
     }
 }
@@ -745,6 +758,14 @@ fn report(row: &Waiting, outcome: &Outcome, counts: &Counts) {
         Outcome::Rejected(why) => log::info(format!("rejected {}: {why}", row.rel_path)),
         Outcome::Staged(system) => log::info(format!(
             "staged {}: its system {system:?} is unknown; it waits for a name in the staging folder",
+            row.rel_path
+        )),
+        Outcome::Duplicate(id) => log::info(format!(
+            "deleted {}: a copy of call {id} that does not replace its recording",
+            row.rel_path
+        )),
+        Outcome::Replaced(id) => log::info(format!(
+            "{} is the recording of call {id} now: a longer copy",
             row.rel_path
         )),
         Outcome::Later { why, .. } => log::warn(format!("{}: {why}", row.rel_path)),
