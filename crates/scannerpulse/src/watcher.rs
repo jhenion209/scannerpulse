@@ -154,26 +154,40 @@ impl Watcher {
         }
     }
 
-    /// A path from a file system event: looked at now.
+    /// A path from a file system event: looked at now, here. Ingest does
+    /// the same through [`Watcher::event`], [`stat_all`] with [`lstat_file`],
+    /// and [`Watcher::touch_with`].
     pub fn touch(&mut self, path: &Path, now: Instant) {
-        let Some((source_id, rel_path)) = self.inside(path) else {
-            return;
-        };
-        // The rules of `list`: an mp3, nothing hidden on the way, no link.
-        if !is_audio(path) || rel_path.split('/').any(|part| part.starts_with('.')) {
-            return;
+        if let Some((key, _, path)) = self.event(path) {
+            let stat = lstat_file(&path);
+            self.touch_with(key, stat, now);
         }
-        // An event comes from a folder that answers: read here, not in a thread.
-        match fs::symlink_metadata(path) {
-            Ok(meta) if meta.is_file() => self.observe(
-                source_id,
-                rel_path,
-                meta.len(),
-                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                now,
-            ),
-            _ => {
-                self.files.remove(&(source_id, rel_path));
+    }
+
+    /// The file an event names, its folder and its path, when the watcher
+    /// takes it: an mp3 in a watched source, nothing hidden on the way (the
+    /// rules of [`list_folder`]).
+    pub fn event(&self, path: &Path) -> Option<Due> {
+        let (source_id, rel_path) = self.inside(path)?;
+        if !is_audio(path) || rel_path.split('/').any(|part| part.starts_with('.')) {
+            return None;
+        }
+        let folder = self
+            .sources
+            .iter()
+            .find(|s| s.id == source_id)?
+            .path
+            .clone();
+        Some(((source_id, rel_path), folder, path.to_path_buf()))
+    }
+
+    /// Takes what an event's file showed: a file is observed; anything else
+    /// (gone, a link, a folder) is forgotten.
+    pub fn touch_with(&mut self, key: Key, stat: io::Result<(u64, SystemTime)>, now: Instant) {
+        match stat {
+            Ok((size, mtime)) => self.observe(key.0, key.1, size, mtime, now),
+            Err(_) => {
+                self.files.remove(&key);
             }
         }
     }
@@ -488,6 +502,16 @@ pub async fn stat_all(due: Vec<Due>, stat: Stat, hung: &mut Hung, limit: Duratio
         }
     }
     stats
+}
+
+/// A file's size and modification time, when it is a file itself, not a
+/// link (the rule of [`list_folder`], for an event's file).
+pub fn lstat_file(path: &Path) -> io::Result<(u64, SystemTime)> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_file() {
+        return Err(io::Error::other("not a file"));
+    }
+    Ok((meta.len(), meta.modified()?))
 }
 
 /// A file's size and modification time.

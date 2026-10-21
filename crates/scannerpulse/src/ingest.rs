@@ -767,15 +767,26 @@ async fn watch_loop(
 ) {
     let (events_tx, mut events) = mpsc::unbounded_channel::<PathBuf>();
     // Kept alive until the watched folders change.
-    let mut _events = start_events(&watcher, events_tx.clone());
+    let mut _events = start_events(&watcher, events_tx.clone()).await;
     let tick = (stable_for / 2).clamp(Duration::from_millis(100), Duration::from_secs(1));
     let mut next_rescan = Instant::now();
     // The folders whose share stopped answering: left alone until it does.
     let mut hung = Hung::default();
     loop {
         let now = Instant::now();
+        // The files events name are looked at a thread per folder, never
+        // here: a read on a share that stopped answering would hold the
+        // runtime's worker, and with it every other task.
+        let mut touched = Vec::new();
         while let Ok(path) = events.try_recv() {
-            watcher.touch(&path, now);
+            touched.extend(watcher.event(&path));
+        }
+        if !touched.is_empty() {
+            for (key, stat) in
+                watcher::stat_all(touched, watcher::lstat_file, &mut hung, FOLDER_LIMIT).await
+            {
+                watcher.touch_with(key, stat, now);
+            }
         }
         // An admin asked for a rescan, or changed a recorder.
         if rescans.asked.try_recv().is_ok() {
@@ -792,7 +803,7 @@ async fn watch_loop(
                     let (asked, watched): (Vec<Listed>, Vec<Listed>) =
                         listed.into_iter().partition(|l| l.asked);
                     if watcher.set_sources(watched.into_iter().map(|l| l.source).collect()) {
-                        _events = start_events(&watcher, events_tx.clone());
+                        _events = start_events(&watcher, events_tx.clone()).await;
                         let watched: Vec<PathBuf> =
                             watcher.paths().map(Path::to_path_buf).collect();
                         log::info(format!("{} watched recorder(s) now", watched.len()));
@@ -1022,10 +1033,40 @@ async fn rescan_loop(
     }
 }
 
-/// File system events for every source; `None` when they cannot be had, and
-/// then the rescans alone find the files.
-fn start_events(
+/// File system events for every watched folder; `None` when they cannot be
+/// had, and then the rescans alone find the files. Made in a thread of its
+/// own, for `FOLDER_LIMIT` at most: the watch reads each folder's tree, and a
+/// share that stopped answering would hold the runtime.
+async fn start_events(
     watcher: &Watcher,
+    events: mpsc::UnboundedSender<PathBuf>,
+) -> Option<RecommendedWatcher> {
+    let paths: Vec<PathBuf> = watcher.paths().map(Path::to_path_buf).collect();
+    match tokio::time::timeout(
+        FOLDER_LIMIT,
+        tokio::task::spawn_blocking(move || watch_paths(&paths, events)),
+    )
+    .await
+    {
+        Ok(Ok(watch)) => watch,
+        Ok(Err(error)) => {
+            log::warn(format!(
+                "no file system events ({error}); the folders are listed every rescan"
+            ));
+            None
+        }
+        Err(_) => {
+            log::warn(format!(
+                "no file system events: a folder did not answer within {} s; the folders are listed every rescan",
+                FOLDER_LIMIT.as_secs()
+            ));
+            None
+        }
+    }
+}
+
+fn watch_paths(
+    paths: &[PathBuf],
     events: mpsc::UnboundedSender<PathBuf>,
 ) -> Option<RecommendedWatcher> {
     let handler = move |result: notify::Result<notify::Event>| {
@@ -1044,7 +1085,7 @@ fn start_events(
             return None;
         }
     };
-    for path in watcher.paths() {
+    for path in paths {
         if let Err(error) = watch.watch(path, RecursiveMode::Recursive) {
             log::warn(format!(
                 "no file system events for {} ({error}); it is listed every rescan",

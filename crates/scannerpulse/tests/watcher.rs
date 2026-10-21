@@ -299,3 +299,33 @@ async fn a_folder_that_does_not_answer_holds_up_no_other_and_is_left_until_it_do
     let answered = list_all(folders, slow_list, &mut hung, Duration::from_secs(5)).await;
     assert!(answered[1].1.is_ok(), "listed again once its thread ended");
 }
+
+#[test]
+fn an_event_names_its_file_and_takes_what_a_read_elsewhere_saw() {
+    use scannerpulse::watcher::lstat_file;
+    use std::time::SystemTime;
+    let dir = tempfile::tempdir().unwrap();
+    let mut watcher = Watcher::new(vec![source(3, dir.path())], WAIT);
+    assert!(watcher.event(&dir.path().join("c.wav")).is_none());
+    assert!(watcher.event(&dir.path().join(".hidden/e.mp3")).is_none());
+    assert!(watcher.event(Path::new("/elsewhere/d.mp3")).is_none());
+    let (key, folder, path) = watcher.event(&dir.path().join("b.mp3")).unwrap();
+    assert_eq!(key, (3, "b.mp3".to_string()));
+    assert_eq!(
+        (folder.as_path(), path.as_path()),
+        (dir.path(), dir.path().join("b.mp3").as_path())
+    );
+    let mtime = SystemTime::now();
+    let t0 = Instant::now();
+    watcher.touch_with(key.clone(), Ok((5, mtime)), t0);
+    let got = watcher.settle_with(t0 + WAIT, vec![(key.clone(), Ok((5, mtime)))]);
+    assert_eq!(names(&got), ["b.mp3"]);
+    // A file gone, or not a file, is forgotten.
+    watcher.touch_with(key, Err(std::io::ErrorKind::NotFound.into()), t0);
+    assert!(watcher.due(t0 + 2 * WAIT).is_empty());
+    let target = dir.path().join("t.mp3");
+    fs::write(&target, b"x").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("link.mp3")).unwrap();
+    assert!(lstat_file(&dir.path().join("link.mp3")).is_err());
+    assert_eq!(lstat_file(&target).unwrap().0, 1);
+}

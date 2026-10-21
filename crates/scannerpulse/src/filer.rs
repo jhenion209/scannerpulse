@@ -179,10 +179,9 @@ impl Filer {
             return Ok(Outcome::LeaseLost);
         }
         let path = Path::new(&row.source_path).join(&row.rel_path);
-        // In a thread of its own: a recorder's share that stopped answering
-        // holds up no other recorder's files. ponytail: the deletion after
-        // filing stays on this task; a share that hangs between the read
-        // and the deletion still holds the filer.
+        // In a thread of its own, as is the deletion: a recorder's share that
+        // stopped answering holds up no other recorder's files (a read on
+        // the runtime's worker would hold every task).
         let (read, zone, file) = (self.read, self.zone, path.clone());
         let job: watcher::Job<Result<(FileCall, Vec<u8>), ReadError>> =
             Box::new(move || Ok(read(&file, zone)));
@@ -243,7 +242,8 @@ impl Filer {
                     }
                     limited(self.db_limit, store::mark_done(&self.pool, row.id, found)).await?;
                     if self.fence.held() {
-                        self.delete_source(&path, &data, &call);
+                        self.delete_source(&row.source_path, &path, &data, &call)
+                            .await;
                     }
                     return Ok(Outcome::AlreadyFiled(found.0));
                 }
@@ -274,7 +274,8 @@ impl Filer {
         };
         drop(writing);
         if self.fence.held() {
-            self.delete_source(&path, &data, &call);
+            self.delete_source(&row.source_path, &path, &data, &call)
+                .await;
         }
         note_time(&row.rel_path, &call);
         Ok(Outcome::Filed(id, call.time_how))
@@ -337,12 +338,20 @@ impl Filer {
     /// file that changed since the watcher saw it stays, to be read again.
     /// Deleted first: a stop between the two leaves a row that ends as
     /// missing, never a file left behind.
-    async fn reject_file(&self, row: &Waiting, path: &Path, why: String) -> sqlx::Result<Outcome> {
+    async fn reject_file(
+        &mut self,
+        row: &Waiting,
+        path: &Path,
+        why: String,
+    ) -> sqlx::Result<Outcome> {
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost);
         }
         let unchanged = match (row.size.and_then(|n| u64::try_from(n).ok()), row.file_mtime) {
-            (Some(size), Some(mtime)) => remove_if_unchanged(path, size, mtime),
+            (Some(size), Some(mtime)) => {
+                self.remove_bounded(&row.source_path, path, size, mtime)
+                    .await
+            }
             _ => Ok(false),
         };
         match unchanged {
@@ -462,10 +471,36 @@ impl Filer {
         })
     }
 
+    /// Deletes a recorder's file if it is unchanged, in a thread of its own,
+    /// as the file was read ([`watcher::run_bounded`]): true when deleted,
+    /// false when it changed.
+    async fn remove_bounded(
+        &mut self,
+        folder: &str,
+        path: &Path,
+        size: u64,
+        mtime: DateTime<Utc>,
+    ) -> io::Result<bool> {
+        let file = path.to_path_buf();
+        let job: watcher::Job<bool> = Box::new(move || remove_if_unchanged(&file, size, mtime));
+        watcher::run_bounded(
+            vec![(PathBuf::from(folder), job)],
+            &mut self.hung,
+            self.folder_limit,
+        )
+        .await
+        .pop()
+        .unwrap_or_else(|| Err(io::Error::other("the deletion was not run")))
+    }
+
     /// Step 4. Leaves the file when it changed since it was read: it is then
-    /// read again as a new file.
-    fn delete_source(&self, path: &Path, data: &[u8], call: &FileCall) {
-        match remove_if_unchanged(path, data.len() as u64, call.file_mtime) {
+    /// read again as a new file. A folder that does not answer keeps it: a
+    /// later rescan finds it filed.
+    async fn delete_source(&mut self, folder: &str, path: &Path, data: &[u8], call: &FileCall) {
+        match self
+            .remove_bounded(folder, path, data.len() as u64, call.file_mtime)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => crate::log::warn(format!(
                 "{} changed after it was read; it stays in its source",

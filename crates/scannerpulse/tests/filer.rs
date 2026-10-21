@@ -621,15 +621,11 @@ async fn a_recorder_whose_share_hangs_holds_up_no_other_recorder(pool: PgPool) -
         .filer()
         .with_reader(slow_read)
         .with_folder_limit(Duration::from_millis(200));
-    let started = std::time::Instant::now();
+    // The hung read is left at the limit: its file's outcome says so, which
+    // it could not if the pass had waited the read out. (The pass's own time
+    // is no measure: the other file's copy into the archive waits for the
+    // disk's flush, seconds on a busy ZFS.)
     let done = filer.pass(10).await?;
-    // The other recorder's file is filed meanwhile (its copy into the
-    // archive takes its own time on a busy disk).
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "the pass waited for the hung share: {:?}",
-        started.elapsed()
-    );
     let by_name: Vec<(String, String)> = done
         .iter()
         .map(|(row, outcome)| (row.rel_path.clone(), format!("{outcome:?}")))
