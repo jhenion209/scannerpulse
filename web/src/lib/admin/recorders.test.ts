@@ -30,6 +30,7 @@ const recorder = (over: Partial<Recorder> = {}): Recorder => ({
   filed_today: 9881,
   rejected_today: 2,
   staged_today: 0,
+  duplicates_today: 0,
   hosts: [{ host: 'host-a', ok: true, problem: null, files: 3, checked_at: '2031-01-15T17:59:58Z' }],
   ...over,
 });
@@ -48,6 +49,9 @@ describe('a recorder card', () => {
     expect(todayText(recorder())).toBe('9,881 filed, 2 rejected');
     expect(todayText(recorder({ waiting: 1240 }))).toBe('9,881 filed, 2 rejected, 1,240 waiting');
     expect(todayText(recorder({ staged_today: 3 }))).toBe('9,881 filed, 2 rejected, 3 staged');
+    expect(todayText(recorder({ duplicates_today: 4210, staged_today: 3 }))).toBe(
+      '9,881 filed, 2 rejected, 4,210 duplicates removed, 3 staged',
+    );
     expect(lastText(recorder(), NOW)).toBe('12 s ago');
     expect(lastText(recorder({ last_file: null }), NOW)).toBe('never');
   });
@@ -90,7 +94,17 @@ describe('a recorder card', () => {
 });
 
 describe('a preview', () => {
-  const zero: Counts = { filed: 0, new_talkgroup: 0, named: 0, proposal: 0, staged: 0, rejected: 0, unreadable: 0 };
+  const zero: Counts = {
+    filed: 0,
+    new_talkgroup: 0,
+    named: 0,
+    proposal: 0,
+    staged: 0,
+    duplicate: 0,
+    replaces: 0,
+    rejected: 0,
+    unreadable: 0,
+  };
   const preview = (counts: Partial<Counts>, files: number, read: number): Preview => ({
     recorder: 'east',
     files,
@@ -115,6 +129,9 @@ describe('a preview', () => {
     );
     expect(previewText(preview({ filed: 50 }, 1240, 50))).toBe('1,240 files in its folder, 50 read, spread over it: 50 filed.');
     expect(previewText(preview({ unreadable: 1 }, 1, 1))).toBe('1 file in its folder, all read: 1 cannot be read now.');
+    expect(previewText(preview({ filed: 1, replaces: 2, duplicate: 3 }, 6, 6))).toBe(
+      '6 files in its folder, all read: 1 filed, 2 replacing a shorter recording, 3 duplicates deleted.',
+    );
     expect(previewText(preview({}, 0, 0))).toBe('Its folder holds no audio file.');
   });
 
@@ -124,6 +141,12 @@ describe('a preview', () => {
     expect(verdictText({ kind: 'named', current: 'Unidentified 8' })).toBe('Filed; names the talkgroup now called Unidentified 8');
     expect(verdictText({ kind: 'proposal', current: 'Group 7' })).toBe('Filed under Group 7; its name waits for your approval');
     expect(verdictText({ kind: 'staged' })).toBe('Staged: its system is unknown');
+    expect(verdictText({ kind: 'duplicate', call: 812, recorder: 'west' })).toBe(
+      'Deleted: a copy of call 812 from west, which keeps its recording',
+    );
+    expect(verdictText({ kind: 'replaces', call: 812, recorder: 'west' })).toBe(
+      "Replaces call 812's recording from west: a longer copy",
+    );
     expect(verdictText({ kind: 'rejected', reason: 'the file holds no MPEG audio frame' })).toBe(
       'Rejected: the file holds no MPEG audio frame',
     );

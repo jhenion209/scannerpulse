@@ -26,6 +26,7 @@ export interface Recorder {
   filed_today: number;
   rejected_today: number;
   staged_today: number;
+  duplicates_today: number;
   hosts: FolderHealth[];
 }
 
@@ -89,11 +90,13 @@ export function changedText(name: string, change: Change): string {
   }
 }
 
-/** Its files filed, rejected and staged since the site's midnight, and those waiting. */
+/** Its files filed, rejected, removed as duplicates and staged since the
+ * site's midnight, and those waiting. */
 export function todayText(r: Recorder): string {
+  const duplicates = r.duplicates_today ? `, ${counted(r.duplicates_today, 'duplicate')} removed` : '';
   const staged = r.staged_today ? `, ${r.staged_today.toLocaleString('en-US')} staged` : '';
   const waiting = r.waiting ? `, ${r.waiting.toLocaleString('en-US')} waiting` : '';
-  return `${r.filed_today.toLocaleString('en-US')} filed, ${r.rejected_today.toLocaleString('en-US')} rejected${staged}${waiting}`;
+  return `${r.filed_today.toLocaleString('en-US')} filed, ${r.rejected_today.toLocaleString('en-US')} rejected${duplicates}${staged}${waiting}`;
 }
 
 /** When its newest file arrived. */
@@ -131,6 +134,8 @@ export type Verdict =
   | { kind: 'named'; current: string }
   | { kind: 'proposal'; current: string }
   | { kind: 'staged' }
+  | { kind: 'duplicate'; call: number; recorder: string }
+  | { kind: 'replaces'; call: number; recorder: string }
   | { kind: 'rejected'; reason: string }
   | { kind: 'unreadable'; reason: string };
 
@@ -140,6 +145,8 @@ export interface Counts {
   named: number;
   proposal: number;
   staged: number;
+  duplicate: number;
+  replaces: number;
   rejected: number;
   unreadable: number;
 }
@@ -179,6 +186,8 @@ export function previewText(p: Preview): string {
   const filed = c.filed + c.new_talkgroup + c.named + c.proposal;
   const parts = [
     filed && `${filed} filed${brings.length ? ` (${brings.join(', ')})` : ''}`,
+    c.replaces && `${c.replaces} replacing a shorter recording`,
+    c.duplicate && `${counted(c.duplicate, 'duplicate')} deleted`,
     c.staged && `${c.staged} staged`,
     c.rejected && `${c.rejected} rejected`,
     c.unreadable && `${c.unreadable} cannot be read now`,
@@ -199,6 +208,10 @@ export function verdictText(v: Verdict): string {
       return `Filed under ${v.current}; its name waits for your approval`;
     case 'staged':
       return 'Staged: its system is unknown';
+    case 'duplicate':
+      return `Deleted: a copy of call ${v.call} from ${v.recorder}, which keeps its recording`;
+    case 'replaces':
+      return `Replaces call ${v.call}'s recording from ${v.recorder}: a longer copy`;
     case 'rejected':
       return `Rejected: ${v.reason}`;
     case 'unreadable':

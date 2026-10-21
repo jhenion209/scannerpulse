@@ -39,11 +39,13 @@ pub struct Recorder {
     pub last_file: Option<DateTime<Utc>>,
     /// Its files waiting to be filed.
     pub waiting: i64,
-    /// Its files filed, rejected, and waiting in the staging folder, since
-    /// the start of the day.
+    /// Its files filed, rejected, waiting in the staging folder, and
+    /// deleted as copies of calls another recorder filed, since the start of
+    /// the day.
     pub filed_today: i64,
     pub rejected_today: i64,
     pub staged_today: i64,
+    pub duplicates_today: i64,
     /// What each host's watcher last found in its folder.
     pub hosts: Vec<FolderHealth>,
 }
@@ -381,6 +383,7 @@ type Row = (
     i64,
     i64,
     i64,
+    i64,
 );
 
 type HealthRow = (
@@ -405,7 +408,9 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                 (SELECT count(*) FROM ingest_files f \
                  WHERE f.source_id = s.id AND f.first_seen >= $1 AND f.state = 'rejected'), \
                 (SELECT count(*) FROM ingest_files f \
-                 WHERE f.source_id = s.id AND f.first_seen >= $1 AND f.state = 'staged') \
+                 WHERE f.source_id = s.id AND f.first_seen >= $1 AND f.state = 'staged'), \
+                (SELECT count(*) FROM ingest_files f \
+                 WHERE f.source_id = s.id AND f.first_seen >= $1 AND f.state = 'duplicate') \
          FROM sources s WHERE s.removed_at IS NULL ORDER BY s.id",
     )
     .bind(since)
@@ -431,6 +436,7 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                 filed,
                 rejected,
                 staged,
+                duplicates,
             )| {
                 let state = match (intake.as_str(), enabled) {
                     ("asked", _) => State::Asked,
@@ -448,6 +454,7 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                     filed_today: filed,
                     rejected_today: rejected,
                     staged_today: staged,
+                    duplicates_today: duplicates,
                     hosts: health
                         .iter()
                         .filter(|row| row.0 == id)

@@ -72,7 +72,7 @@ async function answerPosts(page: Page, path: string, answer: (url: string) => { 
 const PREVIEW = {
   recorder: 'live',
   files: 1240,
-  counts: { filed: 1, new_talkgroup: 0, named: 0, proposal: 1, staged: 1, rejected: 0, unreadable: 0 },
+  counts: { filed: 1, new_talkgroup: 0, named: 0, proposal: 1, staged: 1, duplicate: 1, replaces: 1, rejected: 0, unreadable: 0 },
   sample: [
     { rel_path: '20310115_120000Metro__TO_101_FROM_4021.mp3', started_at: '2031-01-15T18:00:00Z', system: 'Metro', site: 'North',
       talkgroup: 101, talkgroup_name: 'Metro Fire Dispatch', radio_id: 4021, radio_alias: 'Medic 7', duration_ms: 3200, verdict: { kind: 'filed' } },
@@ -81,6 +81,12 @@ const PREVIEW = {
       verdict: { kind: 'proposal', current: 'Metro Police One' } },
     { rel_path: '20310115_120200Metro-North__TO_7_FROM_4023.mp3', started_at: '2031-01-15T18:02:00Z', system: 'Metro-North', site: null,
       talkgroup: 7, talkgroup_name: 'Group 7', radio_id: null, radio_alias: null, duration_ms: 900, verdict: { kind: 'staged' } },
+    { rel_path: '20310115_120300Metro__TO_101_FROM_4024.mp3', started_at: '2031-01-15T18:03:00Z', system: 'Metro', site: 'North',
+      talkgroup: 101, talkgroup_name: 'Metro Fire Dispatch', radio_id: 4024, radio_alias: null, duration_ms: 5400,
+      verdict: { kind: 'replaces', call: 812, recorder: 'west' } },
+    { rel_path: '20310115_120400Metro__TO_101_FROM_4025.mp3', started_at: '2031-01-15T18:04:00Z', system: 'Metro', site: 'North',
+      talkgroup: 101, talkgroup_name: 'Metro Fire Dispatch', radio_id: 4025, radio_alias: null, duration_ms: 1200,
+      verdict: { kind: 'duplicate', call: 813, recorder: 'west' } },
   ],
 };
 
@@ -89,10 +95,16 @@ test('a preview shows what filing would do with each file of a sample', async ({
   await signIn(page, '#recorders');
   await card(page, 'live').getByRole('button', { name: 'Preview live' }).click();
   const preview = page.getByRole('region', { name: 'Preview of live' });
-  await expect(preview.getByText('1,240 files in its folder, 3 read, spread over it: 2 filed (1 with a name to approve), 1 staged.')).toBeVisible();
-  await expect(preview.getByRole('row')).toHaveCount(4);
+  await expect(
+    preview.getByText(
+      '1,240 files in its folder, 5 read, spread over it: 2 filed (1 with a name to approve), 1 replacing a shorter recording, 1 duplicate deleted, 1 staged.',
+    ),
+  ).toBeVisible();
+  await expect(preview.getByRole('row')).toHaveCount(6);
   await expect(preview.getByRole('row').nth(2)).toContainText('Filed under Metro Police One; its name waits for your approval');
   await expect(preview.getByRole('row').nth(3)).toContainText('Staged: its system is unknown');
+  await expect(preview.getByRole('row').nth(4)).toContainText("Replaces call 812's recording from west: a longer copy");
+  await expect(preview.getByRole('row').nth(5)).toContainText('Deleted: a copy of call 813 from west, which keeps its recording');
   await expect(preview.getByRole('row').nth(1)).toContainText('Metro / North');
   await expect(preview.getByRole('row').nth(1)).toContainText('Medic 7');
   await preview.getByRole('button', { name: 'Close the preview' }).click();

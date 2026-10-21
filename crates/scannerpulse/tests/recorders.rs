@@ -183,7 +183,9 @@ async fn the_list_counts_each_recorders_files_of_the_day_and_its_folders_health(
          ($1, 'b.mp3', 1, now() - interval '1 hour', now(), 'done'), \
          ($1, 'c.mp3', 1, now() - interval '1 hour', now(), 'rejected'), \
          ($1, 'd.mp3', 1, now() - interval '1 minute', now(), 'waiting'), \
-         ($1, 'e.mp3', 1, now() - interval '1 minute', now(), 'staged')",
+         ($1, 'e.mp3', 1, now() - interval '1 minute', now(), 'staged'), \
+         ($1, 'f.mp3', 1, now() - interval '1 minute', now(), 'duplicate'), \
+         ($1, 'g.mp3', 1, now() - interval '2 days', now(), 'duplicate')",
     )
     .bind(live)
     .execute(&pool)
@@ -208,9 +210,10 @@ async fn the_list_counts_each_recorders_files_of_the_day_and_its_folders_health(
             live.filed_today,
             live.rejected_today,
             live.staged_today,
+            live.duplicates_today,
             live.waiting
         ),
-        (2, 1, 1, 1)
+        (2, 1, 1, 1, 1)
     );
     assert!(live.last_file.unwrap() > Utc::now() - Duration::minutes(2));
     let hosts: Vec<(&str, bool, Option<i32>)> = live

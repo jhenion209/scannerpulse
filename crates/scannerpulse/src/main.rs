@@ -1639,8 +1639,14 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                         .to_string()
                 });
                 println!(
-                    "{}\t{state}\t{}\tlast file {last}\ttoday {} filed, {} rejected, {} staged, {} waiting",
-                    r.name, r.folder, r.filed_today, r.rejected_today, r.staged_today, r.waiting
+                    "{}\t{state}\t{}\tlast file {last}\ttoday {} filed, {} rejected, {} duplicates removed, {} staged, {} waiting",
+                    r.name,
+                    r.folder,
+                    r.filed_today,
+                    r.rejected_today,
+                    r.duplicates_today,
+                    r.staged_today,
+                    r.waiting
                 );
                 for host in r.hosts.iter().filter(|h| !h.ok) {
                     println!(
@@ -1706,11 +1712,13 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                 seen.sample.len()
             );
             println!(
-                "{} filed ({} new talkgroups, {} placeholders named, {} name proposals), {} staged, {} rejected, {} cannot be read now",
+                "{} filed ({} new talkgroups, {} placeholders named, {} name proposals), {} replace a shorter recording, {} duplicates deleted, {} staged, {} rejected, {} cannot be read now",
                 c.filed + c.new_talkgroup + c.named + c.proposal,
                 c.new_talkgroup,
                 c.named,
                 c.proposal,
+                c.replaces,
+                c.duplicate,
                 c.staged,
                 c.rejected,
                 c.unreadable
