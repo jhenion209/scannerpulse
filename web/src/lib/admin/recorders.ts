@@ -25,6 +25,7 @@ export interface Recorder {
   waiting: number;
   filed_today: number;
   rejected_today: number;
+  staged_today: number;
   hosts: FolderHealth[];
 }
 
@@ -88,10 +89,11 @@ export function changedText(name: string, change: Change): string {
   }
 }
 
-/** Its files filed and rejected since the site's midnight, and those waiting. */
+/** Its files filed, rejected and staged since the site's midnight, and those waiting. */
 export function todayText(r: Recorder): string {
+  const staged = r.staged_today ? `, ${r.staged_today.toLocaleString('en-US')} staged` : '';
   const waiting = r.waiting ? `, ${r.waiting.toLocaleString('en-US')} waiting` : '';
-  return `${r.filed_today.toLocaleString('en-US')} filed, ${r.rejected_today.toLocaleString('en-US')} rejected${waiting}`;
+  return `${r.filed_today.toLocaleString('en-US')} filed, ${r.rejected_today.toLocaleString('en-US')} rejected${staged}${waiting}`;
 }
 
 /** When its newest file arrived. */

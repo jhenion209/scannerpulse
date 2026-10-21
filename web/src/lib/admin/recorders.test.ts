@@ -29,6 +29,7 @@ const recorder = (over: Partial<Recorder> = {}): Recorder => ({
   waiting: 0,
   filed_today: 9881,
   rejected_today: 2,
+  staged_today: 0,
   hosts: [{ host: 'host-a', ok: true, problem: null, files: 3, checked_at: '2031-01-15T17:59:58Z' }],
   ...over,
 });
@@ -46,6 +47,7 @@ describe('a recorder card', () => {
   it("says its day's counts and when its last file came", () => {
     expect(todayText(recorder())).toBe('9,881 filed, 2 rejected');
     expect(todayText(recorder({ waiting: 1240 }))).toBe('9,881 filed, 2 rejected, 1,240 waiting');
+    expect(todayText(recorder({ staged_today: 3 }))).toBe('9,881 filed, 2 rejected, 3 staged');
     expect(lastText(recorder(), NOW)).toBe('12 s ago');
     expect(lastText(recorder({ last_file: null }), NOW)).toBe('never');
   });

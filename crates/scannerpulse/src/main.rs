@@ -1627,8 +1627,8 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                         .to_string()
                 });
                 println!(
-                    "{}\t{state}\t{}\tlast file {last}\ttoday {} filed, {} rejected, {} waiting",
-                    r.name, r.folder, r.filed_today, r.rejected_today, r.waiting
+                    "{}\t{state}\t{}\tlast file {last}\ttoday {} filed, {} rejected, {} staged, {} waiting",
+                    r.name, r.folder, r.filed_today, r.rejected_today, r.staged_today, r.waiting
                 );
                 for host in r.hosts.iter().filter(|h| !h.ok) {
                     println!(
