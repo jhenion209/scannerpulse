@@ -709,6 +709,9 @@ async fn lookups(
 /// from its name, to the second.
 pub const CLOCK_ALLOWANCE: Duration = Duration::from_secs(1);
 
+/// How long a replacement waits for a lock another transaction holds.
+pub const LOCK_WAIT: &str = "2s";
+
 /// Whether a person worked on the call `c`: a transcript a person saved, a
 /// transcription label, or a place in an evaluation set.
 const KEPT: &str = "(EXISTS (SELECT 1 FROM transcripts t WHERE t.call_id = c.id \
@@ -850,7 +853,9 @@ pub async fn duplicate(
 /// queued, is transcribed again, as is one the filing rule now queues; its
 /// transcript stays until the new one replaces it. False, with nothing
 /// written, when the call changed since `same` was read: another path,
-/// recorder, length or talkgroup, or a person's work.
+/// recorder, length or talkgroup, or a person's work. A lock another
+/// transaction holds on the call or its talkgroup (a job's step) is waited
+/// for [`LOCK_WAIT`] at most, then the error is `lock_not_available`.
 pub async fn replace(
     conn: &mut PgConnection,
     holder: &str,
@@ -860,6 +865,11 @@ pub async fn replace(
     size: i64,
 ) -> Result<bool, RecordError> {
     let mut tx = fenced(conn, holder).await?;
+    // The filer holds the archive's writes meanwhile, which a job's step
+    // waits 5 s for: it must not wait on that step's locks longer.
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'"))
+        .execute(&mut *tx)
+        .await?;
     let now: Option<(String, i16, i16, i32, Option<i32>, bool)> = sqlx::query_as(&format!(
         "SELECT c.rel_path, c.location_id, c.source_id, coalesce(c.duration_ms, 0), \
                 c.talkgroup_id, {KEPT} \

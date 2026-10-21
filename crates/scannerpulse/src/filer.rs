@@ -609,18 +609,17 @@ impl Filer {
         })
         .await
         .unwrap_or_else(|_| Err(RecordError::Database(store::timed_out(self.db_limit))));
-        match replaced {
-            Ok(true) => {}
-            Ok(false) => {
-                // No call has the copy: it goes, and the file is read again.
-                if let Err(error) = fs::remove_file(self.location.root.join(&rel)) {
-                    crate::log::warn(format!("cannot remove {rel}: {error}"));
-                }
-                return Ok(later(format!(
-                    "call {} changed while its longer copy was filed; it is read again",
-                    same.id
-                )));
-            }
+        let why = match replaced {
+            Ok(true) => None,
+            Ok(false) => Some(format!(
+                "call {} changed while its longer copy was filed; it is read again",
+                same.id
+            )),
+            // lock_not_available: a job's step held the call or its talkgroup.
+            Err(RecordError::Database(error)) if has_code(&error, "55P03") => Some(format!(
+                "call {} was held by a job while its longer copy was filed; it is read again",
+                same.id
+            )),
             Err(RecordError::LeaseLost) => return Ok(Outcome::LeaseLost),
             Err(RecordError::Database(error)) if has_code(&error, "23505") => {
                 return Ok(later(format!(
@@ -628,6 +627,13 @@ impl Filer {
                 )));
             }
             Err(RecordError::Database(error)) => return Err(error),
+        };
+        if let Some(why) = why {
+            // No call has the copy: it goes, and the file is read again.
+            if let Err(error) = fs::remove_file(self.location.root.join(&rel)) {
+                crate::log::warn(format!("cannot remove {rel}: {error}"));
+            }
+            return Ok(later(why));
         }
         // The filer deletes in its own location only: an old recording in
         // another stays listed as a leftover.

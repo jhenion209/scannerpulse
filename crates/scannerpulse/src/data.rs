@@ -355,9 +355,28 @@ enum Handled {
     Missing,
 }
 
+/// Whether the call still has the file its step's batch read; it is locked
+/// for the rest of the step. A longer copy from another recorder may have
+/// replaced its recording since (the filer waits for the lock a short while
+/// only). The current path, or `None` when the call is gone.
+async fn locked_file(
+    conn: &mut PgConnection,
+    call: &CallFile,
+) -> sqlx::Result<Option<(i16, String)>> {
+    sqlx::query_as(
+        "SELECT location_id, rel_path FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE",
+    )
+    .bind(call.id)
+    .bind(call.started_at)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
 /// Writes the call's file under `to`'s folder and name, with `to` in its
 /// title and, for a mapped call, `system` in its tag, and moves the row to
-/// it. A mapped call's file already where it belongs is rewritten there.
+/// it. A mapped call's file already where it belongs is rewritten there. A
+/// call whose file changed since the batch was read is refused before
+/// anything is written.
 async fn correct_one(
     conn: &mut PgConnection,
     root: &Path,
@@ -366,6 +385,12 @@ async fn correct_one(
     folder: &str,
     system: &str,
 ) -> sqlx::Result<Handled> {
+    if locked_file(conn, call).await? != Some((call.location_id, call.rel_path.clone())) {
+        return Ok(Handled::Refused(format!(
+            "call {} changed while its file was corrected",
+            call.id
+        )));
+    }
     let parts: Vec<&str> = call.rel_path.split('/').collect();
     let [day, _, name] = parts[..] else {
         return Ok(Handled::Refused(format!(
@@ -968,13 +993,30 @@ fn hold(old: &Path, holding: &Path, rel_path: &str, data: &[u8]) -> io::Result<(
 /// Copies the call's file into the holding folder and deletes its row (its
 /// transcripts, labels and queue row go with it). A file that cannot be read
 /// or held refuses the call: its row and file stay. The holding folder is not
-/// the archive, so the archive's write lock is not taken.
+/// the archive, so the archive's write lock is not taken. The file is the
+/// one the call has now, which a longer copy may have replaced since the
+/// batch was read; a call gone or moved to another location is refused.
 async fn purge_one(
     conn: &mut PgConnection,
     root: &Path,
     holding: &Path,
     call: &CallFile,
 ) -> sqlx::Result<Handled> {
+    let call = &match locked_file(conn, call).await? {
+        Some((location_id, rel_path)) if location_id == call.location_id => CallFile {
+            id: call.id,
+            started_at: call.started_at,
+            location_id,
+            rel_path,
+            mapped: call.mapped,
+        },
+        _ => {
+            return Ok(Handled::Refused(format!(
+                "call {} changed while it was purged",
+                call.id
+            )));
+        }
+    };
     let old = root.join(&call.rel_path);
     let kept = match std::fs::read(&old) {
         Ok(data) => match hold(&old, holding, &call.rel_path, &data) {
@@ -1175,5 +1217,124 @@ mod tests {
         std::fs::rename(&folder, dir.path().join("away")).unwrap();
         std::fs::create_dir(&folder).unwrap();
         assert!(same_identities(&folders, &before).is_err());
+    }
+
+    /// The batch's path of a call, and the path a longer copy gave it since.
+    const OLD: &str = "2031-01-15/215-Old Name/20310115_120000SYSB__TO_215_FROM_4021.mp3";
+    const LONGER: &str = "2031-01-15/215-Old Name/20310115_120000SYSB__TO_215_FROM_4021_1.mp3";
+
+    /// A file of SYSB talkgroup 215 "Old Name" at `rel_path` under `root`
+    /// (invented values): its tag, then 28 silent frames.
+    fn write(root: &Path, rel_path: &str) {
+        use id3::TagLike;
+        let mut tag = id3::Tag::new();
+        tag.set_title("215\"Old Name\"");
+        tag.set_text("TIT1", "SYSB");
+        let mut data = Vec::new();
+        tag.write_to(&mut data, id3::Version::Id3v24).unwrap();
+        let mut frame = [0u8; 144];
+        frame[..4].copy_from_slice(&[0xFF, 0xF3, 0x48, 0xC4]);
+        data.extend(frame.repeat(28));
+        let path = root.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    /// The call of that talkgroup whose file is `rel_path` in an archive at
+    /// `root`, as the step read it in its batch at `read`.
+    async fn call_at(pool: &sqlx::PgPool, root: &Path, rel_path: &str, read: &str) -> CallFile {
+        let location: i16 = sqlx::query_scalar(
+            "INSERT INTO locations (name, root, mode, is_primary) \
+             VALUES ('primary', $1, 'managed', true) RETURNING id",
+        )
+        .bind(root.to_str().unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let source: i16 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, path) VALUES ('live', 'sdrtrunk', '/srv/in') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let talkgroup: i32 = sqlx::query_scalar(
+            "WITH s AS (INSERT INTO systems (name) VALUES ('SYSB') RETURNING id) \
+             INSERT INTO talkgroups (system_id, number, name) SELECT id, 215, 'Old Name' FROM s RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let at: DateTime<Utc> = "2031-01-15T18:00:00Z".parse().unwrap();
+        crate::store::ensure_partition(pool, at).await.unwrap();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+             VALUES ($1, 1000, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(at)
+        .bind(talkgroup)
+        .bind(source)
+        .bind(location)
+        .bind(rel_path)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        CallFile {
+            id,
+            started_at: at,
+            location_id: location,
+            rel_path: read.to_string(),
+            mapped: false,
+        }
+    }
+
+    // A longer copy replaced the call's recording after the step read its
+    // batch: the purge holds and deletes the file the call has now.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_purge_takes_the_file_the_call_has_now(pool: sqlx::PgPool) {
+        let (root, holding) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write(root.path(), LONGER);
+        let read = call_at(&pool, root.path(), LONGER, OLD).await;
+        let mut conn = pool.acquire().await.unwrap();
+        let handled = purge_one(&mut conn, root.path(), holding.path(), &read)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&handled, Handled::Moved(Some(gone)) if gone.rel_path == LONGER),
+            "the purge did not take the call's file"
+        );
+        assert!(holding.path().join(LONGER).is_file());
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    // The same for a correction: it refuses the call before it writes a file
+    // that no call would name.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_correction_refuses_a_call_whose_file_changed_since_its_batch(pool: sqlx::PgPool) {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), OLD);
+        write(root.path(), LONGER);
+        let read = call_at(&pool, root.path(), LONGER, OLD).await;
+        let to = Talkgroup {
+            number: 215,
+            name: "New Name".to_string(),
+        };
+        let mut conn = pool.acquire().await.unwrap();
+        let handled = correct_one(&mut conn, root.path(), &read, &to, "215-New Name", "SYSB")
+            .await
+            .unwrap();
+        assert!(matches!(handled, Handled::Refused(_)));
+        assert!(
+            !root.path().join("2031-01-15/215-New Name").exists(),
+            "the correction wrote a file no call names"
+        );
+        let now: String = sqlx::query_scalar("SELECT rel_path FROM calls")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(now, LONGER);
     }
 }

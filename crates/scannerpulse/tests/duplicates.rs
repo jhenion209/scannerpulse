@@ -413,6 +413,45 @@ async fn a_recorders_files_found_together_are_filed_in_time_order(
     Ok(())
 }
 
+// A job's step that holds the call (a correction's or a purge's) does not
+// hold up the filer, which keeps the archive's writes meanwhile: the
+// replacement gives up after a moment, and the copy is read again later.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replacement_does_not_wait_long_for_a_call_a_job_holds(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    filed_by_north(&site).await;
+    let copy = bravo("120000", 40, 4021);
+    let path = site.arrive(site.south_id, &copy).await;
+    let (call, same) = site.same_call(&path).await;
+    let mut job = site.pool.begin().await?;
+    sqlx::query("SELECT 1 FROM calls FOR UPDATE")
+        .execute(&mut *job)
+        .await?;
+    let new = NewCall {
+        call: &call,
+        source_id: site.south_id,
+        location_id: site.location.id,
+        rel_path: "2031-01-15/215-Bravo EMS/new.mp3",
+        transcribe_from_ms: None,
+    };
+    let row = site.south_row().await;
+    let mut conn = site.pool.acquire().await?;
+    let replaced = tokio::time::timeout(
+        Duration::from_secs(20),
+        store::replace(&mut conn, HOLDER, row, &same, &new, copy.1.len() as i64),
+    )
+    .await
+    .expect("the replacement waited for the job's transaction");
+    assert!(
+        matches!(&replaced, Err(store::RecordError::Database(sqlx::Error::Database(db)))
+            if db.code().as_deref() == Some("55P03")),
+        "{replaced:?}"
+    );
+    job.rollback().await?;
+    assert_eq!(site.calls().await[0].3, site.north_id);
+    Ok(())
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn a_recorders_own_calls_are_never_its_copies(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
