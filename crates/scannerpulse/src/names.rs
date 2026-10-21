@@ -157,11 +157,6 @@ pub async fn unknown_systems(conn: &mut PgConnection) -> sqlx::Result<Vec<Unknow
     .await
 }
 
-/// How many decisions wait: unknown system names and open proposals.
-pub async fn waiting_count(conn: &mut PgConnection) -> sqlx::Result<i64> {
-    Ok(unknown_systems(conn).await?.len() as i64 + proposals(conn).await?.len() as i64)
-}
-
 /// Refused unless `name` is an unknown system name that files wait for.
 async fn staged_name(conn: &mut PgConnection, name: &str) -> Result<(), Refused> {
     if unknown_systems(conn)
@@ -210,18 +205,16 @@ pub async fn map_system(conn: &mut PgConnection, name: &str, to: &str) -> Result
 /// Deletes the staged files of the unknown name, once the name is typed
 /// exactly as `confirm`; their rows say they were discarded. Returns how many
 /// were. Files already gone from the staging folder count too.
-pub async fn discard(
-    conn: &mut PgConnection,
-    name: &str,
-    confirm: &str,
-    archive: &std::path::Path,
-) -> Result<i64, Refused> {
+pub async fn discard(conn: &mut PgConnection, name: &str, confirm: &str) -> Result<i64, Refused> {
     staged_name(conn, name).await?;
     if confirm != name {
         return Err(Refused::Refused(format!(
             "type the system's name, {name:?}, exactly to discard its files"
         )));
     }
+    let Some(archive) = crate::store::primary_location(&mut *conn).await? else {
+        return Err(Refused::Refused("there is no archive".into()));
+    };
     let files: Vec<(i64, i16, String)> = sqlx::query_as(
         "SELECT id, source_id, rel_path FROM ingest_files WHERE state = 'staged' AND staged_system = $1",
     )
@@ -230,7 +223,7 @@ pub async fn discard(
     .await?;
     let mut discarded = 0;
     for (id, source_id, rel_path) in files {
-        let path = crate::archive::staging_path(archive, source_id, &rel_path);
+        let path = crate::archive::staging_path(&archive.root, source_id, &rel_path);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

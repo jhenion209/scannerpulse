@@ -55,7 +55,7 @@ async fn written(pool: &PgPool) -> Vec<i64> {
 #[sqlx::test(migrations = "./migrations")]
 async fn a_preview_says_what_filing_would_do_and_changes_nothing(pool: PgPool) {
     let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    common::seed_places(&pool, root.path(), source.path()).await;
+    let (_, live) = common::seed_places(&pool, root.path(), source.path()).await;
     common::talkgroup(&pool, "SYSA", 7).await;
     let eight = common::talkgroup(&pool, "SYSA", 8).await;
     let nine = common::talkgroup(&pool, "SYSA", 9).await;
@@ -81,7 +81,9 @@ async fn a_preview_says_what_filing_would_do_and_changes_nothing(pool: PgPool) {
     fs::write(folder.join("20310115_120006.mp3"), b"not audio").unwrap();
     let before = written(&pool).await;
 
-    let seen = preview::preview(&pool, "live", ZONE).await.unwrap();
+    let seen = preview::preview(&mut pool.acquire().await.unwrap(), live, ZONE)
+        .await
+        .unwrap();
 
     assert_eq!(seen.files, 7);
     let verdicts: Vec<&Verdict> = seen.sample.iter().map(|file| &file.verdict).collect();
@@ -155,7 +157,7 @@ async fn a_preview_says_what_filing_would_do_and_changes_nothing(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn a_large_folders_sample_is_spread_over_it(pool: PgPool) {
     let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    common::seed_places(&pool, root.path(), source.path()).await;
+    let (_, live) = common::seed_places(&pool, root.path(), source.path()).await;
     let total = preview::SAMPLE_FILES * 2 + 1;
     for minute in 0..total {
         let folder = source.path().join(format!("{:02}", minute / 60));
@@ -170,7 +172,9 @@ async fn a_large_folders_sample_is_spread_over_it(pool: PgPool) {
         )
         .unwrap();
     }
-    let seen = preview::preview(&pool, "live", ZONE).await.unwrap();
+    let seen = preview::preview(&mut pool.acquire().await.unwrap(), live, ZONE)
+        .await
+        .unwrap();
     assert_eq!(seen.files, total);
     assert_eq!(seen.sample.len(), preview::SAMPLE_FILES);
     let paths: Vec<&str> = seen
@@ -195,7 +199,7 @@ async fn a_large_folders_sample_is_spread_over_it(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn only_a_recorder_is_previewed(pool: PgPool) {
     assert!(matches!(
-        preview::preview(&pool, "nowhere", ZONE).await,
+        preview::preview(&mut pool.acquire().await.unwrap(), 99, ZONE).await,
         Err(Refused::NoSuch(_))
     ));
 }

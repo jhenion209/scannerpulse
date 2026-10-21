@@ -13,8 +13,8 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
-use scannerpulse::recorders;
 use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, talkgroups, web};
+use scannerpulse::{names, recorders};
 use serde_json::json;
 use sqlx::Row;
 use sqlx::postgres::PgConnection;
@@ -49,6 +49,13 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse recorder list
        scannerpulse recorder add NAME FOLDER [--when-asked]
        scannerpulse recorder watch|ask|pause|bring-in|remove NAME
+       scannerpulse recorder preview NAME
+       scannerpulse names list
+       scannerpulse names approve|dismiss SYSTEM/NUMBER NAME
+       scannerpulse staging list
+       scannerpulse staging new-system NAME
+       scannerpulse staging map NAME SYSTEM
+       scannerpulse staging discard NAME [--confirm NAME]
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
@@ -136,14 +143,25 @@ recorder    the SDRTrunk folders calls are taken from: list them; add one,
             watched (its files taken as they arrive) or --when-asked (its
             files wait until bring-in takes those it holds then); watch,
             ask, pause or remove one (its files stay in its folder, its calls
-            in the archive). Every file taken, and every file that cannot be
-            filed, is deleted from the folder
+            in the archive); preview one (a sample of its files, each with
+            what filing would do with it; nothing is changed). Every file
+            taken, and every file that cannot be filed, is deleted from the
+            folder
+names       talkgroup names a recorder sent that differ from the stored
+            ones: list them; approve one (the talkgroup is renamed, and its
+            files wait for `talkgroup correct`) or dismiss one (that spelling
+            is ignored from then on)
+staging     system names that no system has, whose files wait in the
+            archive's staging folder: list them; make one a new system; map
+            one to an existing system for good (its files are filed under it
+            and wait for `talkgroup correct`); or discard one (its staged
+            files are deleted once its name is typed, or given by --confirm)
 talkgroups  list the talkgroups and their transcription switches;
             uncorrected: those whose files still carry an old name
 talkgroup   turn a talkgroup's transcription on or off (its new calls only;
             `jobs queue --talkgroup` queues its past calls); rename a
             talkgroup (its files keep the old name until they are corrected;
-            the recorder's next file of it brings the recorder's name back);
+            a recorder's other name for it is a proposal: see `names`);
             correct a talkgroup's files (folder, file name and title) after a
             rename, as a job, once its name is typed (or given by --confirm);
             merge a talkgroup into another of its system (its calls and
@@ -347,6 +365,7 @@ enum Command {
     Uncorrected,
     Data(Data),
     Recorder(RecorderCommand),
+    Waiting(Waiting),
     RetryFailed,
     Status,
     Traffic,
@@ -385,6 +404,36 @@ enum RecorderCommand {
     Change {
         change: recorders::Change,
         name: String,
+    },
+    Preview {
+        name: String,
+    },
+}
+
+/// What waits for the administrator: talkgroup name proposals and unknown
+/// system names.
+#[derive(Debug, PartialEq, Eq)]
+enum Waiting {
+    Names,
+    Approve {
+        talkgroup: String,
+        name: String,
+    },
+    Dismiss {
+        talkgroup: String,
+        name: String,
+    },
+    Staging,
+    NewSystem {
+        system: String,
+    },
+    Map {
+        system: String,
+        to: String,
+    },
+    Discard {
+        system: String,
+        confirm: Option<String>,
     },
 }
 
@@ -653,6 +702,33 @@ fn parse(args: &[&str]) -> Option<Command> {
                 name: name.to_string(),
                 folder: PathBuf::from(folder),
                 asked: found.contains_key("--when-asked"),
+            }))
+        }
+        ["recorder", "preview", name] => Some(Command::Recorder(RecorderCommand::Preview {
+            name: name.to_string(),
+        })),
+        ["names", "list"] => Some(Command::Waiting(Waiting::Names)),
+        ["names", "approve", talkgroup, name] => Some(Command::Waiting(Waiting::Approve {
+            talkgroup: talkgroup.to_string(),
+            name: name.to_string(),
+        })),
+        ["names", "dismiss", talkgroup, name] => Some(Command::Waiting(Waiting::Dismiss {
+            talkgroup: talkgroup.to_string(),
+            name: name.to_string(),
+        })),
+        ["staging", "list"] => Some(Command::Waiting(Waiting::Staging)),
+        ["staging", "new-system", system] => Some(Command::Waiting(Waiting::NewSystem {
+            system: system.to_string(),
+        })),
+        ["staging", "map", system, to] => Some(Command::Waiting(Waiting::Map {
+            system: system.to_string(),
+            to: to.to_string(),
+        })),
+        ["staging", "discard", system, rest @ ..] => {
+            let found = flags(rest, &[], &["--confirm"], &[])?;
+            Some(Command::Waiting(Waiting::Discard {
+                system: system.to_string(),
+                confirm: found.get("--confirm").map(|c| c.to_string()),
             }))
         }
         ["recorder", change, name] => Some(Command::Recorder(RecorderCommand::Change {
@@ -979,6 +1055,13 @@ async fn run() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("recorder: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Waiting(command)) => match waiting_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("{error}");
                 ExitCode::FAILURE
             }
         },
@@ -1599,6 +1682,124 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                     ),
                 }
             );
+        }
+        RecorderCommand::Preview { name } => {
+            let zone = settings::load(&mut conn).await?.time_zone;
+            let id = recorders::find(&mut conn, &name).await?;
+            let seen = scannerpulse::preview::preview(&mut conn, id, zone).await?;
+            let c = &seen.counts;
+            println!(
+                "{name}: {} files in its folder, {} read; nothing is changed",
+                seen.files,
+                seen.sample.len()
+            );
+            println!(
+                "{} filed ({} new talkgroups, {} placeholders named, {} name proposals), {} staged, {} rejected, {} cannot be read now",
+                c.filed + c.new_talkgroup + c.named + c.proposal,
+                c.new_talkgroup,
+                c.named,
+                c.proposal,
+                c.staged,
+                c.rejected,
+                c.unreadable
+            );
+            for file in &seen.sample {
+                let at = file.started_at.map_or("?".to_string(), |at| {
+                    at.with_timezone(&zone)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                });
+                let talkgroup = match (file.talkgroup, &file.talkgroup_name) {
+                    (Some(number), Some(name)) => format!("{number} {name:?}"),
+                    _ => "-".to_string(),
+                };
+                let radio = match (file.radio_id, &file.radio_alias) {
+                    (Some(id), Some(alias)) => format!("{id} {alias}"),
+                    (Some(id), None) => id.to_string(),
+                    (None, Some(alias)) => alias.clone(),
+                    (None, None) => "-".to_string(),
+                };
+                println!(
+                    "{at}\t{}/{}\t{talkgroup}\t{radio}\t{}\t{}\t{}",
+                    file.system.as_deref().unwrap_or("-"),
+                    file.site.as_deref().unwrap_or("-"),
+                    file.duration_ms.map_or("-".to_string(), |ms| format!(
+                        "{:.1} s",
+                        f64::from(ms) / 1000.0
+                    )),
+                    file.verdict,
+                    file.rel_path
+                );
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `scannerpulse names ...` and `scannerpulse staging ...`.
+async fn waiting_command(command: Waiting) -> CommandResult {
+    let mut conn = connect().await?;
+    let day = |at: chrono::DateTime<chrono::Utc>| at.format("%Y-%m-%d %H:%M UTC").to_string();
+    match command {
+        Waiting::Names => {
+            for p in names::proposals(&mut conn).await? {
+                println!(
+                    "{}/{}\t{:?} -> {:?}\t{} calls from {}\tfirst {}, last {}",
+                    p.system,
+                    p.number,
+                    p.current,
+                    p.proposed,
+                    p.calls,
+                    p.recorders.join(", "),
+                    day(p.first_seen),
+                    day(p.last_seen)
+                );
+            }
+        }
+        Waiting::Approve { talkgroup, name } => {
+            let id = talkgroup_id(&mut conn, &talkgroup).await?;
+            names::approve(&mut conn, id, &name).await?;
+            println!(
+                "{talkgroup} is {name:?}; its files keep the old name until \
+                 `talkgroup correct {talkgroup}` runs"
+            );
+        }
+        Waiting::Dismiss { talkgroup, name } => {
+            let id = talkgroup_id(&mut conn, &talkgroup).await?;
+            names::dismiss(&mut conn, id, &name).await?;
+            println!("{name:?} is dismissed for {talkgroup}: that spelling is ignored from now on");
+        }
+        Waiting::Staging => {
+            for u in names::unknown_systems(&mut conn).await? {
+                println!(
+                    "{}\t{} files from {}\tfirst {}, last {}\ttalkgroups {}",
+                    u.system,
+                    u.files,
+                    u.recorders.join(", "),
+                    day(u.first_seen),
+                    day(u.last_seen),
+                    u.talkgroups.join("; ")
+                );
+            }
+        }
+        Waiting::NewSystem { system } => {
+            names::new_system(&mut conn, &system).await?;
+            println!("{system} is a new system: its staged files are filed within a few seconds");
+        }
+        Waiting::Map { system, to } => {
+            names::map_system(&mut conn, &system, &to).await?;
+            println!(
+                "{system} is {to} from now on: its staged files are filed under {to} within a few \
+                 seconds, and wait for `talkgroup correct`"
+            );
+        }
+        Waiting::Discard { system, confirm } => {
+            let confirm = typed(
+                confirm,
+                "type the system's name to delete its staged files: ",
+            )?;
+            let discarded = names::discard(&mut conn, &system, &confirm).await?;
+            println!("{discarded} staged files of {system} are deleted");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -2392,7 +2593,7 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 mod tests {
     use super::{
         Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
-        RecorderCommand, Settings, parse, recorders, talkgroup_list,
+        RecorderCommand, Settings, Waiting, parse, recorders, talkgroup_list,
     };
 
     #[test]
@@ -2938,6 +3139,67 @@ mod tests {
             None
         );
         assert_eq!(parse(&["viewers", "all"]), None);
+    }
+
+    #[test]
+    fn names_staging_and_the_preview_take_their_words() {
+        assert_eq!(
+            parse(&["recorder", "preview", "east"]),
+            Some(Command::Recorder(RecorderCommand::Preview {
+                name: "east".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["names", "list"]),
+            Some(Command::Waiting(Waiting::Names))
+        );
+        assert_eq!(
+            parse(&["names", "approve", "SYSA/7", "Group Seven"]),
+            Some(Command::Waiting(Waiting::Approve {
+                talkgroup: "SYSA/7".into(),
+                name: "Group Seven".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["names", "dismiss", "SYSA/7", "Grp 7"]),
+            Some(Command::Waiting(Waiting::Dismiss {
+                talkgroup: "SYSA/7".into(),
+                name: "Grp 7".into()
+            }))
+        );
+        assert_eq!(parse(&["names", "approve", "SYSA/7"]), None);
+        assert_eq!(
+            parse(&["staging", "list"]),
+            Some(Command::Waiting(Waiting::Staging))
+        );
+        assert_eq!(
+            parse(&["staging", "new-system", "SYSB"]),
+            Some(Command::Waiting(Waiting::NewSystem {
+                system: "SYSB".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["staging", "map", "SYSB", "SYSA"]),
+            Some(Command::Waiting(Waiting::Map {
+                system: "SYSB".into(),
+                to: "SYSA".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["staging", "discard", "SYSB"]),
+            Some(Command::Waiting(Waiting::Discard {
+                system: "SYSB".into(),
+                confirm: None
+            }))
+        );
+        assert_eq!(
+            parse(&["staging", "discard", "SYSB", "--confirm", "SYSB"]),
+            Some(Command::Waiting(Waiting::Discard {
+                system: "SYSB".into(),
+                confirm: Some("SYSB".into())
+            }))
+        );
+        assert_eq!(parse(&["staging", "map", "SYSB"]), None);
     }
 
     #[test]

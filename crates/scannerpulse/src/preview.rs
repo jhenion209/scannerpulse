@@ -8,10 +8,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::reader::{self, FileCall, ReadError};
-use crate::recorders::{self, Refused};
+use crate::recorders::Refused;
 use crate::store::{self, NameSeen};
 use crate::{archive, watcher};
 
@@ -39,6 +39,20 @@ pub enum Verdict {
     Rejected { reason: String },
     /// It cannot be read now: the filer tries again later.
     Unreadable { reason: String },
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Verdict::Filed => f.write_str("filed"),
+            Verdict::NewTalkgroup => f.write_str("filed, new talkgroup"),
+            Verdict::Named { current } => write!(f, "filed, names the talkgroup (now {current:?})"),
+            Verdict::Proposal { current } => write!(f, "filed, a name proposal (now {current:?})"),
+            Verdict::Staged => f.write_str("staged: unknown system"),
+            Verdict::Rejected { reason } => write!(f, "rejected: {reason}"),
+            Verdict::Unreadable { reason } => write!(f, "cannot be read now: {reason}"),
+        }
+    }
 }
 
 /// How many files of the sample have each verdict.
@@ -108,17 +122,17 @@ fn spread(mut paths: Vec<String>) -> Vec<String> {
 
 type Read = (usize, Vec<(String, Result<FileCall, ReadError>)>);
 
-/// Previews the recorder named `name`. The folder is listed and read in a
-/// thread of its own, within [`PREVIEW_LIMIT`]: a share that stopped
-/// answering holds up nothing else.
-pub async fn preview(pool: &PgPool, name: &str, zone: Tz) -> Result<Preview, Refused> {
-    let folder: String = {
-        let mut conn = pool.acquire().await?;
-        let id = recorders::find(&mut conn, name).await?;
-        sqlx::query_scalar("SELECT path FROM sources WHERE id = $1")
+/// Previews the recorder `id`. The folder is listed and read in a thread of
+/// its own, within [`PREVIEW_LIMIT`]: a share that stopped answering holds
+/// up nothing else.
+pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Preview, Refused> {
+    let found: Option<(String, String)> =
+        sqlx::query_as("SELECT name, path FROM sources WHERE id = $1 AND removed_at IS NULL")
             .bind(id)
-            .fetch_one(&mut *conn)
-            .await?
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((name, folder)) = found else {
+        return Err(Refused::NoSuch(format!("there is no recorder {id}")));
     };
     let folder = PathBuf::from(folder);
     let root = folder.clone();
@@ -156,7 +170,7 @@ pub async fn preview(pool: &PgPool, name: &str, zone: Tz) -> Result<Preview, Ref
     for (rel_path, call) in read {
         let (call, verdict) = match call {
             Ok(call) => {
-                let verdict = verdict(pool, &rel_path, &call).await?;
+                let verdict = verdict(conn, &rel_path, &call).await?;
                 (Some(call), verdict)
             }
             Err(ReadError::Rejected(reason)) => (None, Verdict::Rejected { reason }),
@@ -184,7 +198,7 @@ pub async fn preview(pool: &PgPool, name: &str, zone: Tz) -> Result<Preview, Ref
         });
     }
     Ok(Preview {
-        recorder: name.to_string(),
+        recorder: name,
         files,
         counts,
         sample,
@@ -193,10 +207,14 @@ pub async fn preview(pool: &PgPool, name: &str, zone: Tz) -> Result<Preview, Ref
 
 /// What filing would do with the call read from the file at `rel_path`, as
 /// `Filer::try_file` and `store::talkgroup_id` decide it.
-async fn verdict(pool: &PgPool, rel_path: &str, call: &FileCall) -> sqlx::Result<Verdict> {
+async fn verdict(
+    conn: &mut PgConnection,
+    rel_path: &str,
+    call: &FileCall,
+) -> sqlx::Result<Verdict> {
     let described = &call.described;
     if let Some(system) = described.system.as_deref()
-        && !store::system_known(pool, system).await?
+        && !store::system_known(&mut *conn, system).await?
     {
         return Ok(Verdict::Staged);
     }
@@ -210,7 +228,7 @@ async fn verdict(pool: &PgPool, rel_path: &str, call: &FileCall) -> sqlx::Result
         return Ok(Verdict::Filed);
     };
     // No system yet on a fresh install: its first is added with the call.
-    let Some((system_id, _)) = store::find_system(pool, system).await? else {
+    let Some((system_id, _)) = store::find_system(&mut *conn, system).await? else {
         return Ok(Verdict::NewTalkgroup);
     };
     let stored: Option<(String, bool)> = sqlx::query_as(
@@ -221,7 +239,7 @@ async fn verdict(pool: &PgPool, rel_path: &str, call: &FileCall) -> sqlx::Result
     .bind(system_id)
     .bind(talkgroup.number)
     .bind(&talkgroup.name)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some((current, dismissed)) = stored else {
         return Ok(Verdict::NewTalkgroup);

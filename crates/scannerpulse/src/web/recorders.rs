@@ -1,5 +1,7 @@
 //! The admin page's Recorders area: the SDRTrunk folders ingest takes calls
-//! from, adding one, and changing one.
+//! from, adding one, changing one and previewing one; and what waits for the
+//! administrator's decision, unknown system names and talkgroup name
+//! proposals.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -7,12 +9,15 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::auth::Admin;
 use super::{ApiError, AppState};
+use crate::names;
+use crate::preview::Preview;
 use crate::recorders::{self, Change, Refused};
 
 /// How long the check of a new recorder's folder may take: a hung mount must
@@ -112,4 +117,117 @@ pub async fn change(
         .map_err(refused)?;
     record(&admin, format!("recorder {id}: {change:?}"));
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/admin/recorders/<id>/preview`: what filing would do with a
+/// sample of the recorder's files. It changes nothing.
+pub async fn preview(
+    _: Admin,
+    State(state): State<AppState>,
+    Path(id): Path<i16>,
+) -> Result<Json<Preview>, ApiError> {
+    let zone = super::audio::time_zone(&state).await?;
+    let mut conn = state.pool.acquire().await?;
+    crate::preview::preview(&mut conn, id, zone)
+        .await
+        .map(Json)
+        .map_err(refused)
+}
+
+/// `GET /api/admin/names`: what waits for a decision, unknown system names
+/// and talkgroup name proposals, and how many decisions that is.
+pub async fn waiting(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let unknown = names::unknown_systems(&mut conn).await?;
+    let proposals = names::proposals(&mut conn).await?;
+    Ok(Json(json!({
+        "waiting": unknown.len() + proposals.len(),
+        "unknown": unknown,
+        "proposals": proposals,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Proposed {
+    pub talkgroup_id: i32,
+    pub name: String,
+}
+
+/// `POST /api/admin/names/<approve|dismiss>`: decides a proposal.
+pub async fn decide_name(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(decision): Path<String>,
+    Json(body): Json<Proposed>,
+) -> Result<StatusCode, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    match decision.as_str() {
+        "approve" => names::approve(&mut conn, body.talkgroup_id, &body.name).await,
+        "dismiss" => names::dismiss(&mut conn, body.talkgroup_id, &body.name).await,
+        _ => return Err(ApiError::NotFound),
+    }
+    .map_err(refused)?;
+    record(
+        &admin,
+        format!(
+            "{decision} the name {:?} for talkgroup {}",
+            body.name, body.talkgroup_id
+        ),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Unknown {
+    pub system: String,
+    /// The system it is the same as (map).
+    #[serde(default)]
+    pub to: String,
+    /// The name typed (discard).
+    #[serde(default)]
+    pub confirm: String,
+}
+
+/// `POST /api/admin/staging/<new-system|map|discard>`: decides an unknown
+/// system name. Discard answers how many staged files it deleted.
+pub async fn decide_system(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(decision): Path<String>,
+    Json(body): Json<Unknown>,
+) -> Result<Response, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let system = &body.system;
+    let (answer, what) = match decision.as_str() {
+        "new-system" => {
+            names::new_system(&mut conn, system)
+                .await
+                .map_err(refused)?;
+            (
+                StatusCode::NO_CONTENT.into_response(),
+                format!("added the system {system:?}"),
+            )
+        }
+        "map" => {
+            names::map_system(&mut conn, system, &body.to)
+                .await
+                .map_err(refused)?;
+            (
+                StatusCode::NO_CONTENT.into_response(),
+                format!("mapped {system:?} to the system {:?}", body.to),
+            )
+        }
+        "discard" => {
+            let discarded = names::discard(&mut conn, system, &body.confirm)
+                .await
+                .map_err(refused)?;
+            (
+                Json(json!({"discarded": discarded})).into_response(),
+                format!("discarded {discarded} staged files of {system:?}"),
+            )
+        }
+        _ => return Err(ApiError::NotFound),
+    };
+    record(&admin, what);
+    Ok(answer)
 }

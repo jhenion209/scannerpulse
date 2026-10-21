@@ -163,7 +163,6 @@ async fn a_file_of_an_unknown_system_leaves_its_recorder_and_waits_in_the_stagin
             vec!["215 Bravo EMS".to_string()]
         )
     );
-    assert_eq!(names::waiting_count(&mut conn).await.unwrap(), 1);
     assert!(site.pass().await.is_empty(), "it waits for a name");
     // Seen again (left behind), it stays staged.
     fs::write(&path, bravo()).unwrap();
@@ -213,15 +212,10 @@ async fn discarding_a_name_deletes_its_staged_files_once_it_is_typed(pool: PgPoo
     site.arrive().await;
     site.pass().await;
     let mut conn = site.pool.acquire().await.unwrap();
-    let refused = names::discard(&mut conn, "SYSB", "sysb", site.root.path()).await;
+    let refused = names::discard(&mut conn, "SYSB", "sysb").await;
     assert!(matches!(refused, Err(Refused::Refused(_))), "{refused:?}");
     assert!(site.staged().exists());
-    assert_eq!(
-        names::discard(&mut conn, "SYSB", "SYSB", site.root.path())
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(names::discard(&mut conn, "SYSB", "SYSB").await.unwrap(), 1);
     assert!(!site.staged().exists());
     let (state, reason): (String, Option<String>) =
         sqlx::query_as("SELECT state, reason FROM ingest_files")

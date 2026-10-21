@@ -325,6 +325,13 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/recorders/{id}/{change}",
             post(recorders::change),
         )
+        .route("/api/admin/recorders/{id}/preview", get(recorders::preview))
+        .route("/api/admin/names", get(recorders::waiting))
+        .route("/api/admin/names/{decision}", post(recorders::decide_name))
+        .route(
+            "/api/admin/staging/{decision}",
+            post(recorders::decide_system),
+        )
         .route("/api/admin/data/uncorrected", get(data::uncorrected))
         .route("/api/admin/talkgroups/{id}/rename", post(data::rename))
         .route(
