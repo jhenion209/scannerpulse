@@ -260,8 +260,14 @@ impl Transcriber {
                 }
                 let mut conn = store::limited(self.db_limit, self.pool.acquire()).await?;
                 let holder = self.fence.holder().to_string();
-                let write =
-                    queue::write(&mut conn, &holder, (call, queued.started_at), &text, &model);
+                let write = queue::write(
+                    &mut conn,
+                    &holder,
+                    (call, queued.started_at),
+                    &queued.rel_path,
+                    &text,
+                    &model,
+                );
                 return match tokio::time::timeout(self.db_limit, write).await {
                     Ok(Ok(Written::CallGone)) => Ok(Outcome::Gone(call)),
                     Ok(Ok(written)) => Ok(Outcome::Written(call, written)),

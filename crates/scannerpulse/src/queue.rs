@@ -75,28 +75,40 @@ pub enum Written {
     KeptHuman,
     /// The call was deleted (a purge) while its request was in flight.
     CallGone,
+    /// The call's file changed while its request was in flight (a longer
+    /// copy replaced its recording, or a correction renamed it): nothing is
+    /// written, and the call waits to be transcribed from its file.
+    Moved,
 }
 
-/// Writes the machine's `text` for `call` and takes the call out of the
-/// queue, in one fenced transaction. A transcript that a person wrote is
-/// never replaced. Announces the transcript on `scannerpulse_transcripts`.
+/// Writes the machine's `text` for `call`, heard in its file `rel_path`, and
+/// takes the call out of the queue, in one fenced transaction. A transcript
+/// that a person wrote is never replaced. Announces the transcript on
+/// `scannerpulse_transcripts`.
 pub async fn write(
     conn: &mut PgConnection,
     holder: &str,
     call: (i64, DateTime<Utc>),
+    rel_path: &str,
     text: &str,
     model: &str,
 ) -> Result<Written, RecordError> {
     let mut tx = store::fenced(conn, holder).await?;
     // A person's save takes this lock first, so the two are taken in turn.
-    let here = sqlx::query("SELECT 1 FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE")
-        .bind(call.0)
-        .bind(call.1)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if here.is_none() {
+    let here: Option<String> = sqlx::query_scalar(
+        "SELECT rel_path FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE",
+    )
+    .bind(call.0)
+    .bind(call.1)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(file) = here else {
         tx.rollback().await?;
         return Ok(Written::CallGone);
+    };
+    if file != rel_path {
+        tx.rollback().await?;
+        return Ok(Written::Moved);
     }
     let origin: Option<String> = sqlx::query_scalar(
         "SELECT origin FROM transcripts WHERE call_id = $1 AND started_at = $2 FOR UPDATE",

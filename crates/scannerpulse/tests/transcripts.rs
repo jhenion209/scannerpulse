@@ -42,9 +42,16 @@ async fn a_correction_keeps_the_machine_s_first_output_beside_it(pool: PgPool) -
     common::hold_lease(&pool, HOLDER).await;
     let call = call(&pool).await;
     let mut conn = pool.acquire().await?;
-    queue::write(&mut conn, HOLDER, call, "Engine five on seen", "model-x")
-        .await
-        .unwrap();
+    queue::write(
+        &mut conn,
+        HOLDER,
+        call,
+        "a.mp3",
+        "Engine five on seen",
+        "model-x",
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO transcription_queue (call_id, started_at, queued_at, next_try_at, state) \
          VALUES ($1, $2, now(), now(), 'failed')",
@@ -98,9 +105,16 @@ async fn a_correction_keeps_the_machine_s_first_output_beside_it(pool: PgPool) -
     .bind(call.1)
     .execute(&pool)
     .await?;
-    let written = queue::write(&mut conn, HOLDER, call, "something else", "model-x")
-        .await
-        .unwrap();
+    let written = queue::write(
+        &mut conn,
+        HOLDER,
+        call,
+        "a.mp3",
+        "something else",
+        "model-x",
+    )
+    .await
+    .unwrap();
     assert_eq!(written, Written::KeptHuman);
     assert_eq!(transcript(&pool).await.0, "Engine 5 on scene, command.");
     Ok(())

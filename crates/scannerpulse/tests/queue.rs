@@ -16,6 +16,11 @@ fn utc(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text).unwrap().to_utc()
 }
 
+/// The file of a call made by `queued_call`.
+fn file(call: (i64, DateTime<Utc>)) -> String {
+    format!("{}.mp3", call.1.format("%Y-%m-%dT%H:%M:%SZ"))
+}
+
 async fn places(pool: &PgPool) -> (i16, i16) {
     let (location, source) = common::seed_places(pool, Path::new("/arch"), Path::new("/in")).await;
     (location, source)
@@ -129,6 +134,7 @@ async fn the_machine_s_text_is_written_and_announced(pool: PgPool) -> sqlx::Resu
         &mut conn,
         HOLDER,
         call,
+        &file(call),
         "  Engine 5 responding. ",
         "model-x",
     )
@@ -163,7 +169,7 @@ async fn empty_text_is_no_speech(pool: PgPool) -> sqlx::Result<()> {
     let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;
     let mut conn = pool.acquire().await?;
     assert_eq!(
-        queue::write(&mut conn, HOLDER, call, "   ", "model-x")
+        queue::write(&mut conn, HOLDER, call, &file(call), "   ", "model-x")
             .await
             .unwrap(),
         Written::NoSpeech
@@ -191,13 +197,46 @@ async fn a_person_s_text_is_never_replaced(pool: PgPool) -> sqlx::Result<()> {
     .execute(&pool)
     .await?;
     let mut conn = pool.acquire().await?;
-    let written = queue::write(&mut conn, HOLDER, call, "Engine five on seen", "model-x").await;
+    let written = queue::write(
+        &mut conn,
+        HOLDER,
+        call,
+        &file(call),
+        "Engine five on seen",
+        "model-x",
+    )
+    .await;
     assert_eq!(written.unwrap(), Written::KeptHuman);
     let text: String = sqlx::query_scalar("SELECT text FROM transcripts")
         .fetch_one(&pool)
         .await?;
     assert_eq!(text, "Engine 5 on scene.");
     assert_eq!(row(&pool, call).await, None);
+    Ok(())
+}
+
+// A longer copy replaced the call's recording while the old one was being
+// transcribed: the old text is not written, and the call waits for the new.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_transcript_of_a_file_the_call_no_longer_has_is_not_written(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    common::hold_lease(&pool, HOLDER).await;
+    let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;
+    sqlx::query("UPDATE calls SET rel_path = 'longer.mp3' WHERE id = $1")
+        .bind(call.0)
+        .execute(&pool)
+        .await?;
+    let mut conn = pool.acquire().await?;
+    let written = queue::write(&mut conn, HOLDER, call, &file(call), "Engine 5", "model-x").await;
+    assert_eq!(written.unwrap(), Written::Moved);
+    let (transcripts, queued, state): (i64, i64, String) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM transcripts), (SELECT count(*) FROM transcription_queue), \
+                (SELECT transcript_state FROM calls)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((transcripts, queued, state.as_str()), (0, 1, "untried"));
     Ok(())
 }
 
@@ -210,7 +249,7 @@ async fn a_transcript_for_a_deleted_call_is_dropped_quietly(pool: PgPool) -> sql
         .execute(&pool)
         .await?;
     let mut conn = pool.acquire().await?;
-    let written = queue::write(&mut conn, HOLDER, call, "Engine 5", "model-x").await;
+    let written = queue::write(&mut conn, HOLDER, call, &file(call), "Engine 5", "model-x").await;
     assert_eq!(written.unwrap(), Written::CallGone);
     Ok(())
 }
@@ -220,7 +259,7 @@ async fn without_the_lease_nothing_is_written(pool: PgPool) -> sqlx::Result<()> 
     common::hold_lease(&pool, "host-b 200-1900000000").await;
     let call = queued_call(&pool, "2031-01-15T18:00:00Z").await;
     let mut conn = pool.acquire().await?;
-    let written = queue::write(&mut conn, HOLDER, call, "Engine 5", "model-x").await;
+    let written = queue::write(&mut conn, HOLDER, call, &file(call), "Engine 5", "model-x").await;
     assert!(matches!(written, Err(RecordError::LeaseLost)));
     let counted = queue::count_failure(&mut conn, HOLDER, &as_queued(call, 0), "400").await;
     assert!(matches!(counted, Err(RecordError::LeaseLost)));
@@ -393,7 +432,15 @@ async fn a_person_s_save_in_progress_is_waited_for_and_kept(pool: PgPool) -> sql
         let pool = pool.clone();
         tokio::spawn(async move {
             let mut conn = pool.acquire().await.unwrap();
-            queue::write(&mut conn, HOLDER, call, "machine text", "model-x").await
+            queue::write(
+                &mut conn,
+                HOLDER,
+                call,
+                &file(call),
+                "machine text",
+                "model-x",
+            )
+            .await
         })
     };
     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -275,7 +275,10 @@ impl Heard {
             T::Retry { .. } => self.retry += 1,
             T::Failed { .. } => self.failed += 1,
             T::ServerDown { .. } => self.server_failures += 1,
-            T::LeaseLost(_) | T::Gone(_) | T::Written(_, Written::CallGone) => {}
+            T::LeaseLost(_)
+            | T::Gone(_)
+            | T::Written(_, Written::CallGone)
+            | T::Written(_, Written::Moved) => {}
         }
     }
 
