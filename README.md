@@ -377,7 +377,36 @@ rejected file stays on the Status area. `recorder pause`, `watch`, `ask` and
 `remove` change one: a removed recorder's files stay in its folder, its
 calls in the archive, and its name stays taken. The Recorders area shows each
 recorder's files of the day and names any ScannerPulse machine that cannot
-read its folder; `recorder list` prints the same.
+read its folder; `recorder list` prints the same. `recorder preview NAME`
+(Preview) reads up to 50 files spread over a recorder's folder and says, for
+each, what filing would do with it (filed, under a new talkgroup, with a name
+to approve, staged, or rejected and why), with the counts first. It changes
+nothing: it is the test of a new recorder.
+
+**Names wait for approval.** A file that names a known talkgroup otherwise
+is filed under the talkgroup, which keeps its name; the other name is a
+proposal, listed under Waiting for you on the Recorders area and by
+`scannerpulse names list`, with the recorders that sent it, its calls, and
+when it was first and last seen. `names approve SYSTEM/NUMBER NAME` renames
+the talkgroup as `talkgroup rename` does; `names dismiss SYSTEM/NUMBER NAME`
+ignores that spelling from then on. The archive keeps each file as its
+recorder sent it, so the talkgroup is listed by `talkgroups uncorrected`
+until `talkgroup correct` runs. SDRTrunk's placeholder (`Unidentified…`) is
+never proposed, and a real name replaces it at once; a talkgroup number never
+seen before is added at once with the file's name.
+
+**Unknown systems wait in staging.** A file whose system name no system has
+is moved off the recorder's share into the archive's staging folder,
+`<archive>/.scannerpulse-staging/<recorder id>/`, with its time kept, until
+you decide. `staging list` (Waiting for you) lists each name with its files,
+its recorders, when it was first and last seen, and some of its talkgroups.
+`staging new-system NAME` makes it a new system. `staging map NAME SYSTEM`
+makes it another spelling of SYSTEM for good: its files, and every later one,
+are filed under SYSTEM, and `talkgroup correct` rewrites the system name in
+their tags. `staging discard NAME [--confirm NAME]` deletes its staged files
+once the name is typed. A decided name's files are filed within a few
+seconds, as if they had just arrived. On a database with no system yet, the
+first system name is added at once.
 
 ## Commands
 
@@ -393,8 +422,14 @@ already set in the environment wins. So far:
   `web` reads the same to show them on the admin page (whether a push
   address is set, never the address).
 - `db-update` creates or updates the database schema.
-- `recorder list|add|watch|ask|pause|bring-in|remove` (and
-  `/api/admin/recorders`) are described under Install, "More recorders".
+- `recorder list|add|watch|ask|pause|bring-in|remove|preview` (and
+  `/api/admin/recorders`, `GET /api/admin/recorders/<id>/preview`),
+  `names list|approve|dismiss` and `staging list|new-system|map|discard`
+  are described under Install, "More recorders". `GET /api/admin/names`
+  lists what waits (`unknown`, `proposals`, their count `waiting`, and the
+  `systems`); `POST /api/admin/names/approve` and `dismiss` take
+  `talkgroup_id` and `name`; `POST /api/admin/staging/new-system`, `map`
+  and `discard` take `system`, with `to` (map) or `confirm` (discard).
 - `db promote`, `db rejoin` and `db switchover`, as root, change the two
   database machines' roles (above); `node serve`, `node status` and `node
   backup` are a database machine's (or the referee's) own, and `join info`
@@ -613,20 +648,23 @@ already set in the environment wins. So far:
   /api/admin/talkgroups/<id>/rename`, `name`) renames a talkgroup: every
   call shows the new name at once. A name another talkgroup of the system
   has is refused (merge into that one instead), and so is a name with a
-  double quote or a control character. The recorder's name wins: a
-  talkgroup it still sends takes that name back with its next call. The
+  double quote or a control character. The rename lasts: a recorder that
+  still sends another name makes it a proposal (`names list`). The
   archive's folders, file names and tags keep the old name until an
   administrator starts their correction, so a talkgroup with calls is
   listed by `talkgroups uncorrected` (and `/api/admin/data/uncorrected`),
-  with the old name its files carry. A rename that ingest sees in the
-  recorder's files lists the talkgroup the same way.
+  with the old name its files carry. A file filed under a talkgroup whose
+  name it spells otherwise, or through a mapped system name, lists the
+  talkgroup the same way.
 - `talkgroup correct SYSTEM/NUMBER [--confirm NAME]` (and `GET`, then
   `POST /api/admin/talkgroups/<id>/correct` with `confirm`) shows how many
   files carry an old name and, once the talkgroup's name is typed exactly,
   starts a job that corrects them: each file is written into
   `<day>/<number>-<name>/`, with the talkgroup token of its file name and
-  its ID3 title rewritten, read back and checked with the reader's own
-  rules, and keeps its modification time; its call then names it, and the
+  its ID3 title rewritten (and, for a call filed through a mapped system
+  name, the system name in its tag, in place when its folder is right),
+  read back and checked with the reader's own rules, and keeps its
+  modification time; its call then names it, and the
   old file is removed by the next step, after that is committed. A file
   whose talkgroup the rewrite cannot carry (a patch's title, or a name with
   `/` or `_` in a file name without a title) is refused and stays; files in

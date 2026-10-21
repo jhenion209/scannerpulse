@@ -100,8 +100,8 @@ pub fn name_problem(name: &str) -> Option<String> {
 
 /// Renames a talkgroup. Its calls show the new name at once; their files keep
 /// the old one, remembered in `files_name`, until an administrator starts the
-/// correction. A talkgroup the recorder still sends takes the recorder's name
-/// back with its next call.
+/// correction. The rename lasts: a recorder that still sends another name
+/// makes it a proposal (`names`).
 pub async fn rename(conn: &mut sqlx::PgConnection, id: i32, name: &str) -> sqlx::Result<Renamed> {
     use sqlx::Connection;
     let mut tx = conn.begin().await?;
