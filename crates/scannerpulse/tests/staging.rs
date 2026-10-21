@@ -238,3 +238,26 @@ async fn an_installs_first_system_is_taken_at_once(pool: PgPool) {
     assert!(!path.exists());
     assert_eq!(site.filed_under().await.0, "SYSB");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_removed_recorders_staged_files_are_filed_once_their_system_is_decided(pool: PgPool) {
+    let site = Site::new(pool, true).await;
+    site.arrive().await;
+    site.pass().await;
+    let mut conn = site.pool.acquire().await.unwrap();
+    scannerpulse::recorders::change(
+        &mut conn,
+        site.source_id,
+        scannerpulse::recorders::Change::Remove,
+    )
+    .await
+    .unwrap();
+    names::new_system(&mut conn, "SYSB").await.unwrap();
+    assert!(matches!(site.pass().await[..], [Outcome::Filed(..)]));
+    assert!(!site.staged().exists());
+    let credited: i16 = sqlx::query_scalar("SELECT source_id FROM calls")
+        .fetch_one(&site.pool)
+        .await
+        .unwrap();
+    assert_eq!(credited, site.source_id, "credited to its recorder");
+}

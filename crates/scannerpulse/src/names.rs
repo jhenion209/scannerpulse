@@ -224,7 +224,9 @@ pub async fn discard(conn: &mut PgConnection, name: &str, confirm: &str) -> Resu
     let mut discarded = 0;
     for (id, source_id, rel_path) in files {
         let path = crate::archive::staging_path(&archive.root, source_id, &rel_path);
-        match std::fs::remove_file(&path) {
+        // On the blocking pool, as the web's other archive reads: never on a
+        // runtime worker.
+        match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
