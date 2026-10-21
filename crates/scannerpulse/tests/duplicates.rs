@@ -364,6 +364,55 @@ async fn two_transmissions_in_a_row_from_two_recorders_stay_two_calls(
     Ok(())
 }
 
+// The files one listing finds share their first sight. They are filed in the
+// order of their names, which is time order, whatever the listing's order:
+// a recorder's earlier copy then finds its call first.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorders_files_found_together_are_filed_in_time_order(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    // One radio keys up twice: 12:00:00 for 2988 ms, then 12:00:03 for 2016 ms.
+    site.arrive(site.north_id, &bravo("120000", 83, 4021)).await;
+    let done = site.pass().await;
+    let [Outcome::Filed(first, _)] = done[..] else {
+        panic!("{done:?}")
+    };
+    // South heard both, the first a frame longer; one listing finds the two,
+    // the later first. North's second is found after.
+    let (a, b) = (bravo("120000", 84, 4021), bravo("120003", 55, 4021));
+    let listed: Vec<Seen> = [&b, &a]
+        .into_iter()
+        .map(|file| {
+            let path = site.south.path().join(&file.0);
+            fs::write(&path, &file.1).unwrap();
+            let meta = fs::metadata(&path).unwrap();
+            Seen {
+                rel_path: file.0.clone(),
+                size: meta.len() as i64,
+                file_mtime: meta.modified().unwrap().into(),
+            }
+        })
+        .collect();
+    store::upsert_seen(&site.pool, site.south_id, &listed)
+        .await
+        .unwrap();
+    site.arrive(site.north_id, &bravo("120003", 56, 4021)).await;
+
+    let done = site.pass().await;
+    assert!(
+        matches!(done[..], [Outcome::Replaced(id), Outcome::Filed(..), Outcome::Replaced(_)] if id == first),
+        "{done:?}"
+    );
+    let starts: Vec<DateTime<Utc>> = site.calls().await.iter().map(|call| call.1).collect();
+    assert_eq!(starts.len(), 2);
+    assert_ne!(
+        starts[0], starts[1],
+        "both calls hold the first transmission"
+    );
+    Ok(())
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn a_recorders_own_calls_are_never_its_copies(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;

@@ -255,7 +255,9 @@ pub struct Waiting {
 /// Waiting files, oldest first, leaving out the ids in `skip` and the files
 /// of removed recorders; with them the staged files whose system name the
 /// administrator has since given (a system's or a mapped spelling), a removed
-/// recorder's too, since they are already in the archive.
+/// recorder's too, since they are already in the archive. The files one
+/// listing found together come in the order of their names, which begin
+/// with their start: a recorder's earlier copy of a call is matched first.
 pub async fn waiting(
     db: impl PgExecutor<'_>,
     limit: i64,
@@ -273,7 +275,7 @@ pub async fn waiting(
                 AND (EXISTS (SELECT 1 FROM systems y WHERE y.name = f.staged_system) \
                      OR EXISTS (SELECT 1 FROM system_spellings y WHERE y.name = f.staged_system)))) \
            AND (s.removed_at IS NULL OR f.state = 'staged') AND f.id <> ALL($2) \
-         ORDER BY f.first_seen, f.id LIMIT $1",
+         ORDER BY f.first_seen, regexp_replace(f.rel_path, '^.*/', ''), f.id LIMIT $1",
     )
     .bind(limit)
     .bind(skip)
