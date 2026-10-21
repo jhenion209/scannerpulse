@@ -67,12 +67,18 @@ async fn an_approved_name_renames_and_the_old_one_is_not_proposed_back(pool: PgP
     names::approve(&mut conn, seven, "Group Seven")
         .await
         .unwrap();
-    let name: String = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
-        .bind(seven)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let (name, files_name): (String, Option<String>) =
+        sqlx::query_as("SELECT name, files_name FROM talkgroups WHERE id = $1")
+            .bind(seven)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(name, "Group Seven");
+    assert_eq!(
+        files_name.as_deref(),
+        Some("Group 7"),
+        "the files left to correct carry the old name, not the one approved"
+    );
     assert!(names::proposals(&mut conn).await.unwrap().is_empty());
     // A recorder not yet updated still sends the old name: dismissed already.
     send(&pool, "Group 7", &[2]).await;

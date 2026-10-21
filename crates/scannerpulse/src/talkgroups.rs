@@ -137,7 +137,9 @@ pub async fn rename(conn: &mut sqlx::PgConnection, id: i32, name: &str) -> sqlx:
     let files_correct: bool = sqlx::query_scalar(
         "UPDATE talkgroups SET name = $2, \
            files_name = CASE WHEN files_correct AND EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) THEN $3
-                             WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
+                             WHEN coalesce(files_name, '') = '' THEN $3
+                             -- Renamed to the name some files carry: the others carry the old one.
+                             WHEN files_name = $2 THEN $3 ELSE files_name END, \
            files_correct = files_correct AND NOT EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) \
          WHERE id = $1 RETURNING files_correct",
     )
