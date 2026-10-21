@@ -241,8 +241,8 @@
 
   <h2>Rename</h2>
   <p>
-    Calls show the new name at once; their files keep the old one until they are corrected. A talkgroup the
-    recorder still sends takes the recorder's name back with its next call.
+    Calls show the new name at once; their files keep the old one until they are corrected. A recorder that still
+    sends another name for it makes that name a proposal, under Recorders.
   </p>
   <form class="grid" onsubmit={rename}>
     <label for="rename-talkgroup">Talkgroup to rename</label>

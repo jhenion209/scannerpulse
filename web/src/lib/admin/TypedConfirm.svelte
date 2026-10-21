@@ -25,5 +25,6 @@
 </div>
 
 <style>
-  .confirm { display: grid; gap: 0.3rem; margin: 0.5rem 0; }
+  .confirm { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.3rem; margin: 0.5rem 0; }
+  label { overflow-wrap: anywhere; }
 </style>

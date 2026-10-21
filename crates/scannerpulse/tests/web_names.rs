@@ -91,6 +91,11 @@ async fn an_admin_decides_unknown_system_names(pool: PgPool) {
     let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
     let listed = send(&app, "GET", "/api/admin/names", &h, None).await;
     assert_eq!(listed.body["waiting"], 3);
+    assert_eq!(
+        listed.body["systems"],
+        json!(["SYSA"]),
+        "the systems a name may be the same as"
+    );
     assert_eq!(listed.body["unknown"][0]["system"], "SYSB");
     assert_eq!(listed.body["unknown"][0]["recorders"], json!(["live"]));
 

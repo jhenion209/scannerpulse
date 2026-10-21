@@ -24,6 +24,7 @@
   import TranscriptionArea from './lib/admin/TranscriptionArea.svelte';
   import UpdatesArea from './lib/admin/UpdatesArea.svelte';
   import ViewersArea from './lib/admin/ViewersArea.svelte';
+  import { followWaiting, waiting } from './lib/admin/waiting.svelte';
 
   // Each area of the side menu, by its id.
   const PAGES: Record<AreaId, Component> = { status: StatusArea, layout: LayoutArea, updates: UpdatesArea, machine: MachineArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, data: DataArea, recorders: RecordersArea, accounts: AccountsArea, settings: SettingsArea,
@@ -53,6 +54,11 @@
     if (session.login) return followJobs();
   });
   const running = $derived(jobs.list ? activeCount(jobs.list) : 0);
+  // And what waits for a decision, for the Recorders badge.
+  $effect(() => {
+    if (session.login) return followWaiting();
+  });
+  const decisions = $derived(waiting.data?.waiting ?? 0);
 
   async function check() {
     problem = null;
@@ -97,9 +103,9 @@
     </header>
     <nav id="areas" class="side" aria-label="Admin areas">
       {#each AREAS as item (item.id)}
-        {@const count = item.id === 'jobs' ? running : 0}
+        {@const count = item.id === 'jobs' ? running : item.id === 'recorders' ? decisions : 0}
         <a href={`#${item.id}`} aria-current={area === item.id ? 'page' : undefined}
-          aria-label={count ? `${item.label}, ${count} under way` : undefined}
+          aria-label={count ? `${item.label}, ${count} ${item.id === 'jobs' ? 'under way' : 'waiting for you'}` : undefined}
           onclick={() => (menuOpen = false)}>
           {item.label}{#if count}<span class="badge" aria-hidden="true">{count}</span>{/if}
         </a>

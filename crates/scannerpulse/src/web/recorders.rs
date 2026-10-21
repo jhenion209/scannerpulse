@@ -135,15 +135,20 @@ pub async fn preview(
 }
 
 /// `GET /api/admin/names`: what waits for a decision, unknown system names
-/// and talkgroup name proposals, and how many decisions that is.
+/// and talkgroup name proposals, how many decisions that is, and the systems
+/// an unknown name may be the same as.
 pub async fn waiting(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut conn = state.pool.acquire().await?;
     let unknown = names::unknown_systems(&mut conn).await?;
     let proposals = names::proposals(&mut conn).await?;
+    let systems: Vec<String> = sqlx::query_scalar("SELECT name FROM systems ORDER BY name")
+        .fetch_all(&mut *conn)
+        .await?;
     Ok(Json(json!({
         "waiting": unknown.len() + proposals.len(),
         "unknown": unknown,
         "proposals": proposals,
+        "systems": systems,
     })))
 }
 
