@@ -26,6 +26,7 @@ pub mod localtime;
 pub mod log;
 pub mod mp3;
 pub mod names;
+pub mod preview;
 pub mod primary;
 pub mod queue;
 pub mod reader;

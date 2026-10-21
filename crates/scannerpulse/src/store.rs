@@ -412,14 +412,7 @@ pub async fn system_id(conn: &mut PgConnection, name: &str) -> sqlx::Result<i32>
 /// mapped to it rather than its own name; a system is added when the name is
 /// new. Filing stages a file of an unknown system first ([`system_known`]).
 pub async fn resolve_system(conn: &mut PgConnection, name: &str) -> sqlx::Result<(i32, bool)> {
-    let found: Option<(i32, bool)> = sqlx::query_as(
-        "SELECT id, false FROM systems WHERE name = $1 \
-         UNION ALL SELECT system_id, true FROM system_spellings WHERE name = $1 LIMIT 1",
-    )
-    .bind(name)
-    .fetch_optional(&mut *conn)
-    .await?;
-    match found {
+    match find_system(&mut *conn, name).await? {
         Some(found) => Ok(found),
         None => sqlx::query_scalar("INSERT INTO systems (name) VALUES ($1) RETURNING id")
             .bind(name)
@@ -427,6 +420,18 @@ pub async fn resolve_system(conn: &mut PgConnection, name: &str) -> sqlx::Result
             .await
             .map(|id| (id, false)),
     }
+}
+
+/// The id of the system named `name`, and whether the name is a spelling
+/// mapped to it; `None` when no system has it.
+pub async fn find_system(db: impl PgExecutor<'_>, name: &str) -> sqlx::Result<Option<(i32, bool)>> {
+    sqlx::query_as(
+        "SELECT id, false FROM systems WHERE name = $1 \
+         UNION ALL SELECT system_id, true FROM system_spellings WHERE name = $1 LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(db)
+    .await
 }
 
 /// Whether a file naming the system `name` may be filed: the name is a
