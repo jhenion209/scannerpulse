@@ -377,7 +377,7 @@ impl Filer {
         let target = archive::staging_path(&self.location.root, row.source_id, &row.rel_path);
         let digest = archive::sha256(data);
         let copied = archive::write_part(&target, data, &digest)
-            .and_then(|()| fs::rename(archive::part_path(&target), &target))
+            .and_then(|()| archive::replace_with_part(&target))
             .and_then(|()| {
                 let mtime: std::time::SystemTime = call.file_mtime.into();
                 fs::File::options()
