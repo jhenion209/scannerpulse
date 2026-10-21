@@ -126,6 +126,16 @@ pub fn place(
     }
 }
 
+/// The archive's folder for the files of a system no one has named yet.
+pub const STAGING: &str = ".scannerpulse-staging";
+
+/// Where a staged file waits: `<archive>/.scannerpulse-staging/<source id>/<path in its recorder's folder>`.
+pub fn staging_path(root: &Path, source_id: i16, rel_path: &str) -> PathBuf {
+    root.join(STAGING)
+        .join(source_id.to_string())
+        .join(rel_path)
+}
+
 /// Step 1 of filing: writes `data` to the part file of `path`, flushes it to
 /// disk, reads it back and compares its size and SHA-256 with `digest`.
 pub fn write_part(path: &Path, data: &[u8], digest: &Digest32) -> io::Result<()> {

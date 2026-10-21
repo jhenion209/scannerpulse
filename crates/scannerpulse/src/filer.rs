@@ -51,8 +51,10 @@ pub enum Outcome {
     Filed(i64, TimeHow),
     /// Its archive copy had been recorded as this call already.
     AlreadyFiled(i64),
-    /// It cannot be filed, for this reason; it stays where it is.
+    /// It cannot be filed, for this reason; it is deleted.
     Rejected(String),
+    /// Its system, of this name, is unknown: it waits in the staging folder.
+    Staged(String),
     /// Not filed this time: it stays waiting and is tried again after `retry`.
     Later { why: String, retry: Duration },
     /// The lease was lost; nothing more is written.
@@ -178,30 +180,36 @@ impl Filer {
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost);
         }
-        let path = Path::new(&row.source_path).join(&row.rel_path);
+        let (folder, path) = self.place_of(row);
         // In a thread of its own, as is the deletion: a recorder's share that
         // stopped answering holds up no other recorder's files (a read on
         // the runtime's worker would hold every task).
         let (read, zone, file) = (self.read, self.zone, path.clone());
         let job: watcher::Job<Result<(FileCall, Vec<u8>), ReadError>> =
             Box::new(move || Ok(read(&file, zone)));
-        let folder = PathBuf::from(&row.source_path);
-        let answered = watcher::run_bounded(vec![(folder, job)], &mut self.hung, self.folder_limit)
-            .await
-            .pop()
-            .unwrap_or_else(|| Err(io::Error::other("the read was not run")));
+        let answered = watcher::run_bounded(
+            vec![(folder.clone(), job)],
+            &mut self.hung,
+            self.folder_limit,
+        )
+        .await
+        .pop()
+        .unwrap_or_else(|| Err(io::Error::other("the read was not run")));
         let read = match answered {
             Ok(read) => read,
             Err(error) => {
                 return Ok(later(format!(
                     "{}: its folder {} {error}",
-                    row.rel_path, row.source_path
+                    row.rel_path,
+                    folder.display()
                 )));
             }
         };
         let (call, data) = match read {
             Ok(read) => read,
-            Err(ReadError::Rejected(why)) => return self.reject_file(row, &path, why).await,
+            Err(ReadError::Rejected(why)) => {
+                return self.reject_file(row, &folder, &path, why).await;
+            }
             Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
                 return self.missing(row).await;
             }
@@ -209,6 +217,12 @@ impl Filer {
                 return Ok(later(format!("cannot read {}: {error}", path.display())));
             }
         };
+        if !row.staged
+            && let Some(system) = call.described.system.as_deref()
+            && !limited(self.db_limit, store::system_known(&self.pool, system)).await?
+        {
+            return self.stage(row, &folder, &path, &data, &call).await;
+        }
         let name = file_name(&row.rel_path);
         let talkgroup = call
             .described
@@ -218,7 +232,7 @@ impl Filer {
         let rel =
             match archive::rel_path(call.local_start.date(), &archive::folder(talkgroup), name) {
                 Ok(rel) => rel,
-                Err(why) => return self.reject_file(row, &path, why).await,
+                Err(why) => return self.reject_file(row, &folder, &path, why).await,
             };
         let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
         let digest = archive::sha256(&data);
@@ -242,8 +256,7 @@ impl Filer {
                     }
                     limited(self.db_limit, store::mark_done(&self.pool, row.id, found)).await?;
                     if self.fence.held() {
-                        self.delete_source(&row.source_path, &path, &data, &call)
-                            .await;
+                        self.delete_source(&folder, &path, &data, &call).await;
                     }
                     return Ok(Outcome::AlreadyFiled(found.0));
                 }
@@ -274,8 +287,7 @@ impl Filer {
         };
         drop(writing);
         if self.fence.held() {
-            self.delete_source(&row.source_path, &path, &data, &call)
-                .await;
+            self.delete_source(&folder, &path, &data, &call).await;
         }
         note_time(&row.rel_path, &call);
         Ok(Outcome::Filed(id, call.time_how))
@@ -333,6 +345,70 @@ impl Filer {
         }
     }
 
+    /// The folder and path of a waiting file: in its recorder's folder, or in
+    /// the archive's staging folder once staged.
+    fn place_of(&self, row: &Waiting) -> (PathBuf, PathBuf) {
+        if row.staged {
+            let path = archive::staging_path(&self.location.root, row.source_id, &row.rel_path);
+            (self.location.root.join(archive::STAGING), path)
+        } else {
+            let folder = PathBuf::from(&row.source_path);
+            let path = folder.join(&row.rel_path);
+            (folder, path)
+        }
+    }
+
+    /// A file of a system no one has named yet: copied into the archive's
+    /// staging folder and checked, with its modification time kept, then
+    /// recorded as staged, then deleted from its recorder's folder. It waits
+    /// there until the administrator names its system.
+    async fn stage(
+        &mut self,
+        row: &Waiting,
+        folder: &Path,
+        path: &Path,
+        data: &[u8],
+        call: &FileCall,
+    ) -> sqlx::Result<Outcome> {
+        let system = call.described.system.clone().unwrap_or_default();
+        if !self.fence.held() {
+            return Ok(Outcome::LeaseLost);
+        }
+        let target = archive::staging_path(&self.location.root, row.source_id, &row.rel_path);
+        let digest = archive::sha256(data);
+        let copied = archive::write_part(&target, data, &digest)
+            .and_then(|()| fs::rename(archive::part_path(&target), &target))
+            .and_then(|()| {
+                let mtime: std::time::SystemTime = call.file_mtime.into();
+                fs::File::options()
+                    .write(true)
+                    .open(&target)
+                    .and_then(|file| file.set_modified(mtime))
+            });
+        if let Err(error) = copied {
+            return Ok(later(format!(
+                "cannot copy it into the staging folder: {error}"
+            )));
+        }
+        if !self.fence.held() {
+            return Ok(Outcome::LeaseLost);
+        }
+        let talkgroup = call
+            .described
+            .talkgroup
+            .as_ref()
+            .map(|tg| format!("{} {}", tg.number, tg.name));
+        limited(
+            self.db_limit,
+            store::stage(&self.pool, row.id, &system, talkgroup.as_deref()),
+        )
+        .await?;
+        if self.fence.held() {
+            self.delete_source(folder, path, data, call).await;
+        }
+        Ok(Outcome::Staged(system))
+    }
+
     /// A file that cannot be filed: deleted from its recorder's folder, since
     /// nothing may stay there, then recorded as rejected with the reason. A
     /// file that changed since the watcher saw it stays, to be read again.
@@ -341,6 +417,7 @@ impl Filer {
     async fn reject_file(
         &mut self,
         row: &Waiting,
+        folder: &Path,
         path: &Path,
         why: String,
     ) -> sqlx::Result<Outcome> {
@@ -348,10 +425,7 @@ impl Filer {
             return Ok(Outcome::LeaseLost);
         }
         let unchanged = match (row.size.and_then(|n| u64::try_from(n).ok()), row.file_mtime) {
-            (Some(size), Some(mtime)) => {
-                self.remove_bounded(&row.source_path, path, size, mtime)
-                    .await
-            }
+            (Some(size), Some(mtime)) => self.remove_bounded(folder, path, size, mtime).await,
             _ => Ok(false),
         };
         match unchanged {
@@ -476,7 +550,7 @@ impl Filer {
     /// false when it changed.
     async fn remove_bounded(
         &mut self,
-        folder: &str,
+        folder: &Path,
         path: &Path,
         size: u64,
         mtime: DateTime<Utc>,
@@ -484,7 +558,7 @@ impl Filer {
         let file = path.to_path_buf();
         let job: watcher::Job<bool> = Box::new(move || remove_if_unchanged(&file, size, mtime));
         watcher::run_bounded(
-            vec![(PathBuf::from(folder), job)],
+            vec![(folder.to_path_buf(), job)],
             &mut self.hung,
             self.folder_limit,
         )
@@ -496,7 +570,7 @@ impl Filer {
     /// Step 4. Leaves the file when it changed since it was read: it is then
     /// read again as a new file. A folder that does not answer keeps it: a
     /// later rescan finds it filed.
-    async fn delete_source(&mut self, folder: &str, path: &Path, data: &[u8], call: &FileCall) {
+    async fn delete_source(&mut self, folder: &Path, path: &Path, data: &[u8], call: &FileCall) {
         match self
             .remove_bounded(folder, path, data.len() as u64, call.file_mtime)
             .await

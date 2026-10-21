@@ -202,11 +202,13 @@ pub async fn upsert_seen(
          WHERE EXISTS (SELECT 1 FROM sources s WHERE s.id = $1 AND s.removed_at IS NULL) \
          ON CONFLICT (source_id, rel_path) DO UPDATE SET \
              seen_at = now(), size = EXCLUDED.size, file_mtime = EXCLUDED.file_mtime, \
-             state = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
+             state = CASE WHEN f.state = 'staged' THEN 'staged' \
+                          WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
                            AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                            AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
                           THEN 'rejected' ELSE 'waiting' END, \
-             reason = CASE WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
+             reason = CASE WHEN f.state = 'staged' THEN f.reason \
+                           WHEN f.state = 'rejected' AND coalesce(f.reason, '') NOT LIKE $5 || '%' \
                             AND f.size IS NOT DISTINCT FROM EXCLUDED.size \
                             AND f.file_mtime IS NOT DISTINCT FROM EXCLUDED.file_mtime \
                            THEN f.reason END",
@@ -239,10 +241,13 @@ pub struct Waiting {
     /// True when it is the very file filed as that call: the modification
     /// time stored on the row equals the call's.
     pub same_file: bool,
+    /// Its file waits in the archive's staging folder, its system now known.
+    pub staged: bool,
 }
 
 /// Waiting files, oldest first, leaving out the ids in `skip` and the files
-/// of removed recorders.
+/// of removed recorders; with them the staged files whose system name the
+/// administrator has since given (a system's or a mapped spelling).
 pub async fn waiting(
     db: impl PgExecutor<'_>,
     limit: i64,
@@ -250,12 +255,16 @@ pub async fn waiting(
 ) -> sqlx::Result<Vec<Waiting>> {
     sqlx::query_as(
         "SELECT f.id, f.source_id, s.path AS source_path, f.rel_path, f.size, f.file_mtime, f.seen_at, \
-                f.call_id, f.call_started_at, c.id IS NOT NULL AS same_file \
+                f.call_id, f.call_started_at, c.id IS NOT NULL AS same_file, \
+                f.state = 'staged' AS staged \
          FROM ingest_files f \
          JOIN sources s ON s.id = f.source_id \
          LEFT JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
              AND c.file_mtime IS NOT DISTINCT FROM f.file_mtime \
-         WHERE f.state = 'waiting' AND s.removed_at IS NULL AND f.id <> ALL($2) \
+         WHERE (f.state = 'waiting' OR (f.state = 'staged' \
+                AND (EXISTS (SELECT 1 FROM systems y WHERE y.name = f.staged_system) \
+                     OR EXISTS (SELECT 1 FROM system_spellings y WHERE y.name = f.staged_system)))) \
+           AND s.removed_at IS NULL AND f.id <> ALL($2) \
          ORDER BY f.first_seen, f.id LIMIT $1",
     )
     .bind(limit)
@@ -267,10 +276,31 @@ pub async fn waiting(
 /// Marks a waiting file rejected, with the reason.
 pub async fn reject(db: impl PgExecutor<'_>, id: i64, reason: &str) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE ingest_files SET state = 'rejected', reason = $2 WHERE id = $1 AND state = 'waiting'",
+        "UPDATE ingest_files SET state = 'rejected', reason = $2 \
+         WHERE id = $1 AND state IN ('waiting', 'staged')",
     )
     .bind(id)
     .bind(reason)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Stages a waiting file of an unknown system: its copy waits in the
+/// archive's staging folder, named by its system and talkgroup for the list.
+pub async fn stage(
+    db: impl PgExecutor<'_>,
+    id: i64,
+    system: &str,
+    talkgroup: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE ingest_files SET state = 'staged', staged_system = $2, staged_talkgroup = $3, \
+         reason = NULL WHERE id = $1 AND state = 'waiting'",
+    )
+    .bind(id)
+    .bind(system)
+    .bind(talkgroup)
     .execute(db)
     .await?;
     Ok(())

@@ -118,3 +118,139 @@ pub async fn dismiss(
     }
     Ok(())
 }
+
+/// A system name files carry that no system has and no spelling maps: its
+/// files wait in the archive's staging folder.
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+pub struct Unknown {
+    pub system: String,
+    pub files: i64,
+    /// The recorders that sent its files, by name.
+    pub recorders: Vec<String>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    /// Some of its talkgroups, `<number> <name>`.
+    pub talkgroups: Vec<String>,
+}
+
+/// The most talkgroups listed for an unknown system.
+pub const SAMPLE_TALKGROUPS: i64 = 5;
+
+/// The unknown system names, oldest first.
+pub async fn unknown_systems(conn: &mut PgConnection) -> sqlx::Result<Vec<Unknown>> {
+    sqlx::query_as(
+        "SELECT f.staged_system AS system, count(*) AS files, \
+                ARRAY(SELECT DISTINCT s.name FROM ingest_files g JOIN sources s ON s.id = g.source_id \
+                      WHERE g.state = 'staged' AND g.staged_system = f.staged_system ORDER BY s.name) AS recorders, \
+                min(f.first_seen) AS first_seen, max(f.seen_at) AS last_seen, \
+                ARRAY(SELECT DISTINCT g.staged_talkgroup FROM ingest_files g \
+                      WHERE g.state = 'staged' AND g.staged_system = f.staged_system \
+                        AND g.staged_talkgroup IS NOT NULL ORDER BY g.staged_talkgroup LIMIT $1) AS talkgroups \
+         FROM ingest_files f \
+         WHERE f.state = 'staged' \
+           AND NOT EXISTS (SELECT 1 FROM systems y WHERE y.name = f.staged_system) \
+           AND NOT EXISTS (SELECT 1 FROM system_spellings y WHERE y.name = f.staged_system) \
+         GROUP BY f.staged_system ORDER BY min(f.first_seen)",
+    )
+    .bind(SAMPLE_TALKGROUPS)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+/// How many decisions wait: unknown system names and open proposals.
+pub async fn waiting_count(conn: &mut PgConnection) -> sqlx::Result<i64> {
+    Ok(unknown_systems(conn).await?.len() as i64 + proposals(conn).await?.len() as i64)
+}
+
+/// Refused unless `name` is an unknown system name that files wait for.
+async fn staged_name(conn: &mut PgConnection, name: &str) -> Result<(), Refused> {
+    if unknown_systems(conn)
+        .await?
+        .iter()
+        .any(|u| u.system == name)
+    {
+        Ok(())
+    } else {
+        Err(Refused::NoSuch(format!(
+            "no file waits for a system named {name:?}"
+        )))
+    }
+}
+
+/// Names a new system after the unknown name: its files are filed at the
+/// filer's next pass.
+pub async fn new_system(conn: &mut PgConnection, name: &str) -> Result<(), Refused> {
+    staged_name(conn, name).await?;
+    sqlx::query("INSERT INTO systems (name) VALUES ($1) ON CONFLICT (name) DO NOTHING")
+        .bind(name)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Maps the unknown name to the existing system `to` for good: its files,
+/// and every later file that names it, are filed under `to`.
+pub async fn map_system(conn: &mut PgConnection, name: &str, to: &str) -> Result<(), Refused> {
+    staged_name(conn, name).await?;
+    let target: Option<i32> = sqlx::query_scalar("SELECT id FROM systems WHERE name = $1")
+        .bind(to)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(target) = target else {
+        return Err(Refused::Refused(format!("there is no system named {to:?}")));
+    };
+    sqlx::query("INSERT INTO system_spellings (name, system_id) VALUES ($1, $2)")
+        .bind(name)
+        .bind(target)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Deletes the staged files of the unknown name, once the name is typed
+/// exactly as `confirm`; their rows say they were discarded. Returns how many
+/// were. Files already gone from the staging folder count too.
+pub async fn discard(
+    conn: &mut PgConnection,
+    name: &str,
+    confirm: &str,
+    archive: &std::path::Path,
+) -> Result<i64, Refused> {
+    staged_name(conn, name).await?;
+    if confirm != name {
+        return Err(Refused::Refused(format!(
+            "type the system's name, {name:?}, exactly to discard its files"
+        )));
+    }
+    let files: Vec<(i64, i16, String)> = sqlx::query_as(
+        "SELECT id, source_id, rel_path FROM ingest_files WHERE state = 'staged' AND staged_system = $1",
+    )
+    .bind(name)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut discarded = 0;
+    for (id, source_id, rel_path) in files {
+        let path = crate::archive::staging_path(archive, source_id, &rel_path);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Refused::Refused(format!(
+                    "{} cannot be deleted ({error}); {discarded} were",
+                    path.display()
+                )));
+            }
+        }
+        sqlx::query(
+            "UPDATE ingest_files SET state = 'rejected', \
+             reason = 'discarded: its system ' || $2 || ' was not wanted' \
+             WHERE id = $1 AND state = 'staged'",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(&mut *conn)
+        .await?;
+        discarded += 1;
+    }
+    Ok(discarded)
+}
