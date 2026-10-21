@@ -30,7 +30,7 @@ fn audio(data: &[u8]) -> &[u8] {
 fn a_quoted_title_is_rewritten_and_the_audio_kept() {
     let name = "20310115_120000SYSA_SYSA-P25_T-SYSA-North__TO_127_FROM_711351.mp3";
     let data = common::tagged(&tag(Some("127\"Alpha Fire\"")), 5);
-    let done = retag(name, &data, &tg(127, "Alpha / Fire")).unwrap();
+    let done = retag(name, &data, &tg(127, "Alpha / Fire"), None).unwrap();
     assert_eq!(done.name, name, "this name carries no talkgroup token");
     assert_eq!(
         reader::tags(&done.data).title.as_deref(),
@@ -47,7 +47,7 @@ fn a_quoted_title_is_rewritten_and_the_audio_kept() {
 fn the_name_token_is_rewritten_when_the_title_says_nothing() {
     let name = "2031-01-15_120000_127-Alpha Fire_711351-_SYSA-North_SYSA.mp3";
     let data = common::tagged(&tag(None), 3);
-    let done = retag(name, &data, &tg(127, "Alpha Fire 2")).unwrap();
+    let done = retag(name, &data, &tg(127, "Alpha Fire 2"), None).unwrap();
     assert_eq!(
         done.name,
         "2031-01-15_120000_127-Alpha Fire 2_711351-_SYSA-North_SYSA.mp3"
@@ -59,7 +59,7 @@ fn the_name_token_is_rewritten_when_the_title_says_nothing() {
 fn a_merge_changes_the_number_in_both_places() {
     let name = "2031-01-15_120000_127-Alpha_711351-_SYSA-North_SYSA.mp3";
     let data = common::tagged(&tag(Some("127\"Alpha\" (patched)")), 2);
-    let done = retag(name, &data, &tg(128, "Bravo")).unwrap();
+    let done = retag(name, &data, &tg(128, "Bravo"), None).unwrap();
     assert_eq!(
         done.name,
         "2031-01-15_120000_128-Bravo_711351-_SYSA-North_SYSA.mp3"
@@ -74,7 +74,7 @@ fn a_merge_changes_the_number_in_both_places() {
 fn every_value_after_the_first_is_kept() {
     let name = "20310115_120000.mp3";
     let data = common::tagged(&tag(Some("127\"Alpha\"\u{0}128\"Other\"")), 1);
-    let done = retag(name, &data, &tg(127, "Alpha 2")).unwrap();
+    let done = retag(name, &data, &tg(127, "Alpha 2"), None).unwrap();
     use id3::TagLike;
     let read = id3::Tag::read_from2(std::io::Cursor::new(&done.data)).unwrap();
     assert_eq!(read.title(), Some("127\"Alpha 2\"\u{0}128\"Other\""));
@@ -93,7 +93,7 @@ fn the_rest_of_what_the_reader_reads_is_kept() {
     });
     let data = common::tagged(&recorder, 2);
     let before = reader::describe(name, &reader::tags(&data));
-    let done = retag(name, &data, &tg(128, "Bravo")).unwrap();
+    let done = retag(name, &data, &tg(128, "Bravo"), None).unwrap();
     let after = reader::describe(&done.name, &reader::tags(&done.data));
     assert_eq!(after.site.as_deref(), Some("North"));
     assert_eq!(after.radio_id, Some(711351));
@@ -107,14 +107,22 @@ fn the_rest_of_what_the_reader_reads_is_kept() {
 fn a_file_whose_talkgroup_cannot_be_rewritten_is_refused() {
     // A patch's title names the talkgroup only by its first number.
     let patch = common::tagged(&tag(Some("P:127,128 \"Alpha\"")), 1);
-    assert!(retag("20310115_120000.mp3", &patch, &tg(127, "Alpha 2")).is_err());
+    assert!(retag("20310115_120000.mp3", &patch, &tg(127, "Alpha 2"), None).is_err());
     // The name token cannot hold a `_`, and there is no title to carry it.
     let name = "2031-01-15_120000_127-Alpha_711351-_SYSA-North_SYSA.mp3";
     let plain = common::tagged(&tag(None), 1);
-    let refused = retag(name, &plain, &tg(127, "Alpha_2")).unwrap_err();
+    let refused = retag(name, &plain, &tg(127, "Alpha_2"), None).unwrap_err();
     assert!(refused.contains("127"), "{refused}");
     // A file without a system names no talkgroup at all.
-    assert!(retag("20310115_120000.mp3", &common::frames(2), &tg(127, "A")).is_err());
+    assert!(
+        retag(
+            "20310115_120000.mp3",
+            &common::frames(2),
+            &tg(127, "A"),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -131,7 +139,7 @@ fn older_tags_and_an_id3v1_tag_are_kept() {
         // An ID3v1 tag at the end: "TAG" and 125 bytes.
         data.extend_from_slice(b"TAG");
         data.extend_from_slice(&[b'x'; 125]);
-        match retag("20310115_120000.mp3", &data, &tg(127, "Alpha 2")) {
+        match retag("20310115_120000.mp3", &data, &tg(127, "Alpha 2"), None) {
             Ok(done) => {
                 assert_eq!(
                     audio(&done.data),
@@ -148,4 +156,67 @@ fn older_tags_and_an_id3v1_tag_are_kept() {
             Err(why) => assert_eq!(version, id3::Version::Id3v22, "{why}"),
         }
     }
+}
+
+/// SYSB/127 "Alpha", the system named in `frame` only.
+fn sysb(frame: &str) -> Vec<u8> {
+    use id3::TagLike;
+    let mut tag = id3::Tag::new();
+    tag.set_title("127\"Alpha\"");
+    tag.set_artist("711351");
+    match frame {
+        "TIT1" => tag.set_text("TIT1", "SYSB"),
+        "TXXX" => {
+            tag.set_text("TIT1", "Other");
+            tag.add_frame(id3::frame::ExtendedText {
+                description: "Group Description".to_string(),
+                value: "SYSB".to_string(),
+            });
+        }
+        _ => {
+            tag.add_frame(id3::frame::Comment {
+                lang: "eng".to_string(),
+                description: String::new(),
+                text: "System:SYSB;Site:North;".to_string(),
+            });
+        }
+    }
+    common::tagged(&tag, 2)
+}
+
+#[test]
+fn a_mapped_files_system_is_rewritten_where_the_reader_takes_it() {
+    let name = "20310115_120000SYSB_South__TO_127_FROM_711351.mp3";
+    for frame in ["TIT1", "TXXX", "COMM"] {
+        let data = sysb(frame);
+        let before = reader::describe(name, &reader::tags(&data));
+        assert_eq!(before.system.as_deref(), Some("SYSB"), "{frame}");
+        let done = retag(name, &data, &tg(127, "Alpha"), Some("SYSA")).unwrap();
+        assert_eq!(
+            done.name, name,
+            "{frame}: the name keeps the recorder's spelling"
+        );
+        assert_eq!(audio(&done.data), audio(&data), "{frame}");
+        let after = reader::describe(&done.name, &reader::tags(&done.data));
+        assert_eq!(after.system.as_deref(), Some("SYSA"), "{frame}");
+        assert_eq!(after.talkgroup, Some(tg(127, "Alpha")), "{frame}");
+        assert_eq!(after.site, before.site, "{frame}");
+    }
+}
+
+#[test]
+fn a_file_that_names_no_system_cannot_be_given_one() {
+    use id3::TagLike;
+    let mut tag = id3::Tag::new();
+    tag.set_title("127\"Alpha\"");
+    let data = common::tagged(&tag, 1);
+    assert!(
+        retag(
+            "20310115_120000.mp3",
+            &data,
+            &tg(127, "Alpha"),
+            Some("SYSA")
+        )
+        .is_err()
+    );
 }

@@ -374,6 +374,104 @@ async fn a_correction_moves_each_file_under_the_new_name(pool: PgPool) {
     );
 }
 
+/// Marks the call as filed through a mapped spelling of SYSA.
+async fn mapped(pool: &PgPool, call: i64) {
+    sqlx::query("INSERT INTO mapped_calls SELECT id, started_at FROM calls WHERE id = $1")
+        .bind(call)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE talkgroups SET files_correct = false \
+         WHERE id = (SELECT talkgroup_id FROM calls WHERE id = $1)",
+    )
+    .bind(call)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_correction_rewrites_the_system_of_mapped_calls(pool: PgPool) {
+    use id3::TagLike;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let sysb = |title: &str| {
+        let mut tag = tag(Some(title));
+        tag.set_text("TIT1", "SYSB");
+        common::tagged(&tag, 2)
+    };
+    // In its folder already: rewritten where it is.
+    let here = "2031-03-01/127-Alpha Fire/20310301_120000SYSB_South__TO_127_FROM_711351.mp3";
+    let (kept, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        here,
+        Some(sysb("127\"Alpha Fire\"")),
+        at(0),
+    )
+    .await;
+    let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_930_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(root.join(here))
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    // Under the name the recorder sent: moved too.
+    let name = "20310301_120500SYSB_South__TO_127_FROM_711351.mp3";
+    let (moved, _) = filed(
+        &pool,
+        places,
+        &root,
+        &format!("2031-03-01/127-Alpha/{name}"),
+        Some(sysb("127\"Alpha\"")),
+        at(5),
+    )
+    .await;
+    mapped(&pool, kept).await;
+    mapped(&pool, moved).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let preview = scannerpulse::data::correct_preview(&mut conn, talkgroup)
+        .await
+        .unwrap();
+    assert_eq!(preview.calls, 2);
+    scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+
+    let system = |rel: &str| {
+        let data = std::fs::read(root.join(rel)).unwrap();
+        let name = rel.rsplit('/').next().unwrap();
+        scannerpulse::reader::describe(name, &scannerpulse::reader::tags(&data)).system
+    };
+    assert_eq!(rel_of(&pool, kept).await, here, "the file keeps its name");
+    assert_eq!(system(here).as_deref(), Some("SYSA"));
+    assert_eq!(
+        std::fs::metadata(root.join(here))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mtime,
+        "the file keeps its modification time"
+    );
+    let new_rel = format!("2031-03-01/127-Alpha Fire/{name}");
+    assert_eq!(rel_of(&pool, moved).await, new_rel);
+    assert_eq!(system(&new_rel).as_deref(), Some("SYSA"));
+    assert!(!root.join(format!("2031-03-01/127-Alpha/{name}")).exists());
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM mapped_calls")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    assert!(names(&pool, talkgroup).await.2, "the files are correct");
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn a_stopped_correction_leaves_every_row_with_its_file(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();

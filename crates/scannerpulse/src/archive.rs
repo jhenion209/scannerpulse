@@ -167,6 +167,12 @@ pub fn finish_part(path: &Path) -> io::Result<()> {
             format!("{} exists already", path.display()),
         ));
     }
+    replace_with_part(path)
+}
+
+/// Gives the part file the name `path`, replacing the file there in one
+/// step: a file rewritten where it is.
+pub fn replace_with_part(path: &Path) -> io::Result<()> {
     fs::rename(part_path(path), path)?;
     // Best effort: some network file systems refuse to flush a folder.
     if let Some(dir) = path.parent() {

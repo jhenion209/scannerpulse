@@ -27,6 +27,22 @@ pub const HOLDING_SENTINEL: &str = ".scannerpulse-holding";
 /// The calls one step of a correction takes.
 pub const FILES_PER_STEP: i64 = 50;
 
+/// SQL: the call `c` was filed through a mapped spelling of its system, so
+/// its tag still names the spelling.
+macro_rules! mapped {
+    () => {
+        "EXISTS (SELECT 1 FROM mapped_calls m WHERE m.call_id = c.id AND m.started_at = c.started_at)"
+    };
+}
+
+/// SQL: the call `c` waits for a correction to the folder `$2`, or to its
+/// system's name.
+macro_rules! to_correct {
+    () => {
+        concat!("(split_part(c.rel_path, '/', 2) <> $2 OR ", mapped!(), ")")
+    };
+}
+
 /// A talkgroup as the Data tab's previews and jobs name it.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Named {
@@ -109,9 +125,12 @@ pub struct CorrectPreview {
 pub async fn correct_preview(conn: &mut PgConnection, id: i32) -> Result<CorrectPreview, JobError> {
     let talkgroup = existing(conn, id).await?;
     let (calls, read_only): (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE l.mode = 'managed'), count(*) FILTER (WHERE l.mode <> 'managed') \
-         FROM calls c JOIN locations l ON l.id = c.location_id \
-         WHERE c.talkgroup_id = $1 AND split_part(c.rel_path, '/', 2) <> $2",
+        concat!(
+            "SELECT count(*) FILTER (WHERE l.mode = 'managed'), count(*) FILTER (WHERE l.mode <> 'managed') \
+             FROM calls c JOIN locations l ON l.id = c.location_id \
+             WHERE c.talkgroup_id = $1 AND ",
+            to_correct!()
+        ),
     )
     .bind(id)
     .bind(talkgroup.folder())
@@ -183,6 +202,9 @@ struct CallFile {
     started_at: DateTime<Utc>,
     location_id: i16,
     rel_path: String,
+    /// Filed through a mapped spelling: its tag names the spelling.
+    #[sqlx(default)]
+    mapped: bool,
 }
 
 async fn roots(conn: &mut PgConnection) -> sqlx::Result<HashMap<i16, PathBuf>> {
@@ -326,20 +348,23 @@ fn missing_or_refused(old: &Path, rel_path: &str) -> Handled {
 
 /// What correcting one call's file did.
 enum Handled {
-    /// The row names the new file; the old one goes in the next step.
-    Moved(Gone),
+    /// The row names the new file; the old one, if it is another, goes in
+    /// the next step.
+    Moved(Option<Gone>),
     Refused(String),
     Missing,
 }
 
 /// Writes the call's file under `to`'s folder and name, with `to` in its
-/// title, and moves the row to it.
+/// title and, for a mapped call, `system` in its tag, and moves the row to
+/// it. A mapped call's file already where it belongs is rewritten there.
 async fn correct_one(
     conn: &mut PgConnection,
     root: &Path,
     call: &CallFile,
     to: &Talkgroup,
     folder: &str,
+    system: &str,
 ) -> sqlx::Result<Handled> {
     let parts: Vec<&str> = call.rel_path.split('/').collect();
     let [day, _, name] = parts[..] else {
@@ -362,7 +387,7 @@ async fn correct_one(
         Ok(mtime) => mtime,
         Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
     };
-    let retagged = match crate::retag::retag(name, &data, to) {
+    let retagged = match crate::retag::retag(name, &data, to, call.mapped.then_some(system)) {
         Ok(retagged) => retagged,
         Err(why) => return Ok(Handled::Refused(format!("{}: {why}", call.rel_path))),
     };
@@ -370,20 +395,25 @@ async fn correct_one(
     // The name is chosen and given under the lock, so that the filer, which
     // takes the same one, never takes it too.
     let writing = writes().await?;
-    let (rel, copy) = match free_rel(
-        conn,
-        root,
-        call.location_id,
-        &dir,
-        &retagged.name,
-        &retagged.data,
-    )
-    .await?
-    {
-        Ok(found) => found,
-        // A name the file system refuses (too long, a file where a folder
-        // should be) refuses the call; the job goes on.
-        Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
+    let in_place = format!("{dir}/{}", retagged.name) == call.rel_path;
+    let (rel, copy) = if in_place {
+        (call.rel_path.clone(), false)
+    } else {
+        match free_rel(
+            conn,
+            root,
+            call.location_id,
+            &dir,
+            &retagged.name,
+            &retagged.data,
+        )
+        .await?
+        {
+            Ok(found) => found,
+            // A name the file system refuses (too long, a file where a folder
+            // should be) refuses the call; the job goes on.
+            Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
+        }
     };
     let path = root.join(&rel);
     let refused = |error: io::Error| Handled::Refused(format!("{}: {error}", call.rel_path));
@@ -393,8 +423,15 @@ async fn correct_one(
             return Ok(refused(error));
         }
         // After this the new file is an orphan if the step fails: the next
-        // attempt finds it as an exact copy and reuses it.
-        if let Err(error) = archive::finish_part(&path) {
+        // attempt finds it as an exact copy and reuses it. A file rewritten
+        // in place holds the old tag or the new one, and the next attempt
+        // rewrites it again.
+        let named = if in_place {
+            archive::replace_with_part(&path)
+        } else {
+            archive::finish_part(&path)
+        };
+        if let Err(error) = named {
             return Ok(refused(error));
         }
     }
@@ -408,6 +445,16 @@ async fn correct_one(
         return Ok(refused(error));
     }
     drop(writing);
+    if call.mapped {
+        sqlx::query("DELETE FROM mapped_calls WHERE call_id = $1 AND started_at = $2")
+            .bind(call.id)
+            .bind(call.started_at)
+            .execute(&mut *conn)
+            .await?;
+    }
+    if in_place {
+        return Ok(Handled::Moved(None));
+    }
     let moved = sqlx::query(
         "UPDATE calls SET rel_path = $4 WHERE id = $1 AND started_at = $2 AND rel_path = $3",
     )
@@ -423,10 +470,10 @@ async fn correct_one(
             call.id
         )));
     }
-    Ok(Handled::Moved(Gone {
+    Ok(Handled::Moved(Some(Gone {
         location_id: call.location_id,
         rel_path: call.rel_path.clone(),
-    }))
+    })))
 }
 
 /// Removes the files that the job's last committed step replaced: a stopped
@@ -497,14 +544,16 @@ async fn correct_files(
     };
     let folder = talkgroup.folder();
     let (after_at, after_id) = work.after.unzip();
-    let batch: Vec<CallFile> = sqlx::query_as(
-        "SELECT c.id, c.started_at, c.location_id, c.rel_path \
-         FROM calls c JOIN locations l ON l.id = c.location_id \
-         WHERE c.talkgroup_id = $1 AND l.mode = 'managed' \
-           AND split_part(c.rel_path, '/', 2) <> $2 \
-           AND ($3::timestamptz IS NULL OR (c.started_at, c.id) > ($3, $4)) \
-         ORDER BY c.started_at, c.id LIMIT $5",
-    )
+    let batch: Vec<CallFile> = sqlx::query_as(concat!(
+        "SELECT c.id, c.started_at, c.location_id, c.rel_path, ",
+        mapped!(),
+        " AS mapped \
+             FROM calls c JOIN locations l ON l.id = c.location_id \
+             WHERE c.talkgroup_id = $1 AND l.mode = 'managed' AND ",
+        to_correct!(),
+        " AND ($3::timestamptz IS NULL OR (c.started_at, c.id) > ($3, $4)) \
+             ORDER BY c.started_at, c.id LIMIT $5"
+    ))
     .bind(talkgroup_id)
     .bind(&folder)
     .bind(after_at)
@@ -527,10 +576,10 @@ async fn correct_files(
                     root.display()
                 ))));
             }
-            match correct_one(conn, root, call, &to, &folder).await? {
+            match correct_one(conn, root, call, &to, &folder, &talkgroup.system).await? {
                 Handled::Moved(gone) => {
                     work.moved += 1;
-                    work.remove.push(gone);
+                    work.remove.extend(gone);
                 }
                 Handled::Refused(why) => {
                     work.refused += 1;
@@ -565,9 +614,10 @@ async fn finish_correction(
     folder: &str,
     work: &FileWork,
 ) -> sqlx::Result<String> {
-    let left: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM calls WHERE talkgroup_id = $1 AND split_part(rel_path, '/', 2) <> $2",
-    )
+    let left: i64 = sqlx::query_scalar(concat!(
+        "SELECT count(*) FROM calls c WHERE c.talkgroup_id = $1 AND ",
+        to_correct!()
+    ))
     .bind(talkgroup.id)
     .bind(folder)
     .fetch_one(&mut *conn)
@@ -775,11 +825,11 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     }
     let to_correct: i64 = match named(&mut *conn, params.into).await? {
         Some(into) => {
-            sqlx::query_scalar(
+            sqlx::query_scalar(concat!(
                 "SELECT count(*) FROM calls c JOIN locations l ON l.id = c.location_id \
-             WHERE c.talkgroup_id = $1 AND l.mode = 'managed' \
-               AND split_part(c.rel_path, '/', 2) <> $2",
-            )
+                     WHERE c.talkgroup_id = $1 AND l.mode = 'managed' AND ",
+                to_correct!()
+            ))
             .bind(into.id)
             .bind(into.folder())
             .fetch_one(&mut *conn)
@@ -949,10 +999,10 @@ async fn purge_one(
         .execute(&mut *conn)
         .await?;
     Ok(if kept {
-        Handled::Moved(Gone {
+        Handled::Moved(Some(Gone {
             location_id: call.location_id,
             rel_path: call.rel_path.clone(),
-        })
+        }))
     } else {
         Handled::Missing
     })
@@ -1087,7 +1137,7 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
             match purge_one(conn, root, &holding, call).await? {
                 Handled::Moved(gone) => {
                     work.moved += 1;
-                    work.remove.push(gone);
+                    work.remove.extend(gone);
                 }
                 Handled::Refused(why) => {
                     work.refused += 1;

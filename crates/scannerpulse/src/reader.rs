@@ -95,7 +95,8 @@ static RADIO: LazyLock<Regex> =
 static START: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8})_([0-9]{2})([0-9]{2})([0-9]{2})").unwrap()
 });
-static COMMENT_SYSTEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"System:([^;]+)").unwrap());
+pub(crate) static COMMENT_SYSTEM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"System:([^;]+)").unwrap());
 static COMMENT_SITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Site:([^;]+)").unwrap());
 
 /// Reads the file at `path`. Its name gives the start time in `zone`.
