@@ -184,25 +184,22 @@ async fn a_lookup_uses_no_identity_value_when_the_row_exists(pool: PgPool) -> sq
 }
 
 #[test]
-fn a_placeholder_never_replaces_a_real_name() {
-    assert_eq!(store::renamed("Alpha", "Alpha"), None);
+fn a_different_name_is_a_proposal_and_a_placeholder_is_no_name() {
+    use store::NameSeen::{Propose, Rename, Same};
+    assert_eq!(store::name_seen("Alpha", "Alpha"), Same);
+    assert_eq!(store::name_seen("Alpha", "Alpha Fire"), Propose);
+    assert_eq!(store::name_seen("Alpha", "Unidentified 127"), Same);
+    assert_eq!(store::name_seen("Unidentified 127", "Alpha"), Rename);
     assert_eq!(
-        store::renamed("Alpha", "Alpha Fire"),
-        Some("Alpha Fire".to_string())
-    );
-    assert_eq!(store::renamed("Alpha", "Unidentified 127"), None);
-    assert_eq!(
-        store::renamed("Unidentified 127", "Alpha"),
-        Some("Alpha".to_string())
-    );
-    assert_eq!(
-        store::renamed("Unidentified 127", "Unidentified 127 B"),
-        Some("Unidentified 127 B".to_string())
+        store::name_seen("Unidentified 127", "Unidentified 127 B"),
+        Same
     );
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn a_renamed_talkgroup_remembers_the_name_its_files_carry(pool: PgPool) -> sqlx::Result<()> {
+async fn a_recorders_different_name_is_proposed_and_renames_nothing(
+    pool: PgPool,
+) -> sqlx::Result<()> {
     let mut conn = pool.acquire().await?;
     let system = store::system_id(&mut conn, "SYSA").await?;
     let tg = |name: &str| Talkgroup {
@@ -210,29 +207,136 @@ async fn a_renamed_talkgroup_remembers_the_name_its_files_carry(pool: PgPool) ->
         name: name.to_string(),
     };
     let names = async |conn: &mut sqlx::PgConnection| -> (String, Option<String>, bool) {
-        sqlx::query_as("SELECT name, files_name, transcribe FROM talkgroups WHERE number = 127")
+        sqlx::query_as("SELECT name, files_name, files_correct FROM talkgroups WHERE number = 127")
             .fetch_one(conn)
             .await
             .unwrap()
     };
-    let id = store::talkgroup_id(&mut conn, system, &tg("Alpha")).await?;
-    assert_eq!(names(&mut conn).await, ("Alpha".to_string(), None, false));
+    let id = store::talkgroup_id(&mut conn, system, &tg("Alpha"), 1).await?;
+    assert_eq!(names(&mut conn).await, ("Alpha".to_string(), None, true));
     assert_eq!(
-        store::talkgroup_id(&mut conn, system, &tg("Alpha Fire")).await?,
+        store::talkgroup_id(&mut conn, system, &tg("Alpha Fire"), 1).await?,
         id
     );
+    store::talkgroup_id(&mut conn, system, &tg("Alpha Fire"), 2).await?;
+    store::talkgroup_id(&mut conn, system, &tg("Alpha Fire"), 2).await?;
+    // The talkgroup keeps its name; the file is filed under the one it
+    // carries, so its files wait for the correction.
     assert_eq!(
         names(&mut conn).await,
-        ("Alpha Fire".to_string(), Some("Alpha".to_string()), false)
+        ("Alpha".to_string(), Some("Alpha Fire".to_string()), false)
     );
-    // The folders keep the first old name until the rename job runs.
-    store::talkgroup_id(&mut conn, system, &tg("Alpha Fire 2")).await?;
+    let proposal: (String, Vec<i16>, i32, bool) = sqlx::query_as(
+        "SELECT name, source_ids, calls, dismissed FROM name_proposals WHERE talkgroup_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    assert_eq!(proposal, ("Alpha Fire".to_string(), vec![1, 2], 3, false));
+    store::talkgroup_id(&mut conn, system, &tg("Unidentified 127"), 1).await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM name_proposals")
+        .fetch_one(&mut *conn)
+        .await?;
+    assert_eq!(count, 1, "a placeholder is never proposed");
+    // A placeholder gives way to a real name at once.
+    let other = store::talkgroup_id(
+        &mut conn,
+        system,
+        &Talkgroup {
+            number: 128,
+            name: "Unidentified 128".into(),
+        },
+        1,
+    )
+    .await?;
+    store::talkgroup_id(
+        &mut conn,
+        system,
+        &Talkgroup {
+            number: 128,
+            name: "Bravo".into(),
+        },
+        1,
+    )
+    .await?;
+    let renamed: String = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
+        .bind(other)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert_eq!(renamed, "Bravo");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_system_is_known_by_its_name_or_a_mapped_spelling_and_the_first_is_taken_at_once(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    assert!(
+        store::system_known(&pool, "SYSA").await?,
+        "no system yet: the first is taken"
+    );
+    let mut conn = pool.acquire().await?;
+    let sysa = store::system_id(&mut conn, "SYSA").await?;
+    assert!(store::system_known(&pool, "SYSA").await?);
+    assert!(!store::system_known(&pool, "SYS-A").await?);
+    sqlx::query("INSERT INTO system_spellings (name, system_id) VALUES ('SYS-A', $1)")
+        .bind(sysa)
+        .execute(&pool)
+        .await?;
+    assert!(store::system_known(&pool, "SYS-A").await?);
     assert_eq!(
-        names(&mut conn).await,
-        ("Alpha Fire 2".to_string(), Some("Alpha".to_string()), false)
+        store::resolve_system(&mut conn, "SYS-A").await?,
+        (sysa, true)
     );
-    store::talkgroup_id(&mut conn, system, &tg("Unidentified 127")).await?;
-    assert_eq!(names(&mut conn).await.0, "Alpha Fire 2");
+    assert_eq!(
+        store::resolve_system(&mut conn, "SYSA").await?,
+        (sysa, false)
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_call_of_a_mapped_spelling_files_under_its_system_and_waits_for_the_correction(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (location, source) = common::seed_places(&pool, Path::new("/arch"), Path::new("/in")).await;
+    common::hold_lease(&pool, HOLDER).await;
+    let mut conn = pool.acquire().await?;
+    let sysa = store::system_id(&mut conn, "SYSA").await?;
+    sqlx::query("INSERT INTO system_spellings (name, system_id) VALUES ('SYS-A', $1)")
+        .bind(sysa)
+        .execute(&pool)
+        .await?;
+    store::upsert_seen(&pool, source, &[seen("a.mp3", 5)]).await?;
+    let mut described = alpha();
+    described.system = Some("SYS-A".to_string());
+    let call = file_call(described);
+    store::ensure_partition(&pool, call.started_at).await?;
+    let new = NewCall {
+        call: &call,
+        source_id: source,
+        location_id: location,
+        rel_path: "2031-01-15/7-Alpha/a.mp3",
+        transcribe_from_ms: None,
+    };
+    let (id, started_at) = store::record(&mut conn, HOLDER, row_id(&pool, "a.mp3").await, &new)
+        .await
+        .unwrap();
+    let (system, files_correct): (i32, bool) = sqlx::query_as(
+        "SELECT t.system_id, t.files_correct FROM calls c JOIN talkgroups t ON t.id = c.talkgroup_id          WHERE c.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((system, files_correct), (sysa, false));
+    let mapped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mapped_calls WHERE call_id = $1 AND started_at = $2",
+    )
+    .bind(id)
+    .bind(started_at)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(mapped, 1);
     Ok(())
 }
 

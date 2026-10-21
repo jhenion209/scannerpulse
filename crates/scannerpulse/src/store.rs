@@ -346,14 +346,24 @@ pub async fn ensure_partition(db: impl PgExecutor<'_>, at: DateTime<Utc>) -> sql
     Ok(())
 }
 
-/// The name a talkgroup keeps when a call brings `seen`: `None` when it stays
-/// `stored`. A placeholder never replaces a real name; a real name replaces a
-/// placeholder.
-pub fn renamed(stored: &str, seen: &str) -> Option<String> {
-    if stored == seen || (is_placeholder(seen) && !is_placeholder(stored)) {
-        None
+/// What a talkgroup name a recorder sent does to the stored name. Names
+/// change only with the administrator's approval: a different name is a
+/// proposal. SDRTrunk's placeholder is no name: it never replaces one and is
+/// never proposed, and a real name replaces it at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameSeen {
+    Same,
+    Rename,
+    Propose,
+}
+
+pub fn name_seen(stored: &str, seen: &str) -> NameSeen {
+    if stored == seen || is_placeholder(seen) {
+        NameSeen::Same
+    } else if is_placeholder(stored) {
+        NameSeen::Rename
     } else {
-        Some(seen.to_string())
+        NameSeen::Propose
     }
 }
 
@@ -365,19 +375,42 @@ pub fn is_placeholder(name: &str) -> bool {
 /// The id of a system, added when it is new. The SELECT comes first because an
 /// INSERT ... ON CONFLICT uses up an identity value on every call.
 pub async fn system_id(conn: &mut PgConnection, name: &str) -> sqlx::Result<i32> {
-    let found: Option<i32> = sqlx::query_scalar("SELECT id FROM systems WHERE name = $1")
-        .bind(name)
-        .fetch_optional(&mut *conn)
-        .await?;
+    Ok(resolve_system(conn, name).await?.0)
+}
+
+/// The id of the system a file names, and whether the name is a spelling
+/// mapped to it rather than its own name; a system is added when the name is
+/// new. Filing stages a file of an unknown system first ([`system_known`]).
+pub async fn resolve_system(conn: &mut PgConnection, name: &str) -> sqlx::Result<(i32, bool)> {
+    let found: Option<(i32, bool)> = sqlx::query_as(
+        "SELECT id, false FROM systems WHERE name = $1 \
+         UNION ALL SELECT system_id, true FROM system_spellings WHERE name = $1 LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await?;
     match found {
-        Some(id) => Ok(id),
-        None => {
-            sqlx::query_scalar("INSERT INTO systems (name) VALUES ($1) RETURNING id")
-                .bind(name)
-                .fetch_one(&mut *conn)
-                .await
-        }
+        Some(found) => Ok(found),
+        None => sqlx::query_scalar("INSERT INTO systems (name) VALUES ($1) RETURNING id")
+            .bind(name)
+            .fetch_one(&mut *conn)
+            .await
+            .map(|id| (id, false)),
     }
+}
+
+/// Whether a file naming the system `name` may be filed: the name is a
+/// system's or a spelling mapped to one, or no system exists yet (the first
+/// system of an install is added at once).
+pub async fn system_known(db: impl PgExecutor<'_>, name: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM systems WHERE name = $1) \
+             OR EXISTS (SELECT 1 FROM system_spellings WHERE name = $1) \
+             OR NOT EXISTS (SELECT 1 FROM systems)",
+    )
+    .bind(name)
+    .fetch_one(db)
+    .await
 }
 
 /// The id of a site of a system, added when it is new.
@@ -401,14 +434,16 @@ pub async fn site_id(conn: &mut PgConnection, system_id: i32, name: &str) -> sql
 }
 
 /// The id of a talkgroup of a system. A new talkgroup is added with
-/// transcription off. A new name replaces the stored one by `renamed`, and the
-/// old name goes to `files_name` when that is empty: the archive's folder and
-/// files still carry it, so a talkgroup with calls is marked as not having its
-/// files corrected.
+/// transcription off. A real name replaces a placeholder at once, and the old
+/// name goes to `files_name` when that is empty. Any other different name is
+/// a proposal ([`name_seen`]), counted for the recorder `source_id`: the
+/// talkgroup keeps its name, and since the file is filed under the name it
+/// carries, its files are marked as not corrected.
 pub async fn talkgroup_id(
     conn: &mut PgConnection,
     system_id: i32,
     talkgroup: &Talkgroup,
+    source_id: i16,
 ) -> sqlx::Result<i32> {
     let found: Option<(i32, String)> =
         sqlx::query_as("SELECT id, name FROM talkgroups WHERE system_id = $1 AND number = $2")
@@ -426,19 +461,47 @@ pub async fn talkgroup_id(
         .fetch_one(&mut *conn)
         .await;
     };
-    if let Some(name) = renamed(&stored, &talkgroup.name) {
-        sqlx::query(
-            "UPDATE talkgroups SET name = $2, \
-             files_name = CASE WHEN files_correct AND EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) THEN $3
-                               WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
-             files_correct = files_correct AND NOT EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) \
-             WHERE id = $1",
-        )
-        .bind(id)
-        .bind(name)
-        .bind(stored)
-        .execute(&mut *conn)
-        .await?;
+    match name_seen(&stored, &talkgroup.name) {
+        NameSeen::Same => {}
+        NameSeen::Propose => {
+            sqlx::query(
+                "INSERT INTO name_proposals (talkgroup_id, name, source_ids, calls) \
+                 VALUES ($1, $2, ARRAY[$3::smallint], 1) \
+                 ON CONFLICT (talkgroup_id, name) DO UPDATE SET \
+                     calls = name_proposals.calls + 1, last_seen = now(), \
+                     source_ids = CASE WHEN $3 = ANY (name_proposals.source_ids) \
+                                       THEN name_proposals.source_ids \
+                                       ELSE name_proposals.source_ids || $3::smallint END",
+            )
+            .bind(id)
+            .bind(&talkgroup.name)
+            .bind(source_id)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "UPDATE talkgroups SET files_correct = false, \
+                 files_name = CASE WHEN coalesce(files_name, '') = '' THEN $2 ELSE files_name END \
+                 WHERE id = $1 AND files_correct",
+            )
+            .bind(id)
+            .bind(&talkgroup.name)
+            .execute(&mut *conn)
+            .await?;
+        }
+        NameSeen::Rename => {
+            sqlx::query(
+                "UPDATE talkgroups SET name = $2, \
+                 files_name = CASE WHEN files_correct AND EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) THEN $3 \
+                                   WHEN coalesce(files_name, '') = '' THEN $3 ELSE files_name END, \
+                 files_correct = files_correct AND NOT EXISTS (SELECT 1 FROM calls WHERE talkgroup_id = $1) \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(&talkgroup.name)
+            .bind(stored)
+            .execute(&mut *conn)
+            .await?;
+        }
     }
     Ok(id)
 }
@@ -517,7 +580,8 @@ pub async fn record(
     new: &NewCall<'_>,
 ) -> Result<(i64, DateTime<Utc>), RecordError> {
     let mut tx = fenced(conn, holder).await?;
-    let (talkgroup_id, site_id) = lookups(&mut tx, &new.call.described).await?;
+    let (talkgroup_id, site_id, mapped) =
+        lookups(&mut tx, &new.call.described, new.source_id).await?;
     let call = new.call;
     let d = &call.described;
     let id: i64 = sqlx::query_scalar(
@@ -539,6 +603,18 @@ pub async fn record(
     .fetch_one(&mut *tx)
     .await?;
     mark_done(&mut *tx, row_id, (id, call.started_at)).await?;
+    if mapped {
+        // The file names a spelling of its system: the correction rewrites it.
+        sqlx::query("INSERT INTO mapped_calls (call_id, started_at) VALUES ($1, $2)")
+            .bind(id)
+            .bind(call.started_at)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE talkgroups SET files_correct = false WHERE id = $1 AND files_correct")
+            .bind(talkgroup_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     if let (Some(from_ms), Some(talkgroup)) = (new.transcribe_from_ms, talkgroup_id)
         && call.duration_ms >= from_ms
     {
@@ -560,23 +636,24 @@ pub async fn record(
     Ok((id, call.started_at))
 }
 
-/// The talkgroup and site of a call. Both belong to a system, so a call
-/// without one has neither.
+/// The talkgroup and site of a call, and whether its system name is a mapped
+/// spelling. Both belong to a system, so a call without one has neither.
 async fn lookups(
     conn: &mut PgConnection,
     d: &Described,
-) -> sqlx::Result<(Option<i32>, Option<i32>)> {
+    source_id: i16,
+) -> sqlx::Result<(Option<i32>, Option<i32>, bool)> {
     let Some(system) = d.system.as_deref() else {
-        return Ok((None, None));
+        return Ok((None, None, false));
     };
-    let system = system_id(conn, system).await?;
+    let (system, mapped) = resolve_system(conn, system).await?;
     let site = match d.site.as_deref() {
         Some(name) => Some(site_id(conn, system, name).await?),
         None => None,
     };
     let talkgroup = match &d.talkgroup {
-        Some(talkgroup) => Some(talkgroup_id(conn, system, talkgroup).await?),
+        Some(talkgroup) => Some(talkgroup_id(conn, system, talkgroup, source_id).await?),
         None => None,
     };
-    Ok((talkgroup, site))
+    Ok((talkgroup, site, mapped))
 }

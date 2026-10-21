@@ -117,7 +117,7 @@ fn a_name_that_cannot_round_trip_is_refused() {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn the_recorders_new_name_marks_the_files_too(pool: PgPool) {
+async fn the_recorders_different_name_marks_the_files_and_renames_nothing(pool: PgPool) {
     let seven = common::talkgroup(&pool, "SYSA", 7).await;
     common::call(
         &pool,
@@ -136,12 +136,12 @@ async fn the_recorders_new_name_marks_the_files_too(pool: PgPool) {
         number: 7,
         name: "Group Seven".into(),
     };
-    scannerpulse::store::talkgroup_id(&mut conn, system, &seen)
+    scannerpulse::store::talkgroup_id(&mut conn, system, &seen, 1)
         .await
         .unwrap();
     assert_eq!(
         names(&pool, seven).await,
-        ("Group Seven".into(), Some("Group 7".into()), false)
+        ("Group 7".into(), Some("Group Seven".into()), false)
     );
 }
 
