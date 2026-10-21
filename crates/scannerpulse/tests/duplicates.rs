@@ -197,9 +197,9 @@ fn outcomes(done: Vec<(store::Waiting, Outcome)>) -> Vec<Outcome> {
     done.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
-/// North's call of 12:00:00, 28 frames (1008 ms) long, filed.
+/// North's call of 12:00:00, 83 frames (2988 ms) long, filed.
 async fn filed_by_north(site: &Site) -> i64 {
-    site.arrive(site.north_id, &bravo("120000", 28, 4021)).await;
+    site.arrive(site.north_id, &bravo("120000", 83, 4021)).await;
     let done = site.pass().await;
     let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
@@ -214,7 +214,7 @@ async fn a_shorter_copy_is_deleted_and_the_call_remembers_its_recorder(
     let site = Site::new(pool).await;
     let id = filed_by_north(&site).await;
     // South's clock runs a second ahead.
-    let copy = bravo("120001", 20, 4021);
+    let copy = bravo("120001", 56, 4021);
     let path = site.arrive(site.south_id, &copy).await;
 
     assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
@@ -222,13 +222,13 @@ async fn a_shorter_copy_is_deleted_and_the_call_remembers_its_recorder(
     assert_eq!(site.archived().len(), 1, "{:?}", site.archived());
     let calls = site.calls().await;
     assert_eq!(calls.len(), 1);
-    assert_eq!((calls[0].2, calls[0].3), (1008, site.north_id));
+    assert_eq!((calls[0].2, calls[0].3), (2988, site.north_id));
     assert_eq!(calls[0].5, Some(vec![site.south_id]));
     let (state, reason, call) = site.row(site.south_id, &copy.0).await;
     assert_eq!((state.as_str(), call), ("duplicate", Some(id)));
     assert_eq!(
         reason.as_deref(),
-        Some(format!("a copy of call {id} from north: 0.7 s long, the call's 1.0 s").as_str())
+        Some(format!("a copy of call {id} from north: 2.0 s long, the call's 3.0 s").as_str())
     );
 
     // The watcher lists the deleted copy once more, unchanged: it stays a
@@ -254,7 +254,7 @@ async fn a_shorter_copy_is_deleted_and_the_call_remembers_its_recorder(
 async fn a_copy_of_equal_length_leaves_the_copy_filed_first(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     let id = filed_by_north(&site).await;
-    site.arrive(site.south_id, &bravo("120000", 28, 4021)).await;
+    site.arrive(site.south_id, &bravo("120000", 83, 4021)).await;
     assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
     assert_eq!(site.calls().await[0].3, site.north_id);
     Ok(())
@@ -282,7 +282,7 @@ async fn a_longer_copy_replaces_the_recording_and_the_call_keeps_its_id_and_star
         .execute(&site.pool)
         .await?;
     // South's clock runs a second ahead.
-    let copy = bravo("120001", 40, 4021);
+    let copy = bravo("120001", 112, 4021);
     let path = site.arrive(site.south_id, &copy).await;
 
     assert_eq!(site.pass().await, [Outcome::Replaced(id)]);
@@ -295,7 +295,7 @@ async fn a_longer_copy_replaces_the_recording_and_the_call_keeps_its_id_and_star
         (id, before[0].1),
         "the call's identity changed"
     );
-    assert_eq!((duration, source), (1440, site.south_id));
+    assert_eq!((duration, source), (4032, site.south_id));
     assert_eq!(copies, Some(vec![site.north_id]));
     // The call's start, then the rest of the copy's own name; the old
     // recording held the first name until the transaction.
@@ -420,7 +420,7 @@ async fn a_recorders_files_found_together_are_filed_in_time_order(
 async fn a_replacement_does_not_wait_long_for_a_call_a_job_holds(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     filed_by_north(&site).await;
-    let copy = bravo("120000", 40, 4021);
+    let copy = bravo("120000", 112, 4021);
     let path = site.arrive(site.south_id, &copy).await;
     let (call, same) = site.same_call(&path).await;
     let mut job = site.pool.begin().await?;
@@ -468,10 +468,10 @@ async fn a_recorders_own_calls_are_never_its_copies(pool: PgPool) -> sqlx::Resul
 async fn a_recorder_that_had_a_copy_of_a_call_sends_no_other(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     let id = filed_by_north(&site).await;
-    site.arrive(site.south_id, &bravo("120000", 20, 4021)).await;
+    site.arrive(site.south_id, &bravo("120000", 56, 4021)).await;
     assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
     // Another file of south's overlapping the call is another call.
-    site.arrive(site.south_id, &renamed(bravo("120000", 20, 4021), "_b"))
+    site.arrive(site.south_id, &renamed(bravo("120000", 56, 4021), "_b"))
         .await;
     let done = site.pass().await;
     assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
@@ -483,7 +483,7 @@ async fn a_recorder_that_had_a_copy_of_a_call_sends_no_other(pool: PgPool) -> sq
 async fn another_radio_is_another_call(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     filed_by_north(&site).await;
-    site.arrive(site.south_id, &bravo("120000", 20, 4099)).await;
+    site.arrive(site.south_id, &bravo("120000", 56, 4099)).await;
     let done = site.pass().await;
     assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
     assert_eq!(site.calls().await.len(), 2);
@@ -499,7 +499,7 @@ async fn a_copy_without_a_radio_matches_a_call_with_one(pool: PgPool) -> sqlx::R
     tag.set_text("TIT1", "SYSB");
     let copy = (
         "20310115_120000SYSB_South_Bravo__TO_215.mp3".to_string(),
-        common::tagged(&tag, 20),
+        common::tagged(&tag, 56),
     );
     site.arrive(site.south_id, &copy).await;
     assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
@@ -511,11 +511,44 @@ async fn calls_that_do_not_overlap_within_a_second_are_other_calls(
     pool: PgPool,
 ) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
-    // North's call ends at 12:00:01.008; south's starts at 12:00:03.
+    // North's call ends at 12:00:02.988; south's starts at 12:00:05.
     filed_by_north(&site).await;
-    site.arrive(site.south_id, &bravo("120003", 20, 4021)).await;
+    site.arrive(site.south_id, &bravo("120005", 20, 4021)).await;
     let done = site.pass().await;
     assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
+    Ok(())
+}
+
+// One radio keys up twice; north heard only the first (12:00:00.0 to
+// 12:00:02.916), south only the second, which began at 12:00:02.95 and is
+// named 12:00:02: on their names the two overlap by 0.916 s. Two calls.
+#[sqlx::test(migrations = "./migrations")]
+async fn two_transmissions_in_a_row_each_heard_by_one_recorder_stay_two_calls(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    site.arrive(site.north_id, &bravo("120000", 81, 4021)).await;
+    let done = site.pass().await;
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
+    site.arrive(site.south_id, &bravo("120002", 42, 4021)).await;
+    let done = site.pass().await;
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
+    assert_eq!(site.calls().await.len(), 2);
+    Ok(())
+}
+
+// The rule's cost: a call shorter than about 2 s whose copies are named a
+// second apart overlaps too little on the names to be told from a second
+// transmission, and stays two calls (a duplicate kept, never a call lost).
+#[sqlx::test(migrations = "./migrations")]
+async fn a_short_copy_named_a_second_later_stays_another_call(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    site.arrive(site.north_id, &bravo("120000", 28, 4021)).await;
+    site.pass().await;
+    site.arrive(site.south_id, &bravo("120001", 20, 4021)).await;
+    let done = site.pass().await;
+    assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
+    assert_eq!(site.calls().await.len(), 2);
     Ok(())
 }
 
@@ -532,12 +565,12 @@ async fn a_call_a_person_worked_on_keeps_its_recording(pool: PgPool) -> sqlx::Re
     .bind(started_at)
     .execute(&site.pool)
     .await?;
-    let copy = bravo("120000", 40, 4021);
+    let copy = bravo("120000", 112, 4021);
     let path = site.arrive(site.south_id, &copy).await;
     assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
     assert!(!path.exists());
     let calls = site.calls().await;
-    assert_eq!((calls[0].2, calls[0].3), (1008, site.north_id));
+    assert_eq!((calls[0].2, calls[0].3), (2988, site.north_id));
     assert_eq!(
         site.row(site.south_id, &copy.0).await.1,
         Some(format!(
@@ -573,7 +606,9 @@ async fn a_lease_lost_after_the_copy_is_written_is_finished_by_the_next_holder(
     let site = Site::new(pool).await;
     let id = filed_by_north(&site).await;
     let old = site.calls().await[0].4.clone();
-    let path = site.arrive(site.south_id, &bravo("120000", 40, 4021)).await;
+    let path = site
+        .arrive(site.south_id, &bravo("120000", 112, 4021))
+        .await;
     let mut losing = site.filer_with(Arc::new(LosingFence(Mutex::new(3))));
     assert_eq!(outcomes(losing.pass(10).await?), [Outcome::LeaseLost]);
     assert_eq!(site.archived().len(), 2, "{:?}", site.archived());
@@ -599,7 +634,7 @@ async fn a_stop_after_the_transaction_is_finished_by_the_next_pass(
     let site = Site::new(pool).await;
     let id = filed_by_north(&site).await;
     let old = site.calls().await[0].4.clone();
-    let copy = bravo("120000", 40, 4021);
+    let copy = bravo("120000", 112, 4021);
     let path = site.arrive(site.south_id, &copy).await;
     let (call, same) = site.same_call(&path).await;
     let name = archive::copy_name(old.rsplit('/').next().unwrap(), &copy.0).unwrap();
@@ -640,7 +675,7 @@ async fn a_stop_after_the_transaction_is_finished_by_the_next_pass(
 async fn a_call_that_changed_since_the_match_is_left_as_it_is(pool: PgPool) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     filed_by_north(&site).await;
-    let copy = bravo("120000", 40, 4021);
+    let copy = bravo("120000", 112, 4021);
     let path = site.arrive(site.south_id, &copy).await;
     let (call, same) = site.same_call(&path).await;
     sqlx::query("UPDATE calls SET rel_path = 'moved/elsewhere.mp3'")
@@ -676,14 +711,15 @@ async fn a_filed_file_seen_again_after_its_recording_was_replaced_is_not_filed_a
     pool: PgPool,
 ) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
-    let first = bravo("120000", 28, 4021);
+    let first = bravo("120000", 83, 4021);
     let north = site.arrive(site.north_id, &first).await;
     let mtime = fs::metadata(&north).unwrap().modified().unwrap();
     let done = site.pass().await;
     let [Outcome::Filed(id, _)] = done[..] else {
         panic!("{done:?}")
     };
-    site.arrive(site.south_id, &bravo("120000", 40, 4021)).await;
+    site.arrive(site.south_id, &bravo("120000", 112, 4021))
+        .await;
     assert_eq!(site.pass().await, [Outcome::Replaced(id)]);
 
     // Its deletion had failed: north's file is back, unchanged.

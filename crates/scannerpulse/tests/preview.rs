@@ -26,7 +26,7 @@ fn file(folder: &Path, second: u32, system: &str, number: i64, name: &str) {
         folder.join(format!(
             "20310115_1200{second:02}{system}_North__TO_{number}_FROM_4021.mp3"
         )),
-        common::tagged(&tag, 25),
+        common::tagged(&tag, 56),
     )
     .unwrap();
 }
@@ -167,11 +167,11 @@ async fn a_preview_names_the_calls_its_files_are_copies_of_and_which_copy_stays(
     let seven = common::talkgroup(&pool, "SYSA", 7).await;
     let nine = common::talkgroup(&pool, "SYSA", 9).await;
     // South filed talkgroup 7's call of 12:00:00 longer than live's copy
-    // (900 ms), and talkgroup 9's of 12:00:01 shorter.
+    // (2016 ms), and talkgroup 9's of 12:00:01 shorter.
     let mut calls = Vec::new();
     for (talkgroup, at, ms) in [
-        (seven, "2031-01-15T18:00:00Z", 2000),
-        (nine, "2031-01-15T18:00:01Z", 500),
+        (seven, "2031-01-15T18:00:00Z", 3000),
+        (nine, "2031-01-15T18:00:01Z", 1500),
     ] {
         let at: chrono::DateTime<chrono::Utc> = at.parse().unwrap();
         scannerpulse::store::ensure_partition(&pool, at)

@@ -705,9 +705,13 @@ async fn lookups(
     Ok((talkgroup, site, mapped))
 }
 
-/// The clock difference allowed between two recorders: a file's start comes
-/// from its name, to the second.
-pub const CLOCK_ALLOWANCE: Duration = Duration::from_secs(1);
+/// The least overlap of two copies of one call. A file's start comes from
+/// its name, to the second, so two transmissions in a row can seem to
+/// overlap by up to a second; copies of one call overlap by more, and by at
+/// least half the shorter recording. A call under about 2 s whose copies are
+/// named a second apart therefore stays two calls: a duplicate kept, never a
+/// call lost (the owner's choice, 2026-10-21).
+pub const LEAST_OVERLAP: Duration = Duration::from_secs(1);
 
 /// How long a replacement waits for a lock another transaction holds.
 pub const LOCK_WAIT: &str = "2s";
@@ -722,8 +726,8 @@ const KEPT: &str = "(EXISTS (SELECT 1 FROM transcripts t WHERE t.call_id = c.id 
                                AND e.started_at = c.started_at))";
 
 /// A call another recorder filed that a file is a copy of: the same
-/// talkgroup, recordings that overlap in time within [`CLOCK_ALLOWANCE`], and
-/// the same radio when both name one.
+/// talkgroup, recordings that overlap by more than [`LEAST_OVERLAP`] and by
+/// at least half the shorter one, and the same radio when both name one.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct SameCall {
     pub id: i64,
@@ -767,37 +771,41 @@ pub async fn talkgroup_of(
 
 /// The call of `talkgroup_id` that the call of a file from the recorder
 /// `source_id` is a copy of, if any: of the calls another recorder filed
-/// whose recordings overlap the file's, the one that overlaps it most. A
-/// recorder never sends two copies of one call, so a call that has, or had,
-/// a copy from `source_id` is not one. A call longer than an hour does not
-/// occur, which bounds the search.
+/// whose recordings overlap the file's as copies do ([`SameCall`]), the one
+/// that overlaps it most. A recorder never sends two copies of one call, so
+/// a call that has, or had, a copy from `source_id` is not one. A call longer
+/// than an hour does not occur, which bounds the search.
 pub async fn same_call(
     db: impl PgExecutor<'_>,
     talkgroup_id: i32,
     call: &FileCall,
     source_id: i16,
 ) -> sqlx::Result<Option<SameCall>> {
-    let allowance = i32::try_from(CLOCK_ALLOWANCE.as_millis()).unwrap_or(i32::MAX);
+    let least = i32::try_from(LEAST_OVERLAP.as_millis()).unwrap_or(i32::MAX);
     sqlx::query_as(&format!(
         "SELECT c.id, c.started_at, coalesce(c.duration_ms, 0) AS duration_ms, c.source_id, \
                 s.name AS recorder, c.talkgroup_id, c.location_id, c.rel_path, {KEPT} AS kept \
-         FROM calls c JOIN sources s ON s.id = c.source_id \
-         WHERE c.talkgroup_id = $1 \
-           AND c.started_at > $2 - interval '1 hour' \
-           AND c.started_at < $2 + ($3 + $5) * interval '1 millisecond' \
-           AND c.started_at + (coalesce(c.duration_ms, 0) + $5) * interval '1 millisecond' > $2 \
-           AND c.source_id <> $4 AND NOT ($4 = ANY (coalesce(c.copies_from, '{{}}'))) \
-           AND ($6::bigint IS NULL OR c.radio_id IS NULL OR c.radio_id = $6) \
-         ORDER BY least(c.started_at + coalesce(c.duration_ms, 0) * interval '1 millisecond', \
-                        $2 + $3 * interval '1 millisecond') - greatest(c.started_at, $2) DESC, \
-                  c.started_at, c.id \
+         FROM (SELECT c.*, \
+                      least(c.started_at + coalesce(c.duration_ms, 0) * interval '1 millisecond', \
+                            $2 + $3 * interval '1 millisecond') \
+                      - greatest(c.started_at, $2) AS overlap \
+               FROM calls c \
+               WHERE c.talkgroup_id = $1 \
+                 AND c.started_at > $2 - interval '1 hour' \
+                 AND c.started_at < $2 + $3 * interval '1 millisecond' \
+                 AND c.source_id <> $4 AND NOT ($4 = ANY (coalesce(c.copies_from, '{{}}'))) \
+                 AND ($6::bigint IS NULL OR c.radio_id IS NULL OR c.radio_id = $6)) c \
+         JOIN sources s ON s.id = c.source_id \
+         WHERE c.overlap > $5 * interval '1 millisecond' \
+           AND 2 * c.overlap >= least(coalesce(c.duration_ms, 0), $3) * interval '1 millisecond' \
+         ORDER BY c.overlap DESC, c.started_at, c.id \
          LIMIT 1"
     ))
     .bind(talkgroup_id)
     .bind(call.started_at)
     .bind(call.duration_ms)
     .bind(source_id)
-    .bind(allowance)
+    .bind(least)
     .bind(call.described.radio_id)
     .fetch_optional(db)
     .await
