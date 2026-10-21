@@ -155,6 +155,72 @@ async fn a_preview_says_what_filing_would_do_and_changes_nothing(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_preview_names_the_calls_its_files_are_copies_of_and_which_copy_stays(pool: PgPool) {
+    let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (location, live) = common::seed_places(&pool, root.path(), source.path()).await;
+    let south: i16 = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, path) VALUES ('south', 'sdrtrunk', '/srv/south') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let seven = common::talkgroup(&pool, "SYSA", 7).await;
+    let nine = common::talkgroup(&pool, "SYSA", 9).await;
+    // South filed talkgroup 7's call of 12:00:00 longer than live's copy
+    // (900 ms), and talkgroup 9's of 12:00:01 shorter.
+    let mut calls = Vec::new();
+    for (talkgroup, at, ms) in [
+        (seven, "2031-01-15T18:00:00Z", 2000),
+        (nine, "2031-01-15T18:00:01Z", 500),
+    ] {
+        let at: chrono::DateTime<chrono::Utc> = at.parse().unwrap();
+        scannerpulse::store::ensure_partition(&pool, at)
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+             VALUES ($1, $2, $3, $4, $5, gen_random_uuid()::text || '.mp3') RETURNING id",
+        )
+        .bind(at)
+        .bind(ms)
+        .bind(talkgroup)
+        .bind(south)
+        .bind(location)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        calls.push(id);
+    }
+    let folder = source.path();
+    file(folder, 0, "SYSA", 7, "Group 7");
+    file(folder, 1, "SYSA", 9, "Group 9");
+    file(folder, 2, "SYSA", 10, "Ten");
+    let before = written(&pool).await;
+
+    let seen = preview::preview(&mut pool.acquire().await.unwrap(), live, ZONE)
+        .await
+        .unwrap();
+
+    let verdicts: Vec<&Verdict> = seen.sample.iter().map(|file| &file.verdict).collect();
+    assert_eq!(
+        verdicts,
+        [
+            &Verdict::Duplicate {
+                call: calls[0],
+                recorder: "south".into()
+            },
+            &Verdict::Replaces {
+                call: calls[1],
+                recorder: "south".into()
+            },
+            &Verdict::NewTalkgroup,
+        ]
+    );
+    assert_eq!((seen.counts.duplicate, seen.counts.replaces), (1, 1));
+    assert_eq!(written(&pool).await, before, "the preview writes nothing");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_large_folders_sample_is_spread_over_it(pool: PgPool) {
     let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (_, live) = common::seed_places(&pool, root.path(), source.path()).await;

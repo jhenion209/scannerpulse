@@ -35,6 +35,11 @@ pub enum Verdict {
     Proposal { current: String },
     /// Its system name is unknown: it waits in the staging folder.
     Staged,
+    /// A copy of a call `recorder` filed, which keeps its recording: this
+    /// copy is deleted.
+    Duplicate { call: i64, recorder: String },
+    /// A longer copy of a call `recorder` filed: the call's recording instead.
+    Replaces { call: i64, recorder: String },
     /// Rejected, and deleted from the recorder's folder.
     Rejected { reason: String },
     /// It cannot be read now: the filer tries again later.
@@ -49,6 +54,18 @@ impl std::fmt::Display for Verdict {
             Verdict::Named { current } => write!(f, "filed, names the talkgroup (now {current:?})"),
             Verdict::Proposal { current } => write!(f, "filed, a name proposal (now {current:?})"),
             Verdict::Staged => f.write_str("staged: unknown system"),
+            Verdict::Duplicate { call, recorder } => {
+                write!(
+                    f,
+                    "deleted: a copy of call {call} from {recorder}, which keeps its recording"
+                )
+            }
+            Verdict::Replaces { call, recorder } => {
+                write!(
+                    f,
+                    "replaces the recording of call {call} from {recorder}: a longer copy"
+                )
+            }
             Verdict::Rejected { reason } => write!(f, "rejected: {reason}"),
             Verdict::Unreadable { reason } => write!(f, "cannot be read now: {reason}"),
         }
@@ -63,6 +80,8 @@ pub struct Counts {
     pub named: usize,
     pub proposal: usize,
     pub staged: usize,
+    pub duplicate: usize,
+    pub replaces: usize,
     pub rejected: usize,
     pub unreadable: usize,
 }
@@ -75,6 +94,8 @@ impl Counts {
             Verdict::Named { .. } => &mut self.named,
             Verdict::Proposal { .. } => &mut self.proposal,
             Verdict::Staged => &mut self.staged,
+            Verdict::Duplicate { .. } => &mut self.duplicate,
+            Verdict::Replaces { .. } => &mut self.replaces,
             Verdict::Rejected { .. } => &mut self.rejected,
             Verdict::Unreadable { .. } => &mut self.unreadable,
         } += 1;
@@ -170,7 +191,7 @@ pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Previ
     for (rel_path, call) in read {
         let (call, verdict) = match call {
             Ok(call) => {
-                let verdict = verdict(conn, &rel_path, &call).await?;
+                let verdict = verdict(conn, id, &rel_path, &call).await?;
                 (Some(call), verdict)
             }
             Err(ReadError::Rejected(reason)) => (None, Verdict::Rejected { reason }),
@@ -205,10 +226,12 @@ pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Previ
     })
 }
 
-/// What filing would do with the call read from the file at `rel_path`, as
-/// `Filer::try_file` and `store::talkgroup_id` decide it.
+/// What filing would do with the call read from the file at `rel_path` in
+/// the folder of the recorder `source_id`, as `Filer::try_file` and
+/// `store::talkgroup_id` decide it.
 async fn verdict(
     conn: &mut PgConnection,
+    source_id: i16,
     rel_path: &str,
     call: &FileCall,
 ) -> sqlx::Result<Verdict> {
@@ -227,6 +250,22 @@ async fn verdict(
     let (Some(system), Some(talkgroup)) = (described.system.as_deref(), talkgroup) else {
         return Ok(Verdict::Filed);
     };
+    if let Some(id) = store::talkgroup_of(&mut *conn, system, talkgroup.number).await?
+        && let Some(same) = store::same_call(&mut *conn, id, call, source_id).await?
+    {
+        let (call_id, recorder) = (same.id, same.recorder.clone());
+        return Ok(if same.replaced_by(call.duration_ms) {
+            Verdict::Replaces {
+                call: call_id,
+                recorder,
+            }
+        } else {
+            Verdict::Duplicate {
+                call: call_id,
+                recorder,
+            }
+        });
+    }
     // No system yet on a fresh install: its first is added with the call.
     let Some((system_id, _)) = store::find_system(&mut *conn, system).await? else {
         return Ok(Verdict::NewTalkgroup);
