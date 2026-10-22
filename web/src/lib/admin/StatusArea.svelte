@@ -3,7 +3,7 @@
   import { callTime } from '../format';
   import { durationText } from '../status';
   import { siteZone } from '../status.svelte';
-  import { about, failoverChecks, leaseText, refereeWarning, STATUS_EVERY_MS, transcriptState, type AdminStatus } from './health';
+  import { about, failoverChecks, leaseText, locationWarnings, refereeWarning, STATUS_EVERY_MS, transcriptState, type AdminStatus } from './health';
   import { admin, why } from './session.svelte';
 
   let data = $state<AdminStatus | null>(null);
@@ -52,6 +52,7 @@
   {#if data}
     {@const warning = refereeWarning(data.referee)}
     {#if warning}<p class="problem" role="alert">{warning.text}{#if warning.reason} <span class="muted">({warning.reason})</span>{/if}</p>{/if}
+    {#each locationWarnings(data.locations) as text (text)}<p class="problem" role="alert">{text}</p>{/each}
     <h2>Processing</h2>
     <dl class="facts">
       <dt>Lease</dt>

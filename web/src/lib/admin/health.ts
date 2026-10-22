@@ -20,6 +20,8 @@ export interface AdminStatus {
     recent_rejected: { source: string; rel_path: string; reason: string | null; seen_at: string }[];
   };
   queue: { queued: number; due: number; failed: number; last_minute: number };
+  /** Each storage location a running host cannot use. */
+  locations: { location: string; host: string; problem: string | null }[];
   failed: { call_id: number; started_at: string; attempts: number; last_error: string | null }[];
   servers: { url: string; cooling_until: string | null; failed_rounds: number; last_error: string | null; updated_at: string | null }[];
   totals: { calls_about: number | null; transcripts_about: number | null };
@@ -85,6 +87,14 @@ export const transcriptState = (state: string) =>
 
 /** An estimate's number, or a dash when the planner has none. */
 export const about = (n: number | null) => (n === null ? '—' : `about ${n.toLocaleString('en-US')}`);
+
+/** A warning for each storage location a running host cannot use: its plays
+ * of those calls fail there, and nothing is moved into it. An older server
+ * sends no list. */
+export const locationWarnings = (locations: AdminStatus['locations'] | undefined): string[] =>
+  (locations ?? []).map(
+    (l) => `${l.host} cannot use the storage location ${l.location}: ${l.problem ?? 'it cannot be read'}. Its calls there do not play from ${l.host}.`,
+  );
 
 /** The warning when the referee does not answer; none when it does or there is none. */
 export function refereeWarning(referee: AdminStatus['referee']): { text: string; reason: string | undefined } | null {

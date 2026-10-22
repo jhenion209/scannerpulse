@@ -11,6 +11,7 @@ export const AREAS = [
   { id: 'reports', label: 'Reports' },
   { id: 'data', label: 'Data' },
   { id: 'recorders', label: 'Recorders' },
+  { id: 'storage', label: 'Storage' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'settings', label: 'Settings' },
   { id: 'favorites', label: 'Favorites' },

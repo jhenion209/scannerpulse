@@ -1,12 +1,27 @@
 <script lang="ts">
   // The last step of a job that moves or deletes files: it starts only with
-  // the talkgroup's name typed exactly (the server checks it too).
-  let { name, action, start }: { name: string; action: string; start: (confirm: string) => Promise<void> } = $props();
+  // the word asked for typed exactly (the server checks it too). With `ask`,
+  // the button opens a confirmation pop-up first.
+  import ConfirmDialog from './ConfirmDialog.svelte';
+
+  let {
+    name,
+    action,
+    start,
+    ask,
+  }: {
+    name: string;
+    action: string;
+    start: (confirm: string) => Promise<void>;
+    ask?: { title: string; text: string; action: string };
+  } = $props();
   const id = $props.id();
   let typed = $state('');
   let busy = $state(false);
+  let asking = $state(false);
 
   async function go() {
+    asking = false;
     busy = true;
     try {
       await start(typed);
@@ -20,9 +35,12 @@
   <label for={id}>Type <strong>{name}</strong> to confirm</label>
   <div class="row">
     <input {id} type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" bind:value={typed} />
-    <button type="button" class="primary" disabled={typed !== name || busy} onclick={go}>{action}</button>
+    <button type="button" class="primary" disabled={typed !== name || busy} onclick={() => (ask ? (asking = true) : go())}>{action}</button>
   </div>
 </div>
+{#if asking && ask}
+  <ConfirmDialog title={ask.title} text={ask.text} action={ask.action} confirm={go} cancel={() => (asking = false)} />
+{/if}
 
 <style>
   .confirm { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.3rem; margin: 0.5rem 0; }

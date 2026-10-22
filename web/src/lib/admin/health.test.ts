@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { about, failoverChecks, refereeWarning, type AdminStatus, leaseText, transcriptState } from './health';
+import { about, failoverChecks, locationWarnings, refereeWarning, type AdminStatus, leaseText, transcriptState } from './health';
 
 describe('the lease', () => {
   it('says who holds it and for how long', () => {
@@ -59,5 +59,14 @@ describe('the referee warning', () => {
       text: 'Referee unreachable: automatic failover is off until it returns',
       reason: 'no answer within 3 s',
     });
+  });
+});
+
+describe('the storage warnings', () => {
+  it('names each location a running host cannot use', () => {
+    expect(locationWarnings(undefined)).toEqual([]);
+    expect(locationWarnings([{ location: 'Cold 2024', host: 'host-b', problem: 'it is not mounted' }])).toEqual([
+      'host-b cannot use the storage location Cold 2024: it is not mounted. Its calls there do not play from host-b.',
+    ]);
   });
 });

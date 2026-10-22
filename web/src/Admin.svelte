@@ -16,6 +16,7 @@
   import MachineArea from './lib/admin/MachineArea.svelte';
   import RecordersArea from './lib/admin/RecordersArea.svelte';
   import StatusArea from './lib/admin/StatusArea.svelte';
+  import StorageArea from './lib/admin/StorageArea.svelte';
   import { notice, tell } from './lib/notice.svelte';
   import { loadPrefs } from './lib/prefs';
   import { startStatus } from './lib/status.svelte';
@@ -27,7 +28,7 @@
   import { followWaiting, waiting } from './lib/admin/waiting.svelte';
 
   // Each area of the side menu, by its id.
-  const PAGES: Record<AreaId, Component> = { status: StatusArea, layout: LayoutArea, updates: UpdatesArea, machine: MachineArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, data: DataArea, recorders: RecordersArea, accounts: AccountsArea, settings: SettingsArea,
+  const PAGES: Record<AreaId, Component> = { status: StatusArea, layout: LayoutArea, updates: UpdatesArea, machine: MachineArea, maintenance: MaintenanceArea, transcription: TranscriptionArea, reports: ReportsArea, data: DataArea, recorders: RecordersArea, storage: StorageArea, accounts: AccountsArea, settings: SettingsArea,
     favorites: FavoritesArea, viewers: ViewersArea, jobs: JobsArea };
 
   const prefs = $state(loadPrefs());
