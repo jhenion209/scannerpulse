@@ -342,6 +342,10 @@ pub fn router(state: AppState) -> Router {
             get(storage::move_preview).post(storage::move_start),
         )
         .route(
+            "/api/admin/storage/purge",
+            get(storage::purge_preview).post(storage::purge_start),
+        )
+        .route(
             "/api/admin/storage/{id}",
             axum::routing::delete(storage::remove),
         )

@@ -214,6 +214,57 @@ pub async fn remove(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PurgeAsk {
+    pub before: NaiveDate,
+}
+
+/// `GET /api/admin/storage/purge?before=`: what purging every call before
+/// that day would do. It changes nothing.
+pub async fn purge_preview(
+    _: Admin,
+    State(state): State<AppState>,
+    Query(ask): Query<PurgeAsk>,
+) -> Result<Json<crate::purges::PurgePreview>, ApiError> {
+    let zone = super::audio::time_zone(&state).await?;
+    let mut conn = state.pool.acquire().await?;
+    crate::purges::preview(&mut conn, ask.before, zone)
+        .await
+        .map(Json)
+        .map_err(job_refused)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PurgeStart {
+    pub before: NaiveDate,
+    pub confirm: String,
+}
+
+/// `POST /api/admin/storage/purge`: starts the purge, with its day typed.
+pub async fn purge_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Json(body): Json<PurgeStart>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let zone = super::audio::time_zone(&state).await?;
+    let mut conn = state.pool.acquire().await?;
+    let (job, preview) =
+        crate::purges::start(&mut conn, body.before, zone, &body.confirm, &admin.0.login)
+            .await
+            .map_err(job_refused)?;
+    record(
+        &admin,
+        format!(
+            "started job {job}: purge the {} calls before {}",
+            preview.calls, body.before
+        ),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"job": job, "calls": preview.calls})),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MoveAsk {
     pub to: String,
     pub from: NaiveDate,

@@ -202,3 +202,51 @@ async fn a_move_is_counted_then_started_only_with_move_typed(pool: PgPool) {
         ("move", Some(1), "ann")
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_purge_is_counted_then_started_only_with_its_date_typed(pool: PgPool) {
+    let archive = tempfile::tempdir().unwrap();
+    let places = seed_places(&pool, archive.path(), std::path::Path::new("/srv/in/live")).await;
+    let app = app(&pool);
+    let ask = "/api/admin/storage/purge?before=2025-03-02";
+    assert_eq!(send(&app, "GET", ask, &[], None).await.status, 401);
+    admin(&pool, "ann", PASSWORD).await;
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let rel = "2025-03-01/1-A/a.mp3";
+    std::fs::create_dir_all(archive.path().join("2025-03-01/1-A")).unwrap();
+    std::fs::write(archive.path().join(rel), [7; 100]).unwrap();
+    let at = Utc.with_ymd_and_hms(2025, 3, 1, 12, 0, 0).unwrap();
+    insert_call(&pool, places, rel, at, 2000, false).await;
+    let counted = send(&app, "GET", ask, &h, None).await;
+    assert_eq!(counted.status, 200, "{:?}", counted.body);
+    assert_eq!(counted.body["calls"], 1);
+    assert_eq!(counted.body["bytes_about"], 100);
+    assert_eq!(counted.body["held"][0]["location"], "primary");
+    assert_eq!(counted.body["refused"], serde_json::Value::Null);
+    let body = |confirm: &str| Some(json!({"before": "2025-03-02", "confirm": confirm}));
+    let wrong = send(&app, "POST", "/api/admin/storage/purge", &h, body("purge")).await;
+    assert_eq!(wrong.status, 400);
+    assert_eq!(wrong.body["detail"], "type 2025-03-02 to confirm");
+    let started = send(
+        &app,
+        "POST",
+        "/api/admin/storage/purge",
+        &h,
+        body("2025-03-02"),
+    )
+    .await;
+    assert_eq!(started.status, 201, "{:?}", started.body);
+    assert_eq!(started.body["calls"], 1);
+    let job = started.body["job"].as_i64().unwrap();
+    let (kind, total, by): (String, Option<i64>, String) =
+        sqlx::query_as("SELECT kind, total, started_by FROM jobs WHERE id = $1")
+            .bind(job)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (kind.as_str(), total, by.as_str()),
+        ("purge_before", Some(1), "ann")
+    );
+}

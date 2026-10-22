@@ -60,6 +60,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse storage add NAME FOLDER
        scannerpulse storage remove NAME
        scannerpulse storage move FROM TO LOCATION [--confirm move]
+       scannerpulse storage purge-before DAY [--confirm DAY]
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
@@ -432,6 +433,10 @@ enum StorageCommand {
         to: String,
         confirm: Option<String>,
     },
+    PurgeBefore {
+        before: chrono::NaiveDate,
+        confirm: Option<String>,
+    },
 }
 
 /// What waits for the administrator: talkgroup name proposals and unknown
@@ -745,6 +750,13 @@ fn parse(args: &[&str]) -> Option<Command> {
                 from: from.parse().ok()?,
                 until: until.parse().ok()?,
                 to: to.to_string(),
+                confirm: found.get("--confirm").map(|c| c.to_string()),
+            }))
+        }
+        ["storage", "purge-before", before, rest @ ..] => {
+            let found = flags(rest, &[], &["--confirm"], &[])?;
+            Some(Command::Storage(StorageCommand::PurgeBefore {
+                before: before.parse().ok()?,
                 confirm: found.get("--confirm").map(|c| c.to_string()),
             }))
         }
@@ -2094,6 +2106,49 @@ async fn storage_command(command: StorageCommand) -> CommandResult {
                 preview.calls
             );
         }
+        StorageCommand::PurgeBefore { before, confirm } => {
+            let zone = settings::load(&mut conn).await?.time_zone;
+            let preview = scannerpulse::purges::preview(&mut conn, before, zone).await?;
+            for held in &preview.held {
+                println!(
+                    "  {}: {} calls{}",
+                    held.location,
+                    held.calls,
+                    if held.read_only {
+                        "; read-only: only their records go, their files stay".to_string()
+                    } else {
+                        held.bytes_about
+                            .map_or(String::new(), |b| format!(", about {}", size(b as u64)))
+                    }
+                );
+            }
+            println!(
+                "{} calls before {before} would be deleted, and their files for good{}",
+                preview.calls,
+                preview
+                    .bytes_about
+                    .map_or(String::new(), |b| format!(" (about {})", size(b as u64)))
+            );
+            if let Some(why) = preview.refused {
+                return Err(why.into());
+            }
+            let confirm = typed(
+                confirm,
+                &format!("there is no undo; type {before} to start: "),
+            )?;
+            let (job, preview) = scannerpulse::purges::start(
+                &mut conn,
+                before,
+                zone,
+                &confirm,
+                &command_line_user(),
+            )
+            .await?;
+            println!(
+                "job {job} is started: purge {} calls before {before}; `scannerpulse jobs show {job}` follows it",
+                preview.calls
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -3372,6 +3427,20 @@ mod tests {
             parse(&["storage", "move", "2025-01-01", "June", "Cold"]),
             None
         );
+        assert_eq!(
+            parse(&[
+                "storage",
+                "purge-before",
+                "2025-01-01",
+                "--confirm",
+                "2025-01-01"
+            ]),
+            Some(Command::Storage(StorageCommand::PurgeBefore {
+                before: "2025-01-01".parse().unwrap(),
+                confirm: Some("2025-01-01".into()),
+            }))
+        );
+        assert_eq!(parse(&["storage", "purge-before", "January"]), None);
         assert_eq!(
             parse(&["recorder", "list"]),
             Some(Command::Recorder(RecorderCommand::List))
