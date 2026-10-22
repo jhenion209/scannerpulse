@@ -432,6 +432,30 @@ once the name is typed. A decided name's files are filed within a few
 seconds, as if they had just arrived. On a database with no system yet, the
 first system name is added at once.
 
+**Storage paths beside the archive.** New calls are always filed in the
+main archive; other storage paths hold calls moved out of it, by date.
+Mount the disk or share on every ScannerPulse machine at the same folder,
+then add it on the admin page's Storage area or with `scannerpulse storage
+add NAME FOLDER`: it must stay apart from the archive, the other storage
+paths, the recorders' folders and the backups, and it gets a
+`.scannerpulse-location` file, so that an empty mount point is never taken
+for it. Each machine checks every storage path once a minute (can it list
+it, find that file and write there, and how much room is left), and the
+Storage area and `storage list` show it; a machine that cannot use one is
+named on the Status area too, and its plays of the calls there fail until
+the path is mounted again. `storage move FROM TO LOCATION` (Move a date
+range) moves the calls of the days FROM to TO, wherever they are, into
+LOCATION: it counts them and their size first, refuses a path a running
+machine cannot use or without room for them and 1 GB or 2 % of its disk to
+spare, and starts only once `move` is typed (`--confirm move`); the admin
+page asks once more in a pop-up, since there is no undo. Each call's file is
+copied into the path in the archive's layout, read back, its call then
+points at the copy, and the old file is deleted; listeners notice nothing.
+It runs as a job (Jobs area, `jobs show|stop ID`); a stopped move started
+again takes the calls left, and moving calls back to the main archive is
+another move. `storage remove NAME` removes a path that holds no call; its
+folder is left as it is. `archive move` moves the main archive only.
+
 ## Commands
 
 `scannerpulse --help` lists them. Every command first reads the machine's
@@ -454,6 +478,14 @@ already set in the environment wins. So far:
   `systems`); `POST /api/admin/names/approve` and `dismiss` take
   `talkgroup_id` and `name`; `POST /api/admin/staging/new-system`, `map`
   and `discard` take `system`, with `to` (map) or `confirm` (discard).
+- `storage list|add|remove|move` are described under Install, "Storage
+  paths beside the archive". `GET /api/admin/storage` lists the locations,
+  each with its calls (counted at most ten minutes before), what each
+  machine found there, and the machines whose ingest runs; `POST` adds one
+  (`name`, `folder`) and `DELETE /api/admin/storage/<id>` removes one. `GET
+  /api/admin/storage/move?to=&from=&until=` counts a move and says why it
+  cannot start (`refused`); `POST /api/admin/storage/move` starts it with
+  `to`, `from`, `until` and `confirm` (`move`).
 - `db promote`, `db rejoin` and `db switchover`, as root, change the two
   database machines' roles (above); `node serve`, `node status` and `node
   backup` are a database machine's (or the referee's) own, and `join info`
