@@ -115,11 +115,15 @@ pub fn check_here(folder: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(real)
 }
 
+/// The free and the total bytes of a location's disk, or why a host cannot
+/// use it.
+pub type Found = Result<(u64, u64), String>;
+
 /// What `host` finds in a location now: the free and the total bytes of its
 /// disk, once it has listed the folder, found its marker (`marked`: every
 /// location but the main archive has one) and written and removed a file
 /// there; or why it cannot use it.
-pub fn probe(root: &Path, marked: bool, host: &str) -> Result<(u64, u64), String> {
+pub fn probe(root: &Path, marked: bool, host: &str) -> Found {
     std::fs::read_dir(root)
         .map_err(|error| format!("{} cannot be listed: {error}", root.display()))?;
     if marked && !root.join(MARKER).is_file() {
@@ -148,13 +152,13 @@ pub async fn check_all(
     host: &str,
     hung: &mut crate::watcher::Hung,
     limit: Duration,
-) -> Vec<(i16, Result<(u64, u64), String>)> {
+) -> Vec<(i16, Found)> {
     let ids: Vec<i16> = locations.iter().map(|(id, ..)| *id).collect();
     let jobs = locations
         .into_iter()
         .map(|(_, root, marked)| {
             let (path, host) = (root.clone(), host.to_string());
-            let work: crate::watcher::Job<Result<(u64, u64), String>> =
+            let work: crate::watcher::Job<Found> =
                 Box::new(move || Ok(probe(&path, marked, &host)));
             (root, work)
         })
@@ -449,7 +453,7 @@ pub async fn counts(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<Counted>> {
 pub async fn record_health(
     db: impl PgExecutor<'_>,
     host: &str,
-    found: &[(i16, Result<(u64, u64), String>)],
+    found: &[(i16, Found)],
 ) -> sqlx::Result<()> {
     let ids: Vec<i16> = found.iter().map(|(id, _)| *id).collect();
     let problems: Vec<Option<String>> = found

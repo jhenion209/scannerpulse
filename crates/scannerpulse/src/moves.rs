@@ -282,7 +282,7 @@ struct Moving {
 
 /// What moving one call did.
 enum Moved {
-    Moved,
+    Done,
     Missing,
     /// It is not where its step's batch read it: a correction, a purge or a
     /// longer copy came first. A later move takes it.
@@ -389,7 +389,7 @@ pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Out
     let before = identities(&folders);
     for call in &batch {
         match move_one(conn, params.to, &dest_root, call).await? {
-            Moved::Moved => work.moved += 1,
+            Moved::Done => work.moved += 1,
             Moved::Missing => work.missing += 1,
             Moved::Changed => work.changed += 1,
             Moved::Refused(why) => {
@@ -495,7 +495,7 @@ async fn move_one(
     .bind(&call.rel_path)
     .execute(&mut *conn)
     .await?;
-    Ok(Moved::Moved)
+    Ok(Moved::Done)
 }
 
 #[cfg(test)]
