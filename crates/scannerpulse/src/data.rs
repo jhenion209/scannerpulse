@@ -310,6 +310,7 @@ pub(crate) async fn free_rel(
     dir: &str,
     name: &str,
     data: &[u8],
+    limit: std::time::Duration,
 ) -> sqlx::Result<io::Result<(String, bool)>> {
     let digest = archive::sha256(data);
     let mut n = 0;
@@ -327,18 +328,43 @@ pub(crate) async fn free_rel(
         if taken {
             continue;
         }
-        let path = root.join(&rel);
-        let _ = std::fs::remove_file(archive::part_path(&path));
-        match std::fs::metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Ok((rel, false))),
+        let (path, len) = (root.join(&rel), data.len() as u64);
+        let found = bounded(limit, move || {
+            let _ = std::fs::remove_file(archive::part_path(&path));
+            match std::fs::metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(false)),
+                Err(error) => Err(error),
+                Ok(meta) if meta.len() == len => {
+                    let (found, _) = archive::file_digest(&path)?;
+                    Ok((found == digest).then_some(true))
+                }
+                Ok(_) => Ok(None),
+            }
+        })
+        .await;
+        match found {
+            Ok(Some(copy)) => return Ok(Ok((rel, copy))),
+            Ok(None) => {}
             Err(error) => return Ok(Err(error)),
-            Ok(meta) if meta.len() == data.len() as u64 => match archive::file_digest(&path) {
-                Ok((found, _)) if found == digest => return Ok(Ok((rel, true))),
-                Ok(_) => {}
-                Err(error) => return Ok(Err(error)),
-            },
-            Ok(_) => {}
         }
+    }
+}
+
+/// Runs `work` in a thread of its own for `limit` at most: a share that stops
+/// answering then holds up no runtime worker, nor the archive's writes its
+/// caller holds. A thread that outlives the limit is left to end by itself,
+/// and the error's kind is `TimedOut`.
+pub(crate) async fn bounded<T: Send + 'static>(
+    limit: std::time::Duration,
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(work)).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join)) => Err(io::Error::other(join.to_string())),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("did not answer within {} s", limit.as_secs()),
+        )),
     }
 }
 
@@ -437,6 +463,7 @@ async fn correct_one(
             &dir,
             &retagged.name,
             &retagged.data,
+            jobs::FILE_LIMIT,
         )
         .await?
         {

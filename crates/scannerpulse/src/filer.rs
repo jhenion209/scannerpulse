@@ -678,13 +678,77 @@ impl Filer {
             return Ok(());
         }
         let _writing = archive::WRITES.lock().await;
+        // Another location's files are deleted in a thread of their own per
+        // location, for a limit: a share that stops answering holds up
+        // neither the filer nor the archive's writes, and is left alone until
+        // its thread ends. Its own check shows it on its card and on Status.
+        let mut elsewhere: Vec<(PathBuf, Vec<store::Leftover>)> = Vec::new();
         for left in leftovers {
             if !self.fence.held() {
                 break;
             }
-            self.remove_leftover(&left).await?;
+            if !(left.marked && left.managed) {
+                self.remove_leftover(&left).await?;
+            } else if self.named(&left).await? {
+                self.forget(&left).await?;
+            } else {
+                let root = PathBuf::from(&left.root);
+                match elsewhere.iter_mut().find(|(at, _)| *at == root) {
+                    Some((_, lefts)) => lefts.push(left),
+                    None => elsewhere.push((root, vec![left])),
+                }
+            }
+        }
+        let jobs = elsewhere
+            .iter()
+            .map(|(root, lefts)| {
+                let (at, rels): (PathBuf, Vec<String>) = (
+                    root.clone(),
+                    lefts.iter().map(|left| left.rel_path.clone()).collect(),
+                );
+                let job: watcher::Job<Vec<io::Result<()>>> = Box::new(move || {
+                    if !at.join(crate::storage::MARKER).is_file() {
+                        // Unmounted since its last check: its files are out
+                        // of reach, not gone, and stay listed.
+                        return Err(io::Error::other("not mounted"));
+                    }
+                    Ok(rels.iter().map(|rel| remove_left(&at.join(rel))).collect())
+                });
+                (root.clone(), job)
+            })
+            .collect();
+        let results = watcher::run_bounded(jobs, &mut self.hung, self.folder_limit).await;
+        for ((_, lefts), result) in elsewhere.iter().zip(results) {
+            let Ok(removed) = result else { continue };
+            for (left, removed) in lefts.iter().zip(removed) {
+                match removed {
+                    Ok(()) => self.forget(left).await?,
+                    // It stays listed, and the next pass tries again.
+                    Err(error) => crate::log::warn(format!(
+                        "cannot remove {}: {error}",
+                        Path::new(&left.root).join(&left.rel_path).display()
+                    )),
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Whether a call names the leftover's file again.
+    async fn named(&self, left: &store::Leftover) -> sqlx::Result<bool> {
+        limited(
+            self.db_limit,
+            store::named(&self.pool, left.location_id, &left.rel_path),
+        )
+        .await
+    }
+
+    async fn forget(&self, left: &store::Leftover) -> sqlx::Result<()> {
+        limited(
+            self.db_limit,
+            store::forget_leftover(&self.pool, left.location_id, &left.rel_path),
+        )
+        .await
     }
 
     /// Deletes an archive file that no call names any more, then its folder
@@ -693,36 +757,15 @@ impl Filer {
     /// held, so that no writer takes the file between the check and the
     /// deletion.
     async fn remove_leftover(&self, left: &store::Leftover) -> sqlx::Result<()> {
-        let (location_id, rel) = (left.location_id, left.rel_path.as_str());
-        if left.managed
-            && !limited(self.db_limit, store::named(&self.pool, location_id, rel)).await?
-        {
-            if left.marked && !Path::new(&left.root).join(crate::storage::MARKER).is_file() {
-                // Its share was unmounted since its last check: the file is
-                // out of reach, not gone, and stays listed.
+        if left.managed && !self.named(left).await? {
+            let path = Path::new(&left.root).join(&left.rel_path);
+            if let Err(error) = remove_left(&path) {
+                // It stays listed, and the next pass tries again.
+                crate::log::warn(format!("cannot remove {}: {error}", path.display()));
                 return Ok(());
             }
-            let path = Path::new(&left.root).join(rel);
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    if let Some(dir) = path.parent() {
-                        // Only an empty folder goes.
-                        let _ = fs::remove_dir(dir);
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    // It stays listed, and the next pass tries again.
-                    crate::log::warn(format!("cannot remove {}: {error}", path.display()));
-                    return Ok(());
-                }
-            }
         }
-        limited(
-            self.db_limit,
-            store::forget_leftover(&self.pool, location_id, rel),
-        )
-        .await
+        self.forget(left).await
     }
 
     /// The folder and path of a waiting file: in its recorder's folder, or in
@@ -1034,4 +1077,20 @@ fn file_name(rel_path: &str) -> &str {
 
 fn has_code(error: &sqlx::Error, code: &str) -> bool {
     matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some(code))
+}
+
+/// Deletes a file no call names, then its folder if that is empty. A file
+/// already gone is deleted too.
+fn remove_left(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            if let Some(dir) = path.parent() {
+                // Only an empty folder goes.
+                let _ = fs::remove_dir(dir);
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }

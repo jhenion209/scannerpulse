@@ -386,6 +386,40 @@ async fn a_move_between_two_paths_of_one_folder_is_refused(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_file_that_stops_answering_fails_the_move_instead_of_holding_it(pool: PgPool) {
+    let site = Site::new(pool).await;
+    let id = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;
+    // The call's file stops answering, as a hung share's would: a pipe
+    // nobody writes holds its reader for ever.
+    let pipe = site.archive.path().join("2025-03-01/1-A/a.mp3");
+    std::fs::remove_file(&pipe).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let job = site
+        .start("Cold", "2025-03-01", "2025-03-31", "move")
+        .await
+        .unwrap();
+    let mut context = Context::new(None);
+    context.file_limit = Duration::from_secs(2);
+    let (pool, handle) = (site.pool.clone(), tokio::runtime::Handle::current());
+    let stepping =
+        tokio::task::spawn_blocking(move || handle.block_on(jobs::step(&pool, "host-a", &context)));
+    let ended = tokio::time::timeout(Duration::from_secs(20), stepping).await;
+    // The reader left waiting ends either way.
+    std::fs::write(&pipe, b"").unwrap();
+    assert!(ended.is_ok(), "the step waited on the file for ever");
+    let (state, message, ..) = site.job(job).await;
+    assert_eq!(state, "failed");
+    assert!(message.contains("did not answer"), "{message}");
+    assert_eq!(site.place(id).await.0, site.primary);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_copy_left_there_is_taken_and_another_file_of_its_name_is_kept(pool: PgPool) {
     let site = Site::new(pool).await;
     let a = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;

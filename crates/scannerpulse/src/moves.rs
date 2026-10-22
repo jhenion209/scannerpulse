@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 
 use crate::archive;
-use crate::data::{free_rel, identities, io_error, same_identities, writes};
+use crate::data::{bounded, free_rel, identities, io_error, same_identities, writes};
 use crate::jobs::{self, Job, JobError, Kind, Outcome};
 use crate::setup::folders::size;
 use crate::storage;
@@ -288,22 +288,54 @@ enum Moved {
     /// longer copy came first. A later move takes it.
     Changed,
     Refused(String),
+    /// Its file, or the destination, did not answer within the limit: a
+    /// share that stopped answering.
+    Hung(String),
 }
 
 /// A folder is the location it was added as, mounted: Err otherwise, and the
 /// step is tried again.
-fn mounted(root: &Path, marked: bool, name: &str) -> sqlx::Result<()> {
+fn mounted(root: &Path, marked: bool, name: &str) -> io::Result<()> {
     if root.is_dir() && (!marked || root.join(storage::MARKER).is_file()) {
         Ok(())
     } else {
-        Err(io_error(io::Error::other(format!(
+        Err(io::Error::other(format!(
             "{name} is not mounted at {} on this machine",
             root.display()
-        ))))
+        )))
     }
 }
 
-pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
+/// The move ends with its counts when a location stops answering: started
+/// again once it answers, it takes the calls left.
+fn hung(what: &str, work: &MoveWork) -> Outcome {
+    Outcome::Failed(format!(
+        "{what}: {} calls were moved; start the move again once it answers",
+        work.moved
+    ))
+}
+
+/// Err unless every folder is still the one it was when the step began
+/// ([`same_identities`]), read in a thread of its own for `limit` at most.
+async fn unchanged(
+    folders: &[PathBuf],
+    before: &[Option<(u64, u64)>],
+    limit: Duration,
+) -> sqlx::Result<()> {
+    let (folders, before) = (folders.to_vec(), before.to_vec());
+    bounded(limit, move || {
+        let paths: Vec<&Path> = folders.iter().map(PathBuf::as_path).collect();
+        same_identities(&paths, &before).map_err(|error| io::Error::other(error.to_string()))
+    })
+    .await
+    .map_err(io_error)
+}
+
+pub(crate) async fn step(
+    conn: &mut PgConnection,
+    job: &Job,
+    limit: Duration,
+) -> sqlx::Result<Outcome> {
     let Ok(params) = serde_json::from_value::<Move>(job.params.clone()) else {
         return Ok(Outcome::Failed(
             "the job's parameters are not a move's".into(),
@@ -327,12 +359,26 @@ pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Out
         return Ok(Outcome::Failed(format!("{name} is read-only")));
     }
     let dest_root = PathBuf::from(&root);
-    mounted(&dest_root, !primary, &name)?;
-    let stats = rustix::fs::statvfs(&dest_root).map_err(|error| io_error(error.into()))?;
-    let (free, total) = (
-        stats.f_bavail.saturating_mul(stats.f_frsize),
-        stats.f_blocks.saturating_mul(stats.f_frsize),
-    );
+    // Every read of a location is in a thread of its own, for `limit` at
+    // most: a share that stops answering ends the move, and holds neither a
+    // runtime worker nor the archive's writes.
+    let (checked, marked, label) = (dest_root.clone(), !primary, name.clone());
+    let disk = bounded(limit, move || {
+        mounted(&checked, marked, &label)?;
+        let stats = rustix::fs::statvfs(&checked)?;
+        Ok((
+            stats.f_bavail.saturating_mul(stats.f_frsize),
+            stats.f_blocks.saturating_mul(stats.f_frsize),
+        ))
+    })
+    .await;
+    let (free, total) = match disk {
+        Ok(found) => found,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Ok(hung(&format!("{name} {error}"), &work));
+        }
+        Err(error) => return Err(io_error(error)),
+    };
     if free < margin(total) {
         return Ok(Outcome::Failed(format!(
             "{name} has {} free, less than the {} it keeps free: {} calls were moved; make room and start the move again",
@@ -381,24 +427,40 @@ pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Out
         .collect();
     roots.sort();
     roots.dedup();
-    for (root, marked) in &roots {
-        mounted(root, *marked, &root.display().to_string())?;
-    }
-    // A source reached by another path is the destination itself: its
-    // "copy" would be the call's file, and the sweep would delete it.
-    let sources: Vec<&Path> = roots.iter().map(|(root, _)| root.as_path()).collect();
-    if let Some(i) = storage::same_as(&dest_root, &sources).map_err(io_error)? {
-        return Ok(Outcome::Failed(format!(
-            "{name} and {} are one folder reached by two paths: nothing is moved between them; {} calls were moved",
-            sources[i].display(),
-            work.moved
-        )));
-    }
-    let mut folders: Vec<&Path> = roots.iter().map(|(root, _)| root.as_path()).collect();
-    folders.push(&dest_root);
-    let before = identities(&folders);
+    let mut folders: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
+    folders.push(dest_root.clone());
+    let (sources, dest, all) = (roots.clone(), dest_root.clone(), folders.clone());
+    let probed = bounded(limit, move || {
+        for (root, marked) in &sources {
+            mounted(root, *marked, &root.display().to_string())?;
+        }
+        // A source reached by another path is the destination itself: its
+        // "copy" would be the call's file, and the sweep would delete it.
+        let paths: Vec<&Path> = sources.iter().map(|(root, _)| root.as_path()).collect();
+        let same = storage::same_as(&dest, &paths)?.map(|i| paths[i].to_path_buf());
+        let all: Vec<&Path> = all.iter().map(PathBuf::as_path).collect();
+        Ok((same, identities(&all)))
+    })
+    .await;
+    let before = match probed {
+        Ok((Some(same), _)) => {
+            return Ok(Outcome::Failed(format!(
+                "{name} and {} are one folder reached by two paths: nothing is moved between them; {} calls were moved",
+                same.display(),
+                work.moved
+            )));
+        }
+        Ok((None, before)) => before,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Ok(hung(
+                &format!("{name}, or a location of the calls, {error}"),
+                &work,
+            ));
+        }
+        Err(error) => return Err(io_error(error)),
+    };
     for call in &batch {
-        match move_one(conn, params.to, &dest_root, call).await? {
+        match move_one(conn, params.to, &dest_root, call, limit).await? {
             Moved::Done => work.moved += 1,
             Moved::Missing => work.missing += 1,
             Moved::Changed => work.changed += 1,
@@ -406,10 +468,16 @@ pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Out
                 work.refused += 1;
                 work.last_refusal = Some(why);
             }
+            Moved::Hung(why) => {
+                // The calls moved before it stay moved, once their folders
+                // are checked; the others wait for the move to start again.
+                unchanged(&folders, &before, limit).await?;
+                return Ok(hung(&why, &work));
+            }
         }
         work.after = Some((call.started_at, call.id));
     }
-    same_identities(&folders, &before)?;
+    unchanged(&folders, &before, limit).await?;
     let done = job.done + batch.len() as i64;
     let total = job.total.map(|total| total.max(done));
     Ok(Outcome::More {
@@ -436,6 +504,7 @@ async fn move_one(
     dest_id: i16,
     dest_root: &Path,
     call: &Moving,
+    limit: Duration,
 ) -> sqlx::Result<Moved> {
     let now: Option<(i16, String)> = sqlx::query_as(
         "SELECT location_id, rel_path FROM calls WHERE id = $1 AND started_at = $2 FOR UPDATE",
@@ -448,14 +517,20 @@ async fn move_one(
         return Ok(Moved::Changed);
     }
     let refused = |error: io::Error| Moved::Refused(format!("{}: {error}", call.rel_path));
+    let timed_out = |error: &io::Error| error.kind() == io::ErrorKind::TimedOut;
     let old = Path::new(&call.root).join(&call.rel_path);
-    let data = match std::fs::read(&old) {
-        Ok(data) => data,
+    let read = bounded(limit, move || {
+        let data = std::fs::read(&old)?;
+        let mtime = std::fs::metadata(&old)?.modified()?;
+        Ok((data, mtime))
+    })
+    .await;
+    let (data, mtime) = match read {
+        Ok(found) => found,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Moved::Missing),
-        Err(error) => return Ok(refused(error)),
-    };
-    let mtime = match std::fs::metadata(&old).and_then(|meta| meta.modified()) {
-        Ok(mtime) => mtime,
+        Err(error) if timed_out(&error) => {
+            return Ok(Moved::Hung(format!("{} {error}", call.rel_path)));
+        }
         Err(error) => return Ok(refused(error)),
     };
     let Some((dir, name)) = call.rel_path.rsplit_once('/') else {
@@ -467,26 +542,33 @@ async fn move_one(
     // The name is chosen and given under the lock: the filer takes names in
     // the main archive, which may be the destination.
     let writing = writes().await?;
-    let (rel, copy) = match free_rel(conn, dest_root, dest_id, dir, name, &data).await? {
+    let (rel, copy) = match free_rel(conn, dest_root, dest_id, dir, name, &data, limit).await? {
         Ok(found) => found,
+        Err(error) if timed_out(&error) => {
+            return Ok(Moved::Hung(format!("{} {error}", dest_root.display())));
+        }
         Err(error) => return Ok(refused(error)),
     };
     let path = dest_root.join(&rel);
-    if !copy {
-        // After this the copy is an orphan if the step fails: the next
-        // attempt finds it as an exact copy and takes it.
-        if let Err(error) = archive::write_part(&path, &data, &archive::sha256(&data))
-            .and_then(|()| archive::finish_part(&path))
-        {
-            return Ok(refused(error));
+    // After this the copy is an orphan if the step fails: the next attempt
+    // finds it as an exact copy and takes it.
+    let written = bounded(limit, move || {
+        if !copy {
+            archive::write_part(&path, &data, &archive::sha256(&data))?;
+            archive::finish_part(&path)?;
         }
-    }
-    if let Err(error) = std::fs::File::options()
-        .write(true)
-        .open(&path)
-        .and_then(|file| file.set_modified(mtime))
-    {
-        return Ok(refused(error));
+        std::fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(mtime)
+    })
+    .await;
+    match written {
+        Ok(()) => {}
+        Err(error) if timed_out(&error) => {
+            return Ok(Moved::Hung(format!("{} {error}", dest_root.display())));
+        }
+        Err(error) => return Ok(refused(error)),
     }
     drop(writing);
     sqlx::query(

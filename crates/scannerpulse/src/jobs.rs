@@ -223,13 +223,21 @@ pub struct Context {
     pub batch: i64,
     /// Sends a candidate's requests.
     pub client: crate::asr::Client,
+    /// How long a move waits on a location's file before it gives up: a
+    /// share that stops answering must not hold the job, or the archive's
+    /// writes, for ever.
+    pub file_limit: std::time::Duration,
 }
+
+/// [`Context::file_limit`]'s value.
+pub const FILE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Context {
     pub fn new(api_key: Option<String>) -> Context {
         Context {
             batch: QUEUE_BATCH,
             client: crate::asr::Client::new(api_key),
+            file_limit: FILE_LIMIT,
         }
     }
 }
@@ -375,7 +383,7 @@ pub async fn step(
             Some(Kind::Correct) => crate::data::correct_step(&mut tx, &job).await?,
             Some(Kind::Merge) => crate::data::merge_step(&mut tx, &job).await?,
             Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job).await?,
-            Some(Kind::Move) => crate::moves::step(&mut tx, &job).await?,
+            Some(Kind::Move) => crate::moves::step(&mut tx, &job, context.file_limit).await?,
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };
