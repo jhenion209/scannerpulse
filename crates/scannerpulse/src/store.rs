@@ -993,6 +993,9 @@ pub struct Leftover {
     pub rel_path: String,
     /// A read-only location's file is never deleted, only forgotten.
     pub managed: bool,
+    /// Every location but the main archive holds a marker: without it, its
+    /// share is not mounted here.
+    pub marked: bool,
 }
 
 /// Up to `limit` archive files that no call names any more: in the main
@@ -1005,7 +1008,8 @@ pub async fn leftovers(
     limit: i64,
 ) -> sqlx::Result<Vec<Leftover>> {
     sqlx::query_as(
-        "SELECT a.location_id, l.root, a.rel_path, l.mode = 'managed' AS managed \
+        "SELECT a.location_id, l.root, a.rel_path, l.mode = 'managed' AS managed, \
+                NOT l.is_primary AS marked \
          FROM archive_leftovers a JOIN locations l ON l.id = a.location_id \
          WHERE l.is_primary OR l.mode <> 'managed' \
             OR EXISTS (SELECT 1 FROM location_health h \

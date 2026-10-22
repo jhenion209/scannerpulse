@@ -654,6 +654,7 @@ impl Filer {
                 root: self.location.root.display().to_string(),
                 rel_path: same.rel_path.clone(),
                 managed: true,
+                marked: false,
             })
             .await?;
         }
@@ -696,6 +697,11 @@ impl Filer {
         if left.managed
             && !limited(self.db_limit, store::named(&self.pool, location_id, rel)).await?
         {
+            if left.marked && !Path::new(&left.root).join(crate::storage::MARKER).is_file() {
+                // Its share was unmounted since its last check: the file is
+                // out of reach, not gone, and stays listed.
+                return Ok(());
+            }
             let path = Path::new(&left.root).join(rel);
             match fs::remove_file(&path) {
                 Ok(()) => {

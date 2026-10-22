@@ -267,6 +267,64 @@ async fn a_host_checks_every_location_and_one_not_mounted_is_unusable(pool: PgPo
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_location_unmounted_since_its_last_check_keeps_its_leftovers(pool: PgPool) {
+    const HOLDER: &str = "host-a 1-1";
+    let (archive, mounts) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let cold = mounts.path().join("cold");
+    std::fs::create_dir(&cold).unwrap();
+    let places = seed_places(&pool, archive.path(), Path::new("/srv/in/live")).await;
+    common::hold_lease(&pool, HOLDER).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let cold_id = storage::add(&mut conn, "Cold", &cold, None, |folder| {
+        storage::check_here(folder, "Cold")
+    })
+    .await
+    .unwrap();
+    std::fs::create_dir_all(cold.join("2025-03-01/1-A")).unwrap();
+    std::fs::write(cold.join("2025-03-01/1-A/x.mp3"), b"old").unwrap();
+    sqlx::query(
+        "INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, '2025-03-01/1-A/x.mp3')",
+    )
+    .bind(cold_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // host-a found Cold usable a moment ago; its share has been unmounted
+    // since, leaving the mount point an empty folder.
+    storage::record_health(&pool, "host-a", &[(cold_id, Ok((10, 20)))])
+        .await
+        .unwrap();
+    let share = mounts.path().join("share");
+    std::fs::rename(&cold, &share).unwrap();
+    std::fs::create_dir(&cold).unwrap();
+    let mut filer = scannerpulse::filer::Filer::new(
+        pool.clone(),
+        common::HeldFence::new(HOLDER),
+        scannerpulse::store::Location {
+            id: places.0,
+            root: archive.path().to_path_buf(),
+        },
+        chrono_tz::America::Chicago,
+        std::time::Duration::from_secs(900),
+    )
+    .with_host("host-a");
+    let left = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM archive_leftovers")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    filer.pass(10).await.unwrap();
+    assert_eq!(left().await, 1, "the file is on the share, not gone");
+    // Mounted again.
+    std::fs::remove_dir(&cold).unwrap();
+    std::fs::rename(&share, &cold).unwrap();
+    filer.pass(10).await.unwrap();
+    assert_eq!(left().await, 0);
+    assert!(!cold.join("2025-03-01/1-A/x.mp3").exists());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_filer_deletes_the_files_left_in_every_location_this_host_can_use(pool: PgPool) {
     const HOLDER: &str = "host-a 1-1";
     let (archive, cold, old) = (
