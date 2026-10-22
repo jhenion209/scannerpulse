@@ -40,6 +40,7 @@ pub mod settings;
 pub mod setup;
 pub mod smartsort;
 pub mod status;
+pub mod storage;
 pub mod store;
 pub mod talkgroups;
 pub mod transcriber;
