@@ -25,6 +25,8 @@ pub enum Kind {
     Merge,
     /// Deletes a talkgroup's calls, keeping their files in a holding folder.
     Purge,
+    /// Moves a date range of calls into another storage location.
+    Move,
 }
 
 impl Kind {
@@ -35,6 +37,7 @@ impl Kind {
             Kind::Correct => "correct",
             Kind::Merge => "merge",
             Kind::Purge => "purge",
+            Kind::Move => "move",
         }
     }
 
@@ -45,6 +48,7 @@ impl Kind {
             "correct" => Some(Kind::Correct),
             "merge" => Some(Kind::Merge),
             "purge" => Some(Kind::Purge),
+            "move" => Some(Kind::Move),
             _ => None,
         }
     }
@@ -371,6 +375,7 @@ pub async fn step(
             Some(Kind::Correct) => crate::data::correct_step(&mut tx, &job).await?,
             Some(Kind::Merge) => crate::data::merge_step(&mut tx, &job).await?,
             Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job).await?,
+            Some(Kind::Move) => crate::moves::step(&mut tx, &job).await?,
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };

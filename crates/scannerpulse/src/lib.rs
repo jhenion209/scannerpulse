@@ -24,6 +24,7 @@ pub mod lease;
 pub mod listing;
 pub mod localtime;
 pub mod log;
+pub mod moves;
 pub mod mp3;
 pub mod names;
 pub mod preview;

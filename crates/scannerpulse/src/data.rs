@@ -217,14 +217,14 @@ async fn roots(conn: &mut PgConnection) -> sqlx::Result<HashMap<i16, PathBuf>> {
         .collect())
 }
 
-fn io_error(error: io::Error) -> sqlx::Error {
+pub(crate) fn io_error(error: io::Error) -> sqlx::Error {
     sqlx::Error::Io(error)
 }
 
 /// The archive lock, or an error that makes the step roll back and try
 /// again: a step holds rows the filer may be waiting for while it waits for
 /// the lock, so it never waits long.
-async fn writes() -> sqlx::Result<tokio::sync::MutexGuard<'static, ()>> {
+pub(crate) async fn writes() -> sqlx::Result<tokio::sync::MutexGuard<'static, ()>> {
     tokio::time::timeout(std::time::Duration::from_secs(5), archive::WRITES.lock())
         .await
         .map_err(|_| io_error(io::Error::other("the archive is busy; trying again")))
@@ -232,7 +232,7 @@ async fn writes() -> sqlx::Result<tokio::sync::MutexGuard<'static, ()>> {
 
 /// Which directory each folder is: its device and inode. A share unmounted
 /// (or mounted) while a step runs makes the same path a different directory.
-fn identities(folders: &[&Path]) -> Vec<Option<(u64, u64)>> {
+pub(crate) fn identities(folders: &[&Path]) -> Vec<Option<(u64, u64)>> {
     use std::os::unix::fs::MetadataExt;
     folders
         .iter()
@@ -246,7 +246,10 @@ fn identities(folders: &[&Path]) -> Vec<Option<(u64, u64)>> {
 
 /// Err when a folder became another directory during the step: the step then
 /// rolls back, so no row names a file written under a mount point.
-fn same_identities(folders: &[&Path], before: &[Option<(u64, u64)>]) -> sqlx::Result<()> {
+pub(crate) fn same_identities(
+    folders: &[&Path],
+    before: &[Option<(u64, u64)>],
+) -> sqlx::Result<()> {
     for (folder, (now, then)) in folders.iter().zip(identities(folders).iter().zip(before)) {
         if now != then {
             return Err(io_error(io::Error::other(format!(
@@ -298,7 +301,7 @@ async fn remove_gone(
 
 /// The first name in `dir` for a file of `data`: one no call has and no other
 /// file holds, or an exact copy left by a step that did not commit.
-async fn free_rel(
+pub(crate) async fn free_rel(
     conn: &mut PgConnection,
     root: &Path,
     location_id: i16,
