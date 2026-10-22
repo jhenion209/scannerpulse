@@ -456,6 +456,27 @@ again takes the calls left, and moving calls back to the main archive is
 another move. `storage remove NAME` removes a path that holds no call; its
 folder is left as it is. `archive move` moves the main archive only.
 
+**Purging older than a day.** `storage purge-before DAY` (Purge older
+than…, red and apart on the Storage area) deletes every call before that
+day, in the site's time zone, wherever it is: its record with its
+transcripts, labels and queue row, and its file for good; nothing is kept.
+It counts the calls of each location and the space their files use first,
+refuses a day in the future (a mistyped year would take every call), and
+starts only once the day is typed (`--confirm DAY`); the admin page
+asks once more in a pop-up, since there is no undo. It runs as a job, 500
+calls a step: each call's record goes first and its file is listed for the
+filer, which deletes it soon after, so a stop never leaves a call without
+its file. A read-only location's files stay: only their records go, and
+the location keeps the day, so that a later import of it skips the files
+from before it. A recorder's late file older than the day is filed as
+usual: a purge is done once, not kept as a rule.
+
+A location's file work (a move's copies, a correction's, merge's or
+purge's reads and writes, and the filer's deletions) runs in a thread of its
+own for a limit (60 s for a job): a share that stops answering ends the job
+with its counts, and holds back neither the filing of new calls nor the
+other machine.
+
 ## Commands
 
 `scannerpulse --help` lists them. Every command first reads the machine's
@@ -485,7 +506,10 @@ already set in the environment wins. So far:
   (`name`, `folder`) and `DELETE /api/admin/storage/<id>` removes one. `GET
   /api/admin/storage/move?to=&from=&until=` counts a move and says why it
   cannot start (`refused`); `POST /api/admin/storage/move` starts it with
-  `to`, `from`, `until` and `confirm` (`move`).
+  `to`, `from`, `until` and `confirm` (`move`). `GET
+  /api/admin/storage/purge?before=` counts a purge (each location's calls,
+  and whether it is read-only); `POST /api/admin/storage/purge` starts it
+  with `before` and `confirm` (the day).
 - `db promote`, `db rejoin` and `db switchover`, as root, change the two
   database machines' roles (above); `node serve`, `node status` and `node
   backup` are a database machine's (or the referee's) own, and `join info`
@@ -744,8 +768,9 @@ already set in the environment wins. So far:
   (setting `purge.holding_path`, which the administrator empties), with the
   archive's layout so that an import could bring it back, read back and
   compared; then the call's row goes, and the archived file is removed by
-  the next step. A purge refuses to start without that setting and
-  while any of the calls is in a read-only location. The holding folder is
+  the next step. A purge refuses to start without that setting. A call in
+  a read-only location loses only its record; its file stays where it is,
+  and the count says how many calls this is. The holding folder is
   checked by the host that runs the job: a folder it cannot see, or one inside
   an archive location or an ingest source (or holding one), fails the job.
   Put an empty file named `.scannerpulse-holding` in the holding folder:
