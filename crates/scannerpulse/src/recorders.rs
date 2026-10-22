@@ -224,7 +224,7 @@ pub fn reach_as(account: &str, folder: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "the {account} account cannot list or write {0}: let it in, as setup lets it into its own folders (setfacl -R -m u:{account}:rwX -m d:u:{account}:rwX {0}), or through the share's own rights, then add the recorder again",
+        "the {account} account cannot list or write {0}: let it in, as setup lets it into its own folders (setfacl -R -m u:{account}:rwX -m d:u:{account}:rwX {0}), or through the share's own rights, then try again",
         folder.display()
     ))
 }

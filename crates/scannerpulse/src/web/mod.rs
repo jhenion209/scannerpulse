@@ -14,6 +14,7 @@ mod error;
 mod info;
 mod jobs;
 mod recorders;
+mod storage;
 
 /// The jobs the admin page and `jobs list` show.
 pub use jobs::LISTED as JOBS_LISTED;
@@ -234,6 +235,8 @@ pub struct AppState {
         Arc<tokio::sync::Mutex<Option<(std::time::Instant, chrono_tz::Tz, serde_json::Value)>>>,
     /// The filter choices, with the time they were read.
     pub filters: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
+    /// The storage locations' counts, kept a while: counting reads every call.
+    pub storage_counts: storage::KeptCounts,
     /// What the settings file says of this machine.
     pub machine: Machine,
     /// The certificate served, over HTTPS.
@@ -249,6 +252,7 @@ impl AppState {
             exact_counts: Arc::new(tokio::sync::Semaphore::new(calls::EXACT_COUNTS)),
             filters: Arc::new(tokio::sync::Mutex::new(None)),
             traffic: Arc::new(tokio::sync::Mutex::new(None)),
+            storage_counts: Arc::new(tokio::sync::Mutex::new(None)),
             saves: edit::Saves::default(),
             host: "web".to_string(),
             oidc_secret: None,
@@ -331,6 +335,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/admin/staging/{decision}",
             post(recorders::decide_system),
+        )
+        .route("/api/admin/storage", get(storage::list).post(storage::add))
+        .route(
+            "/api/admin/storage/move",
+            get(storage::move_preview).post(storage::move_start),
+        )
+        .route(
+            "/api/admin/storage/{id}",
+            axum::routing::delete(storage::remove),
         )
         .route("/api/admin/data/uncorrected", get(data::uncorrected))
         .route("/api/admin/talkgroups/{id}/rename", post(data::rename))

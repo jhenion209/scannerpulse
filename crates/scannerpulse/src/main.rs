@@ -56,6 +56,10 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse staging new-system NAME
        scannerpulse staging map NAME SYSTEM
        scannerpulse staging discard NAME [--confirm NAME]
+       scannerpulse storage list
+       scannerpulse storage add NAME FOLDER
+       scannerpulse storage remove NAME
+       scannerpulse storage move FROM TO LOCATION [--confirm move]
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
@@ -365,6 +369,7 @@ enum Command {
     Uncorrected,
     Data(Data),
     Recorder(RecorderCommand),
+    Storage(StorageCommand),
     Waiting(Waiting),
     RetryFailed,
     Status,
@@ -407,6 +412,25 @@ enum RecorderCommand {
     },
     Preview {
         name: String,
+    },
+}
+
+/// The storage locations, and moving a date range of calls into one.
+#[derive(Debug, PartialEq, Eq)]
+enum StorageCommand {
+    List,
+    Add {
+        name: String,
+        folder: PathBuf,
+    },
+    Remove {
+        name: String,
+    },
+    Move {
+        from: chrono::NaiveDate,
+        until: chrono::NaiveDate,
+        to: String,
+        confirm: Option<String>,
     },
 }
 
@@ -707,6 +731,23 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["recorder", "preview", name] => Some(Command::Recorder(RecorderCommand::Preview {
             name: name.to_string(),
         })),
+        ["storage", "list"] => Some(Command::Storage(StorageCommand::List)),
+        ["storage", "add", name, folder] => Some(Command::Storage(StorageCommand::Add {
+            name: name.to_string(),
+            folder: PathBuf::from(folder),
+        })),
+        ["storage", "remove", name] => Some(Command::Storage(StorageCommand::Remove {
+            name: name.to_string(),
+        })),
+        ["storage", "move", from, until, to, rest @ ..] => {
+            let found = flags(rest, &[], &["--confirm"], &[])?;
+            Some(Command::Storage(StorageCommand::Move {
+                from: from.parse().ok()?,
+                until: until.parse().ok()?,
+                to: to.to_string(),
+                confirm: found.get("--confirm").map(|c| c.to_string()),
+            }))
+        }
         ["names", "list"] => Some(Command::Waiting(Waiting::Names)),
         ["names", "approve", talkgroup, name] => Some(Command::Waiting(Waiting::Approve {
             talkgroup: talkgroup.to_string(),
@@ -1067,6 +1108,13 @@ async fn run() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("recorder: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Storage(command)) => match storage_command(command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("storage: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -1925,6 +1973,131 @@ fn typed(given: Option<String>, question: &str) -> std::io::Result<String> {
     Ok(answer.trim_end_matches(['\n', '\r']).to_string())
 }
 
+async fn storage_command(command: StorageCommand) -> CommandResult {
+    use scannerpulse::setup::folders::size;
+    use scannerpulse::{moves, storage};
+    let mut conn = connect().await?;
+    match command {
+        StorageCommand::List => {
+            let zone = settings::load(&mut conn).await?.time_zone;
+            let counts = storage::counts(&mut conn).await?;
+            let day = |at: Option<chrono::DateTime<Utc>>| {
+                at.map_or("-".to_string(), |at| {
+                    at.with_timezone(&zone).format("%Y-%m-%d").to_string()
+                })
+            };
+            for l in storage::list(&mut conn).await? {
+                let kind = match (l.primary, l.mode.as_str()) {
+                    (true, _) => "the main archive: new calls are filed here",
+                    (false, "managed") => "calls are moved into it",
+                    _ => "read-only",
+                };
+                let mut line = format!("{}\t{}\t{kind}", l.name, l.root);
+                match counts.iter().find(|c| c.location_id == l.id) {
+                    Some(c) => {
+                        line.push_str(&format!(
+                            "\t{} calls, {} to {}",
+                            c.calls,
+                            day(c.first_call),
+                            day(c.last_call)
+                        ));
+                        if let Some(bytes) =
+                            storage::bytes_about(Path::new(&l.root), &c.sample, c.calls)
+                        {
+                            line.push_str(&format!(", about {}", size(bytes as u64)));
+                        }
+                    }
+                    None => line.push_str("\tno call"),
+                }
+                println!("{line}");
+                for h in &l.hosts {
+                    match (h.ok, h.free_bytes, h.total_bytes) {
+                        (true, Some(free), Some(total)) => println!(
+                            "  on {}: usable, {} free of {}",
+                            h.host,
+                            size(free as u64),
+                            size(total as u64)
+                        ),
+                        _ => println!(
+                            "  on {}: {}",
+                            h.host,
+                            h.problem.as_deref().unwrap_or("cannot be used")
+                        ),
+                    }
+                }
+            }
+        }
+        StorageCommand::Add { name, folder } => {
+            let root = rustix::process::geteuid().is_root();
+            let backups = std::env::var_os("SCANNERPULSE_BACKUPS").map(PathBuf::from);
+            let id = storage::add(&mut conn, &name, &folder, backups.as_deref(), |folder| {
+                let real = storage::check_here(folder, &name)?;
+                if root {
+                    recorders::reach_as(scannerpulse::setup::steps::ACCOUNT, &real)?;
+                }
+                Ok(real)
+            })
+            .await?;
+            println!(
+                "added the location {name} (id {id}); every running ingest checks it within a minute, and calls can be moved into it once each can use it"
+            );
+        }
+        StorageCommand::Remove { name } => {
+            let id = storage::find(&mut conn, &name).await?;
+            storage::remove(&mut conn, id).await?;
+            println!("removed the location {name}; its folder is left as it is");
+        }
+        StorageCommand::Move {
+            from,
+            until,
+            to,
+            confirm,
+        } => {
+            let zone = settings::load(&mut conn).await?.time_zone;
+            let preview = moves::preview(&mut conn, &to, from, until, zone).await?;
+            let held: Vec<String> = preview
+                .held
+                .iter()
+                .map(|h| format!("{} in {}", h.calls, h.location))
+                .collect();
+            println!(
+                "{} calls of {from} to {until} would move into {to} ({}){}{}",
+                preview.calls,
+                held.join(", "),
+                preview
+                    .bytes_about
+                    .map_or(String::new(), |b| format!(", about {}", size(b as u64))),
+                preview.free_bytes.map_or(String::new(), |f| format!(
+                    "; {to} has {} free",
+                    size(f as u64)
+                ))
+            );
+            if let Some(why) = preview.refused {
+                return Err(why.into());
+            }
+            let confirm = typed(
+                confirm,
+                &format!("there is no undo; type {} to start: ", moves::CONFIRM),
+            )?;
+            let (job, preview) = moves::start(
+                &mut conn,
+                &to,
+                from,
+                until,
+                zone,
+                &confirm,
+                &command_line_user(),
+            )
+            .await?;
+            println!(
+                "job {job} is started: move {} calls into {to}; `scannerpulse jobs show {job}` follows it",
+                preview.calls
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn data_command(command: Data) -> CommandResult {
     let mut conn = connect().await?;
     let by = command_line_user();
@@ -2613,8 +2786,10 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 mod tests {
     use super::{
         Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
-        RecorderCommand, Settings, Waiting, parse, recorders, run_to_end, talkgroup_list,
+        RecorderCommand, Settings, StorageCommand, Waiting, parse, recorders, run_to_end,
+        talkgroup_list,
     };
+    use std::path::PathBuf;
     use std::process::ExitCode;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -3158,6 +3333,44 @@ mod tests {
             Some(Command::Favorites(Favorites::Remove("Fire".into())))
         );
         assert_eq!(parse(&["viewers"]), Some(Command::Viewers));
+        assert_eq!(
+            parse(&["storage", "list"]),
+            Some(Command::Storage(StorageCommand::List))
+        );
+        assert_eq!(
+            parse(&["storage", "add", "Cold 2024", "/srv/cold"]),
+            Some(Command::Storage(StorageCommand::Add {
+                name: "Cold 2024".into(),
+                folder: PathBuf::from("/srv/cold"),
+            }))
+        );
+        assert_eq!(
+            parse(&["storage", "remove", "Cold 2024"]),
+            Some(Command::Storage(StorageCommand::Remove {
+                name: "Cold 2024".into()
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "storage",
+                "move",
+                "2025-01-01",
+                "2025-06-30",
+                "Cold 2024",
+                "--confirm",
+                "move"
+            ]),
+            Some(Command::Storage(StorageCommand::Move {
+                from: "2025-01-01".parse().unwrap(),
+                until: "2025-06-30".parse().unwrap(),
+                to: "Cold 2024".into(),
+                confirm: Some("move".into()),
+            }))
+        );
+        assert_eq!(
+            parse(&["storage", "move", "2025-01-01", "June", "Cold"]),
+            None
+        );
         assert_eq!(
             parse(&["recorder", "list"]),
             Some(Command::Recorder(RecorderCommand::List))

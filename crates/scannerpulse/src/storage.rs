@@ -219,17 +219,15 @@ async fn taken(
     Ok(taken)
 }
 
-/// Adds a location calls can be moved into. `check` finds the folder usable,
-/// resolves its links and writes its marker ([`check_here`] in the web
-/// service, which runs as the service account). `backups` is this machine's
-/// backups folder, when it has one.
-pub async fn add(
+/// Why a location named `name` cannot be added at `folder`, as it is
+/// written, before the folder is touched: [`add`] checks it again once its
+/// links are resolved.
+pub async fn addable(
     conn: &mut PgConnection,
     name: &str,
     folder: &Path,
     backups: Option<&Path>,
-    check: impl FnOnce(&Path) -> Result<PathBuf, String>,
-) -> Result<i16, Refused> {
+) -> Result<(), Refused> {
     if let Some(problem) = crate::recorders::name_problem(name) {
         return Err(Refused::Refused(problem));
     }
@@ -252,14 +250,28 @@ pub async fn add(
             "there is no archive yet: run scannerpulse setup first".into(),
         ));
     }
-    // Checked before the folder is touched, and again once its links are
-    // resolved.
-    let taken = taken(conn, backups).await?;
     if folder.is_absolute()
-        && let Some(problem) = folder_problem(folder, &taken)
+        && let Some(problem) = folder_problem(folder, &taken(conn, backups).await?)
     {
         return Err(Refused::Refused(problem));
     }
+    Ok(())
+}
+
+/// Adds a location calls can be moved into. `check` finds the folder usable,
+/// resolves its links and writes its marker ([`check_here`] in the web
+/// service, which runs as the service account). `backups` is this machine's
+/// backups folder, when it has one.
+pub async fn add(
+    conn: &mut PgConnection,
+    name: &str,
+    folder: &Path,
+    backups: Option<&Path>,
+    check: impl FnOnce(&Path) -> Result<PathBuf, String>,
+) -> Result<i16, Refused> {
+    addable(conn, name, folder, backups).await?;
+    let taken = taken(conn, backups).await?;
+    // Checked again once its links are resolved.
     let real = check(folder).map_err(Refused::Refused)?;
     if let Some(problem) = folder_problem(&real, &taken) {
         return Err(Refused::Refused(problem));
