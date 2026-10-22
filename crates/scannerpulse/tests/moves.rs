@@ -309,6 +309,53 @@ async fn a_move_copies_checks_and_points_each_call_and_the_filer_deletes_the_old
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_move_back_never_takes_an_old_file_still_waiting_for_its_deletion(pool: PgPool) {
+    let site = Site::new(pool).await;
+    let first = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;
+    let second = site.call("2025-03-01/1-A/b.mp3", march(1), b"call b").await;
+    site.start("Cold", "2025-03-01", "2025-03-31", "move")
+        .await
+        .unwrap();
+    site.run().await;
+    // Moved back before the sweep reached the old files, which are still
+    // in the main archive at the same paths.
+    site.start("primary", "2025-03-01", "2025-03-31", "move")
+        .await
+        .unwrap();
+    // The step waits for the second call after taking the first: the sweep
+    // runs meanwhile, as the filer's does every second.
+    let mut holding = site.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM calls WHERE id = $1 FOR UPDATE")
+        .bind(second)
+        .execute(&mut *holding)
+        .await
+        .unwrap();
+    let pool = site.pool.clone();
+    let stepping = tokio::spawn(async move {
+        jobs::step(&pool, "host-a", &Context::new(None))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    site.sweep().await;
+    holding.commit().await.unwrap();
+    stepping.await.unwrap();
+    site.run().await;
+    site.sweep().await;
+    site.sweep().await;
+    for (id, bytes) in [(first, &b"call a"[..]), (second, &b"call b"[..])] {
+        let (location, rel) = site.place(id).await;
+        assert_eq!(location, site.primary);
+        let file = site.archive.path().join(&rel);
+        assert_eq!(
+            std::fs::read(&file).ok().as_deref(),
+            Some(bytes),
+            "call {id}: {rel}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_copy_left_there_is_taken_and_another_file_of_its_name_is_kept(pool: PgPool) {
     let site = Site::new(pool).await;
     let a = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;

@@ -299,8 +299,10 @@ async fn remove_gone(
     Ok(())
 }
 
-/// The first name in `dir` for a file of `data`: one no call has and no other
-/// file holds, or an exact copy left by a step that did not commit.
+/// The first name in `dir` for a file of `data`: one no call has, no leftover
+/// lists and no other file holds, or an exact copy left by a step that did
+/// not commit. A listed leftover is never taken again: the sweep, which
+/// cannot see this step's uncommitted calls, would delete it.
 pub(crate) async fn free_rel(
     conn: &mut PgConnection,
     root: &Path,
@@ -315,7 +317,8 @@ pub(crate) async fn free_rel(
         let rel = format!("{dir}/{}", archive::candidate(name, n));
         n += 1;
         let taken: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM calls WHERE location_id = $1 AND rel_path = $2)",
+            "SELECT EXISTS (SELECT 1 FROM calls WHERE location_id = $1 AND rel_path = $2) \
+                 OR EXISTS (SELECT 1 FROM archive_leftovers WHERE location_id = $1 AND rel_path = $2)",
         )
         .bind(location_id)
         .bind(&rel)
