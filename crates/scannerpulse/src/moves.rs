@@ -341,6 +341,13 @@ pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Out
             work.moved
         )));
     }
+    // A host that lost the location would fail to play every call moved now.
+    if let Some(why) = storage::unusable(conn, params.to, &name).await? {
+        return Ok(Outcome::Failed(format!(
+            "{why}: {} calls were moved; start the move again once every host can use {name}",
+            work.moved
+        )));
+    }
     let (after_at, after_id) = work.after.unzip();
     let batch: Vec<Moving> = sqlx::query_as(
         "SELECT c.id, c.started_at, c.location_id, c.rel_path, l.root, NOT l.is_primary AS marked \

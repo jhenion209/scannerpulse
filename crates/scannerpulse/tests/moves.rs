@@ -413,6 +413,32 @@ async fn a_location_that_is_not_mounted_holds_the_move(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_move_stops_when_a_running_host_can_no_longer_use_its_destination(pool: PgPool) {
+    let site = Site::new(pool).await;
+    site.beat("host-b").await;
+    site.usable("host-b").await;
+    let id = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;
+    let job = site
+        .start("Cold", "2025-03-01", "2025-03-31", "move")
+        .await
+        .unwrap();
+    // host-b loses Cold after the move started: its plays of moved calls would fail.
+    storage::record_health(
+        &site.pool,
+        "host-b",
+        &[(site.cold_id, Err("it cannot be read".into()))],
+    )
+    .await
+    .unwrap();
+    site.run().await;
+    let (state, message, ..) = site.job(job).await;
+    assert_eq!(state, "failed");
+    assert!(message.contains("host-b cannot use Cold"), "{message}");
+    assert!(message.contains("0 calls were moved"), "{message}");
+    assert_eq!(site.place(id).await.0, site.primary);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_call_changed_while_its_step_waited_for_it_is_left_where_it_is(pool: PgPool) {
     let site = Site::new(pool).await;
     let id = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;
