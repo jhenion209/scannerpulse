@@ -63,7 +63,7 @@ fn job_refused(error: JobError) -> ApiError {
 /// ended since `at`: the counts made then are out of date.
 async fn moved_since(pool: &sqlx::PgPool, at: DateTime<Utc>) -> sqlx::Result<bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM jobs WHERE kind IN ('move', 'purge') AND finished_at > $1)",
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE kind IN ('move', 'purge', 'purge_before') AND finished_at > $1)",
     )
     .bind(at)
     .fetch_one(pool)

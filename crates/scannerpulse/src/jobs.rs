@@ -27,6 +27,8 @@ pub enum Kind {
     Purge,
     /// Moves a date range of calls into another storage location.
     Move,
+    /// Deletes every call before a day, records first, files by the sweep.
+    PurgeBefore,
 }
 
 impl Kind {
@@ -38,6 +40,7 @@ impl Kind {
             Kind::Merge => "merge",
             Kind::Purge => "purge",
             Kind::Move => "move",
+            Kind::PurgeBefore => "purge_before",
         }
     }
 
@@ -49,6 +52,7 @@ impl Kind {
             "merge" => Some(Kind::Merge),
             "purge" => Some(Kind::Purge),
             "move" => Some(Kind::Move),
+            "purge_before" => Some(Kind::PurgeBefore),
             _ => None,
         }
     }
@@ -384,6 +388,7 @@ pub async fn step(
             Some(Kind::Merge) => crate::data::merge_step(&mut tx, &job).await?,
             Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job).await?,
             Some(Kind::Move) => crate::moves::step(&mut tx, &job, context.file_limit).await?,
+            Some(Kind::PurgeBefore) => crate::purges::step(&mut tx, &job).await?,
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };

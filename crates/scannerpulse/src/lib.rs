@@ -29,6 +29,7 @@ pub mod mp3;
 pub mod names;
 pub mod preview;
 pub mod primary;
+pub mod purges;
 pub mod queue;
 pub mod reader;
 pub mod recorders;
