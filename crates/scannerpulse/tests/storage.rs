@@ -267,6 +267,33 @@ async fn a_host_checks_every_location_and_one_not_mounted_is_unusable(pool: PgPo
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_folder_in_use_reached_by_another_path_is_refused(pool: PgPool) {
+    let (folders, links) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let real = folders.path().join("archive");
+    std::fs::create_dir(&real).unwrap();
+    // The main archive was set up through another path to the same folder,
+    // as a bind mount or a second mount of one share would be.
+    let other = links.path().join("archive");
+    std::os::unix::fs::symlink(&real, &other).unwrap();
+    seed_places(&pool, &other, Path::new("/srv/in/live")).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let refused = storage::add(&mut conn, "Cold", &real, None, |folder| {
+        storage::check_here(folder, "Cold")
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&refused, storage::Refused::Refused(why) if why.contains("the main archive")),
+        "{refused:?}"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM locations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_location_unmounted_since_its_last_check_keeps_its_leftovers(pool: PgPool) {
     const HOLDER: &str = "host-a 1-1";
     let (archive, mounts) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());

@@ -384,6 +384,16 @@ pub(crate) async fn step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Out
     for (root, marked) in &roots {
         mounted(root, *marked, &root.display().to_string())?;
     }
+    // A source reached by another path is the destination itself: its
+    // "copy" would be the call's file, and the sweep would delete it.
+    let sources: Vec<&Path> = roots.iter().map(|(root, _)| root.as_path()).collect();
+    if let Some(i) = storage::same_as(&dest_root, &sources).map_err(io_error)? {
+        return Ok(Outcome::Failed(format!(
+            "{name} and {} are one folder reached by two paths: nothing is moved between them; {} calls were moved",
+            sources[i].display(),
+            work.moved
+        )));
+    }
     let mut folders: Vec<&Path> = roots.iter().map(|(root, _)| root.as_path()).collect();
     folders.push(&dest_root);
     let before = identities(&folders);

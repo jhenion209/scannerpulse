@@ -356,6 +356,36 @@ async fn a_move_back_never_takes_an_old_file_still_waiting_for_its_deletion(pool
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_move_between_two_paths_of_one_folder_is_refused(pool: PgPool) {
+    let site = Site::new(pool).await;
+    let id = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;
+    // Cold is the main archive's folder reached by another path, as a bind
+    // mount or a second mount of one share would be.
+    let links = tempfile::tempdir().unwrap();
+    let same = links.path().join("archive");
+    std::os::unix::fs::symlink(site.archive.path(), &same).unwrap();
+    std::fs::write(site.archive.path().join(storage::MARKER), b"").unwrap();
+    sqlx::query("UPDATE locations SET root = $2 WHERE id = $1")
+        .bind(site.cold_id)
+        .bind(same.to_str().unwrap())
+        .execute(&site.pool)
+        .await
+        .unwrap();
+    let job = site
+        .start("Cold", "2025-03-01", "2025-03-31", "move")
+        .await
+        .unwrap();
+    site.run().await;
+    site.sweep().await;
+    let (state, message, ..) = site.job(job).await;
+    assert_eq!(state, "failed");
+    assert!(message.contains("one folder"), "{message}");
+    assert_eq!(site.place(id).await.0, site.primary);
+    let file = site.archive.path().join("2025-03-01/1-A/a.mp3");
+    assert_eq!(std::fs::read(file).ok().as_deref(), Some(&b"call a"[..]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_copy_left_there_is_taken_and_another_file_of_its_name_is_kept(pool: PgPool) {
     let site = Site::new(pool).await;
     let a = site.call("2025-03-01/1-A/a.mp3", march(0), b"call a").await;

@@ -64,6 +64,31 @@ pub struct Counted {
     pub sample: Vec<String>,
 }
 
+/// How long [`add`] waits for the folders in use to show whether the new
+/// folder is one of them.
+const SAME_LIMIT: Duration = Duration::from_secs(5);
+
+/// Which of `others`, if any, is `folder` itself reached by another path (a
+/// bind mount, a second mount of one share, a link), which their names do
+/// not show: a file written into `folder` for a moment shows there too. A
+/// folder that is not on this machine is none of them.
+pub fn same_as(folder: &Path, others: &[&Path]) -> std::io::Result<Option<usize>> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe = format!(".scannerpulse-same-{}-{nanos}", std::process::id());
+    let written = folder.join(&probe);
+    match std::fs::File::create_new(&written) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let found = others.iter().position(|other| other.join(&probe).exists());
+    let _ = std::fs::remove_file(&written);
+    Ok(found)
+}
+
 /// Why `folder` cannot be a location beside the folders already `taken`
 /// (each with what it is, as a person says it), or None. A location holds
 /// files that are moved and deleted, so it shares no folder with another use.
@@ -279,6 +304,32 @@ pub async fn add(
     let real = check(folder).map_err(Refused::Refused)?;
     if let Some(problem) = folder_problem(&real, &taken) {
         return Err(Refused::Refused(problem));
+    }
+    let (probe, others) = (real.clone(), taken.clone());
+    let same = tokio::time::timeout(
+        SAME_LIMIT,
+        tokio::task::spawn_blocking(move || {
+            let roots: Vec<&Path> = others.iter().map(|(_, root)| root.as_path()).collect();
+            same_as(&probe, &roots).map(|found| found.map(|i| others[i].clone()))
+        }),
+    )
+    .await;
+    let why = match same {
+        Ok(Ok(Ok(None))) => None,
+        Ok(Ok(Ok(Some((what, root))))) => Some(format!(
+            "{} and {} are one folder reached by two paths: it is {what}",
+            real.display(),
+            root.display()
+        )),
+        Ok(Ok(Err(error))) => Some(format!("{} cannot be checked: {error}", real.display())),
+        Ok(Err(error)) => Some(format!("the check failed: {error}")),
+        Err(_) => Some(format!(
+            "a folder in use did not answer within {} s: try again",
+            SAME_LIMIT.as_secs()
+        )),
+    };
+    if let Some(why) = why {
+        return Err(Refused::Refused(why));
     }
     let id = sqlx::query_scalar(
         "INSERT INTO locations (name, root, mode) VALUES ($1, $2, 'managed') RETURNING id",
