@@ -102,6 +102,8 @@ pub struct Filer {
     /// This host's name: the files left in a location other than the main
     /// archive are deleted only once this host found it usable.
     host: String,
+    /// The last sweep took a full batch: see [`Filer::backlog`].
+    backlog: bool,
 }
 
 /// How a recorder's file is read ([`reader::read_path`]).
@@ -128,6 +130,7 @@ impl Filer {
             folder_limit: watcher::FOLDER_LIMIT,
             hung: Hung::default(),
             host: String::new(),
+            backlog: false,
         }
     }
 
@@ -669,6 +672,7 @@ impl Filer {
     /// location this host can use: a recording a longer copy replaced, which
     /// a stop left behind, or a moved call's old file.
     async fn sweep(&mut self, limit: i64) -> sqlx::Result<()> {
+        self.backlog = false;
         let leftovers = limited(
             self.db_limit,
             store::leftovers(&self.pool, &self.host, limit),
@@ -677,6 +681,8 @@ impl Filer {
         if leftovers.is_empty() || !self.fence.held() {
             return Ok(());
         }
+        let taken = leftovers.len();
+        let mut forgotten = 0;
         let _writing = archive::WRITES.lock().await;
         // Another location's files are deleted in a thread of their own per
         // location, for a limit: a share that stops answering holds up
@@ -688,9 +694,12 @@ impl Filer {
                 break;
             }
             if !(left.marked && left.managed) {
-                self.remove_leftover(&left).await?;
+                if self.remove_leftover(&left).await? {
+                    forgotten += 1;
+                }
             } else if self.named(&left).await? {
                 self.forget(&left).await?;
+                forgotten += 1;
             } else {
                 let root = PathBuf::from(&left.root);
                 match elsewhere.iter_mut().find(|(at, _)| *at == root) {
@@ -722,7 +731,10 @@ impl Filer {
             let Ok(removed) = result else { continue };
             for (left, removed) in lefts.iter().zip(removed) {
                 match removed {
-                    Ok(()) => self.forget(left).await?,
+                    Ok(()) => {
+                        self.forget(left).await?;
+                        forgotten += 1;
+                    }
                     // It stays listed, and the next pass tries again.
                     Err(error) => crate::log::warn(format!(
                         "cannot remove {}: {error}",
@@ -731,7 +743,16 @@ impl Filer {
                 }
             }
         }
+        // A full batch that moved on: more may wait, and the next pass comes
+        // at once. Leftovers that cannot go yet do not keep it from resting.
+        self.backlog = taken as i64 == limit && forgotten > 0;
         Ok(())
+    }
+
+    /// Whether the last pass swept a full batch of leftovers: more may be
+    /// waiting (a purge's files), so the next pass need not wait.
+    pub fn backlog(&self) -> bool {
+        self.backlog
     }
 
     /// Whether a call names the leftover's file again.
@@ -755,17 +776,18 @@ impl Filer {
     /// if that is empty, and forgets it. A call that names it again keeps it;
     /// a read-only location's file stays. Called with the archive's writes
     /// held, so that no writer takes the file between the check and the
-    /// deletion.
-    async fn remove_leftover(&self, left: &store::Leftover) -> sqlx::Result<()> {
+    /// deletion. Returns whether it was forgotten.
+    async fn remove_leftover(&self, left: &store::Leftover) -> sqlx::Result<bool> {
         if left.managed && !self.named(left).await? {
             let path = Path::new(&left.root).join(&left.rel_path);
             if let Err(error) = remove_left(&path) {
                 // It stays listed, and the next pass tries again.
                 crate::log::warn(format!("cannot remove {}: {error}", path.display()));
-                return Ok(());
+                return Ok(false);
             }
         }
-        self.forget(left).await
+        self.forget(left).await?;
+        Ok(true)
     }
 
     /// The folder and path of a waiting file: in its recorder's folder, or in

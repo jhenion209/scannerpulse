@@ -107,6 +107,59 @@ async fn a_file_put_into_the_source_is_filed_and_the_lease_released_at_the_stop(
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_large_purges_files_are_swept_without_a_pause_between_passes(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (primary, _) = common::seed_places(&pool, root.path(), source.path()).await;
+    set_zone(&pool).await;
+    // A purge's files: 300 leftovers, fifteen passes of the filer.
+    fs::create_dir_all(root.path().join("2025-03-01/1-A")).unwrap();
+    for n in 0..300 {
+        let rel = format!("2025-03-01/1-A/{n}.mp3");
+        fs::write(root.path().join(&rel), b"x").unwrap();
+        sqlx::query("INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, $2)")
+            .bind(primary)
+            .bind(&rel)
+            .execute(&pool)
+            .await?;
+    }
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let daemon = tokio::spawn(ingest::run(config(&pool), async {
+        let _ = stopped.await;
+    }));
+    // Each pass takes 20: with a second's rest after each, the fourteen
+    // passes after the first would take more than 14 s.
+    let give_up = Instant::now() + Duration::from_secs(40);
+    let mut first: Option<Instant> = None;
+    loop {
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM archive_leftovers")
+            .fetch_one(&pool)
+            .await?;
+        if left == 0 {
+            break;
+        }
+        if left < 300 {
+            let first = *first.get_or_insert_with(Instant::now);
+            assert!(
+                first.elapsed() < Duration::from_secs(12),
+                "{left} leftovers were still waiting 12 s after the first went"
+            );
+        }
+        assert!(Instant::now() < give_up, "the sweep did not start");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!root.path().join("2025-03-01/1-A/299.mp3").exists());
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("ingest did not stop within 10 s")
+        .unwrap()
+        .unwrap();
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn without_a_time_zone_ingest_does_not_start(pool: PgPool) -> sqlx::Result<()> {
     let (root, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     common::seed_places(&pool, root.path(), source.path()).await;

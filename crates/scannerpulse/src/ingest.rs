@@ -677,6 +677,8 @@ async fn file_loop(
                     }
                     continue;
                 }
+                // A large purge's files go pass after pass, without the rest.
+                Ok(_) if filer.backlog() => continue,
                 Ok(_) => {}
                 Err(error) => {
                     log::warn(format!(
