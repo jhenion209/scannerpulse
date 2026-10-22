@@ -8,6 +8,34 @@ use sqlx::PgPool;
 const PASSWORD: &str = "correct horse battery";
 
 #[sqlx::test(migrations = "./migrations")]
+async fn the_cards_are_counted_again_once_a_move_has_ended(pool: PgPool) {
+    let archive = tempfile::tempdir().unwrap();
+    let places = seed_places(&pool, archive.path(), std::path::Path::new("/srv/in/live")).await;
+    let app = app(&pool);
+    admin(&pool, "ann", PASSWORD).await;
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let at = Utc.with_ymd_and_hms(2025, 3, 1, 12, 0, 0).unwrap();
+    let main_calls = |body: serde_json::Value| body["locations"][0]["calls"].as_i64().unwrap();
+    insert_call(&pool, places, "2025-03-01/1-A/a.mp3", at, 2000, false).await;
+    let first = send(&app, "GET", "/api/admin/storage", &h, None).await;
+    assert_eq!(main_calls(first.body), 1);
+    insert_call(&pool, places, "2025-03-01/1-A/b.mp3", at, 2000, false).await;
+    // Kept: counting reads every call.
+    let kept = send(&app, "GET", "/api/admin/storage", &h, None).await;
+    assert_eq!(main_calls(kept.body), 1);
+    // A move that ended since moved calls from one location to another.
+    sqlx::query(
+        "INSERT INTO jobs (kind, state, started_by, finished_at) VALUES ('move', 'done', 'test', now())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let again = send(&app, "GET", "/api/admin/storage", &h, None).await;
+    assert_eq!(main_calls(again.body), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn an_admin_adds_lists_and_removes_locations(pool: PgPool) {
     let (archive, cold, other) = (
         tempfile::tempdir().unwrap(),

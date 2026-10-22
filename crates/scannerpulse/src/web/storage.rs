@@ -59,16 +59,33 @@ fn job_refused(error: JobError) -> ApiError {
     }
 }
 
+/// Whether a job that changes where calls are (a move, a talkgroup's purge)
+/// ended since `at`: the counts made then are out of date.
+async fn moved_since(pool: &sqlx::PgPool, at: DateTime<Utc>) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE kind IN ('move', 'purge') AND finished_at > $1)",
+    )
+    .bind(at)
+    .fetch_one(pool)
+    .await
+}
+
 /// The counts kept, or new ones: one request counts at a time on this host,
 /// and the others wait for its answer.
 async fn counts(state: &AppState) -> Result<(DateTime<Utc>, Counts), ApiError> {
     let mut kept = state.storage_counts.lock().await;
     if let Some((made, at, counts)) = kept.as_ref()
         && made.elapsed() < COUNTS_FOR
+        && !moved_since(&state.pool, *at).await?
     {
         return Ok((*at, counts.clone()));
     }
     let mut tx = state.pool.begin().await?;
+    // The database's time, as the jobs' ends are: a job that ends while
+    // this count runs has the next request count again.
+    let at: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+        .fetch_one(&mut *tx)
+        .await?;
     sqlx::query("SELECT set_config('statement_timeout', $1, true)")
         .bind(format!("{}ms", COUNT_LIMIT.as_millis()))
         .execute(&mut *tx)
@@ -99,7 +116,6 @@ async fn counts(state: &AppState) -> Result<(DateTime<Utc>, Counts), ApiError> {
     .await
     .map_err(|_| ApiError::Internal("the locations' files did not answer within a minute".into()))?
     .map_err(|error| ApiError::Internal(format!("the count failed: {error}")))?;
-    let at = Utc::now();
     *kept = Some((Instant::now(), at, measured.clone()));
     Ok((at, measured))
 }
