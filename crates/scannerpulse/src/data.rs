@@ -265,13 +265,16 @@ pub(crate) fn same_identities(
 }
 
 /// Removes the files a committed step replaced, unless a call names one
-/// again, and then their folder when it is empty.
+/// again, and then their folder when it is empty, each in a thread of its
+/// own for `limit` at most. A location that does not answer leaves the files
+/// left to the filer's sweep, which leaves a hung share alone.
 async fn remove_gone(
     conn: &mut PgConnection,
     roots: &HashMap<i16, PathBuf>,
     gone: &[Gone],
+    limit: std::time::Duration,
 ) -> sqlx::Result<()> {
-    for file in gone {
+    for (n, file) in gone.iter().enumerate() {
         // Per file, so that the filer's write of the same name cannot slip
         // between the check and the removal.
         let _writing = writes().await?;
@@ -289,15 +292,46 @@ async fn remove_gone(
             continue;
         }
         let path = root.join(&file.rel_path);
-        if let Err(error) = std::fs::remove_file(&path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            crate::log::warn(format!("cannot remove {}: {error}", path.display()));
+        let removing = path.clone();
+        let removed = bounded(limit, move || {
+            match std::fs::remove_file(&removing) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            if let Some(dir) = removing.parent() {
+                // Only an empty folder goes.
+                let _ = std::fs::remove_dir(dir);
+            }
+            Ok(())
+        })
+        .await;
+        match removed {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                crate::log::warn(format!(
+                    "{} {error}: the filer's sweep deletes the files left",
+                    root.display()
+                ));
+                return list_gone(conn, &gone[n..]).await;
+            }
+            Err(error) => crate::log::warn(format!("cannot remove {}: {error}", path.display())),
         }
-        if let Some(dir) = path.parent() {
-            // Only an empty folder goes.
-            let _ = std::fs::remove_dir(dir);
-        }
+    }
+    Ok(())
+}
+
+/// Lists replaced files for the filer's sweep, which deletes each once no
+/// call names it.
+async fn list_gone(conn: &mut PgConnection, gone: &[Gone]) -> sqlx::Result<()> {
+    for file in gone {
+        sqlx::query(
+            "INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(file.location_id)
+        .bind(&file.rel_path)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(())
 }
@@ -371,14 +405,73 @@ pub(crate) async fn bounded<T: Send + 'static>(
     }
 }
 
-/// A file that is not there is missing only when its folder is: an unmounted
-/// share would otherwise look like a share of missing files.
-fn missing_or_refused(old: &Path, rel_path: &str) -> Handled {
-    if old.parent().is_some_and(|dir| dir.is_dir()) {
-        Handled::Missing
-    } else {
-        Handled::Refused(format!("{rel_path}: its folder is not there"))
-    }
+/// A call's file as [`read_file`] found it.
+enum Read {
+    File(Vec<u8>, std::time::SystemTime),
+    /// Not there, in a folder that is.
+    Missing,
+    /// Its folder is not there either: an unmounted share would otherwise
+    /// look like a share of missing files.
+    NoFolder,
+}
+
+/// Reads the file at `path` and its modification time, in a thread of its
+/// own for `limit` at most.
+async fn read_file(path: &Path, limit: std::time::Duration) -> io::Result<Read> {
+    let path = path.to_path_buf();
+    bounded(limit, move || match std::fs::read(&path) {
+        Ok(data) => Ok(Read::File(data, std::fs::metadata(&path)?.modified()?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(if path.parent().is_some_and(|dir| dir.is_dir()) {
+                Read::Missing
+            } else {
+                Read::NoFolder
+            })
+        }
+        Err(error) => Err(error),
+    })
+    .await
+}
+
+/// Each folder's identity ([`identities`]) and whether it is a folder now,
+/// read in a thread of its own for `limit` at most.
+async fn folders_now(
+    folders: &[PathBuf],
+    limit: std::time::Duration,
+) -> io::Result<(Vec<Option<(u64, u64)>>, Vec<bool>)> {
+    let folders = folders.to_vec();
+    bounded(limit, move || {
+        let paths: Vec<&Path> = folders.iter().map(PathBuf::as_path).collect();
+        Ok((
+            identities(&paths),
+            folders.iter().map(|f| f.is_dir()).collect(),
+        ))
+    })
+    .await
+}
+
+/// Err unless every folder is still the one it was when the step began
+/// ([`same_identities`]), read in a thread of its own for `limit` at most.
+pub(crate) async fn unchanged(
+    folders: &[PathBuf],
+    before: &[Option<(u64, u64)>],
+    limit: std::time::Duration,
+) -> sqlx::Result<()> {
+    let (folders, before) = (folders.to_vec(), before.to_vec());
+    bounded(limit, move || {
+        let paths: Vec<&Path> = folders.iter().map(PathBuf::as_path).collect();
+        same_identities(&paths, &before).map_err(|error| io::Error::other(error.to_string()))
+    })
+    .await
+    .map_err(io_error)
+}
+
+/// Whether `root` was found a folder by [`folders_now`].
+fn present(folders: &[PathBuf], here: &[bool], root: &Path) -> bool {
+    folders
+        .iter()
+        .zip(here)
+        .any(|(folder, here)| folder == root && *here)
 }
 
 /// What correcting one call's file did.
@@ -388,6 +481,9 @@ enum Handled {
     Moved(Option<Gone>),
     Refused(String),
     Missing,
+    /// Its file did not answer within the limit: a share that stopped
+    /// answering.
+    Hung(String),
 }
 
 /// Whether the call still has the file its step's batch read; it is locked
@@ -419,6 +515,7 @@ async fn correct_one(
     to: &Talkgroup,
     folder: &str,
     system: &str,
+    limit: std::time::Duration,
 ) -> sqlx::Result<Handled> {
     if locked_file(conn, call).await? != Some((call.location_id, call.rel_path.clone())) {
         return Ok(Handled::Refused(format!(
@@ -433,19 +530,22 @@ async fn correct_one(
             call.rel_path
         )));
     };
-    let old = root.join(&call.rel_path);
-    let data = match std::fs::read(&old) {
-        Ok(data) => data,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(missing_or_refused(&old, &call.rel_path));
+    let hung = |error: &io::Error| error.kind() == io::ErrorKind::TimedOut;
+    let (data, mtime) = match read_file(&root.join(&call.rel_path), limit).await {
+        Ok(Read::File(data, mtime)) => (data, mtime),
+        Ok(Read::Missing) => return Ok(Handled::Missing),
+        Ok(Read::NoFolder) => {
+            return Ok(Handled::Refused(format!(
+                "{}: its folder is not there",
+                call.rel_path
+            )));
+        }
+        Err(error) if hung(&error) => {
+            return Ok(Handled::Hung(format!("{} {error}", call.rel_path)));
         }
         Err(error) => {
             return Ok(Handled::Refused(format!("{}: {error}", call.rel_path)));
         }
-    };
-    let mtime = match std::fs::metadata(&old).and_then(|meta| meta.modified()) {
-        Ok(mtime) => mtime,
-        Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
     };
     let retagged = match crate::retag::retag(name, &data, to, call.mapped.then_some(system)) {
         Ok(retagged) => retagged,
@@ -466,44 +566,49 @@ async fn correct_one(
             &dir,
             &retagged.name,
             &retagged.data,
-            jobs::FILE_LIMIT,
+            limit,
         )
         .await?
         {
             Ok(found) => found,
+            Err(error) if hung(&error) => {
+                return Ok(Handled::Hung(format!("{} {error}", root.display())));
+            }
             // A name the file system refuses (too long, a file where a folder
             // should be) refuses the call; the job goes on.
             Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
         }
     };
     let path = root.join(&rel);
-    let refused = |error: io::Error| Handled::Refused(format!("{}: {error}", call.rel_path));
-    if !copy {
-        let digest = archive::sha256(&retagged.data);
-        if let Err(error) = archive::write_part(&path, &retagged.data, &digest) {
-            return Ok(refused(error));
+    let bytes = retagged.data;
+    let written = bounded(limit, move || {
+        if !copy {
+            let digest = archive::sha256(&bytes);
+            archive::write_part(&path, &bytes, &digest)?;
+            // After this the new file is an orphan if the step fails: the
+            // next attempt finds it as an exact copy and reuses it. A file
+            // rewritten in place holds the old tag or the new one, and the
+            // next attempt rewrites it again.
+            if in_place {
+                archive::replace_with_part(&path)?;
+            } else {
+                archive::finish_part(&path)?;
+            }
         }
-        // After this the new file is an orphan if the step fails: the next
-        // attempt finds it as an exact copy and reuses it. A file rewritten
-        // in place holds the old tag or the new one, and the next attempt
-        // rewrites it again.
-        let named = if in_place {
-            archive::replace_with_part(&path)
-        } else {
-            archive::finish_part(&path)
-        };
-        if let Err(error) = named {
-            return Ok(refused(error));
+        // A later import reads a time in the repeated hour with the file's
+        // modification time, so the new file keeps the old one's.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(mtime)
+    })
+    .await;
+    match written {
+        Ok(()) => {}
+        Err(error) if hung(&error) => {
+            return Ok(Handled::Hung(format!("{} {error}", root.display())));
         }
-    }
-    // A later import reads a time in the repeated hour with the file's
-    // modification time, so the new file keeps the old one's.
-    if let Err(error) = std::fs::File::options()
-        .write(true)
-        .open(&path)
-        .and_then(|file| file.set_modified(mtime))
-    {
-        return Ok(refused(error));
+        Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
     }
     drop(writing);
     if call.mapped {
@@ -539,20 +644,36 @@ async fn correct_one(
 
 /// Removes the files that the job's last committed step replaced: a stopped
 /// job does it before it ends.
-pub(crate) async fn release(conn: &mut PgConnection, job: &Job) -> sqlx::Result<()> {
+pub(crate) async fn release(
+    conn: &mut PgConnection,
+    job: &Job,
+    limit: std::time::Duration,
+) -> sqlx::Result<()> {
     let work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
     let roots = roots(conn).await?;
-    remove_gone(conn, &roots, &work.remove).await
+    remove_gone(conn, &roots, &work.remove, limit).await
 }
 
-pub(crate) async fn correct_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
+pub(crate) async fn correct_step(
+    conn: &mut PgConnection,
+    job: &Job,
+    limit: std::time::Duration,
+) -> sqlx::Result<Outcome> {
     let Ok(params) = serde_json::from_value::<Correct>(job.params.clone()) else {
         return Ok(Outcome::Failed(
             "the job's parameters are not a correction's".into(),
         ));
     };
     let mut work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
-    let step = correct_files(conn, params.talkgroup_id, &mut work, job.done, job.total).await?;
+    let step = correct_files(
+        conn,
+        params.talkgroup_id,
+        &mut work,
+        job.done,
+        job.total,
+        limit,
+    )
+    .await?;
     Ok(step.outcome(serde_json::to_value(&work).expect("plain data")))
 }
 
@@ -594,9 +715,10 @@ async fn correct_files(
     work: &mut FileWork,
     done: i64,
     total: Option<i64>,
+    limit: std::time::Duration,
 ) -> sqlx::Result<FileStep> {
     let roots = roots(conn).await?;
-    remove_gone(conn, &roots, &work.remove).await?;
+    remove_gone(conn, &roots, &work.remove, limit).await?;
     work.remove.clear();
     let Some(talkgroup) = named_locked(&mut *conn, talkgroup_id).await? else {
         return Ok(FileStep::Failed(format!(
@@ -627,17 +749,29 @@ async fn correct_files(
         return Ok(FileStep::Done(done, message));
     }
     let to = talkgroup.talkgroup();
-    let folders: Vec<&Path> = roots.values().map(PathBuf::as_path).collect();
-    let before = identities(&folders);
+    let folders: Vec<PathBuf> = roots.values().cloned().collect();
+    let corrected_so_far = |what: &str, moved| {
+        format!("{what}: {moved} files were corrected; start the correction again once it answers")
+    };
+    let (before, here) = match folders_now(&folders, limit).await {
+        Ok(found) => found,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Ok(FileStep::Failed(corrected_so_far(
+                &format!("a location {error}"),
+                work.moved,
+            )));
+        }
+        Err(error) => return Err(io_error(error)),
+    };
     for call in &batch {
         if let Some(root) = roots.get(&call.location_id) {
-            if !root.is_dir() {
+            if !present(&folders, &here, root) {
                 return Err(io_error(io::Error::other(format!(
                     "the location {} is not there",
                     root.display()
                 ))));
             }
-            match correct_one(conn, root, call, &to, &folder, &talkgroup.system).await? {
+            match correct_one(conn, root, call, &to, &folder, &talkgroup.system, limit).await? {
                 Handled::Moved(gone) => {
                     work.moved += 1;
                     work.remove.extend(gone);
@@ -647,11 +781,18 @@ async fn correct_files(
                     work.last_refusal = Some(why);
                 }
                 Handled::Missing => work.missing += 1,
+                Handled::Hung(why) => {
+                    // The calls corrected before it stay so, once their
+                    // folders are checked; their old files go to the sweep.
+                    unchanged(&folders, &before, limit).await?;
+                    list_gone(conn, &work.remove).await?;
+                    return Ok(FileStep::Failed(corrected_so_far(&why, work.moved)));
+                }
             }
         }
         work.after = Some((call.started_at, call.id));
     }
-    same_identities(&folders, &before)?;
+    unchanged(&folders, &before, limit).await?;
     let done = done + batch.len() as i64;
     let total = total.map(|total| total.max(done));
     Ok(FileStep::More {
@@ -805,7 +946,11 @@ async fn mark_uncorrected(
     Ok(())
 }
 
-pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
+pub(crate) async fn merge_step(
+    conn: &mut PgConnection,
+    job: &Job,
+    limit: std::time::Duration,
+) -> sqlx::Result<Outcome> {
     let Ok(params) = serde_json::from_value::<Merge>(job.params.clone()) else {
         return Ok(Outcome::Failed(
             "the job's parameters are not a merge's".into(),
@@ -813,7 +958,15 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     };
     let mut work: MergeWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
     if work.correcting {
-        let step = correct_files(conn, params.into, &mut work.files, job.done, job.total).await?;
+        let step = correct_files(
+            conn,
+            params.into,
+            &mut work.files,
+            job.done,
+            job.total,
+            limit,
+        )
+        .await?;
         let step = match step {
             FileStep::Done(done, message) => {
                 FileStep::Done(done, format!("{} calls moved; {message}", work.calls_moved))
@@ -999,6 +1152,40 @@ pub async fn start_purge(
     Ok((job, preview.calls))
 }
 
+/// The holding folder `raw` as a purge keeps it, resolved, or why it cannot:
+/// it is a folder here, apart from every archive location and ingest source
+/// in `others` (a file kept in an archive tree would be the file the purge
+/// then removes, and a held file in an ingest source would be ingested
+/// again), and it holds the sentinel.
+fn holding_checked(raw: &Path, others: &[(&str, PathBuf)]) -> Result<PathBuf, String> {
+    if !raw.is_dir() {
+        return Err(format!(
+            "the holding folder {} is not a folder this host can see",
+            raw.display()
+        ));
+    }
+    let kept = std::fs::canonicalize(raw)
+        .map_err(|error| format!("cannot read the holding folder {}: {error}", raw.display()))?;
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for (what, other) in others {
+        let other = real(other);
+        if kept.starts_with(&other) || other.starts_with(&kept) {
+            return Err(format!(
+                "the holding folder {} overlaps the {what} {}",
+                kept.display(),
+                other.display()
+            ));
+        }
+    }
+    if !kept.join(HOLDING_SENTINEL).is_file() {
+        return Err(format!(
+            "the holding folder {} has no {HOLDING_SENTINEL} file: put an empty one there to show it is the real folder, mounted",
+            kept.display()
+        ));
+    }
+    Ok(kept)
+}
+
 /// Copies the file into the holding folder, with the archive's layout, read
 /// back and compared, and gives the copy the file's modification time.
 fn hold(old: &Path, holding: &Path, rel_path: &str, data: &[u8]) -> io::Result<()> {
@@ -1031,6 +1218,7 @@ async fn purge_one(
     root: &Path,
     holding: &Path,
     call: &CallFile,
+    limit: std::time::Duration,
 ) -> sqlx::Result<Handled> {
     let call = &match locked_file(conn, call).await? {
         Some((location_id, rel_path)) if location_id == call.location_id => CallFile {
@@ -1047,21 +1235,42 @@ async fn purge_one(
             )));
         }
     };
-    let old = root.join(&call.rel_path);
-    let kept = match std::fs::read(&old) {
-        Ok(data) => match hold(&old, holding, &call.rel_path, &data) {
-            Ok(()) => true,
-            Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
-        },
+    // Read and held in a thread of its own, for `limit` at most.
+    let (old, kept_in, rel) = (
+        root.join(&call.rel_path),
+        holding.to_path_buf(),
+        call.rel_path.clone(),
+    );
+    let held = bounded(limit, move || match std::fs::read(&old) {
+        Ok(data) => hold(&old, &kept_in, &rel, &data).map(|()| Some(true)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Handled::Refused(why) = missing_or_refused(&old, &call.rel_path) {
-                return Ok(Handled::Refused(why));
-            }
+            // Missing only when its folder is there: an unmounted share
+            // would otherwise look like a share of missing files.
+            Ok(old
+                .parent()
+                .is_some_and(|dir| dir.is_dir())
+                .then_some(false))
+        }
+        Err(error) => Err(error),
+    })
+    .await;
+    let kept = match held {
+        Ok(Some(true)) => true,
+        Ok(Some(false)) => {
             crate::log::warn(format!(
                 "purge: call {} had no file at {}; its row is deleted",
                 call.id, call.rel_path
             ));
             false
+        }
+        Ok(None) => {
+            return Ok(Handled::Refused(format!(
+                "{}: its folder is not there",
+                call.rel_path
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Ok(Handled::Hung(format!("{} {error}", call.rel_path)));
         }
         Err(error) => return Ok(Handled::Refused(format!("{}: {error}", call.rel_path))),
     };
@@ -1095,7 +1304,11 @@ async fn forget_one(conn: &mut PgConnection, call: &CallFile) -> sqlx::Result<bo
     Ok(gone.rows_affected() == 1)
 }
 
-pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
+pub(crate) async fn purge_step(
+    conn: &mut PgConnection,
+    job: &Job,
+    limit: std::time::Duration,
+) -> sqlx::Result<Outcome> {
     let Ok(params) = serde_json::from_value::<Purge>(job.params.clone()) else {
         return Ok(Outcome::Failed(
             "the job's parameters are not a purge's".into(),
@@ -1103,57 +1316,42 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     };
     let mut work: FileWork = serde_json::from_value(job.work.clone()).unwrap_or_default();
     let roots = roots(conn).await?;
-    remove_gone(conn, &roots, &work.remove).await?;
+    remove_gone(conn, &roots, &work.remove, limit).await?;
     work.remove.clear();
+    let purged_so_far = |what: &str, work: &FileWork| {
+        format!(
+            "{what}: {} calls were purged; start the purge again once it answers",
+            work.moved + work.missing + work.records_only
+        )
+    };
     if !work.marked {
         // The first step runs on the host that holds the job's lease, which
-        // is where the folder must be seen: check it here, once.
-        let raw = Path::new(&params.holding);
-        if !raw.is_dir() {
-            return Ok(Outcome::Failed(format!(
-                "the holding folder {} is not a folder this host can see",
-                params.holding
-            )));
-        }
-        let kept = match std::fs::canonicalize(raw) {
-            Ok(kept) => kept,
-            Err(error) => {
-                return Ok(Outcome::Failed(format!(
-                    "cannot read the holding folder {}: {error}",
-                    params.holding
-                )));
-            }
-        };
-        // A file kept in an archive tree would be the file the purge then
-        // removes, and a held file in an ingest source would be ingested again.
-        let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        // is where the folder must be seen: check it here, once, in a thread
+        // of its own for `limit` at most.
         let sources: Vec<String> = sqlx::query_scalar("SELECT path FROM sources")
             .fetch_all(&mut *conn)
             .await?;
-        let others = roots
+        let raw = PathBuf::from(&params.holding);
+        let others: Vec<(&'static str, PathBuf)> = roots
             .values()
             .map(|root| ("archive location", root.clone()))
             .chain(
                 sources
                     .into_iter()
                     .map(|path| ("ingest source", path.into())),
-            );
-        for (what, other) in others {
-            let other = real(&other);
-            if kept.starts_with(&other) || other.starts_with(&kept) {
-                return Ok(Outcome::Failed(format!(
-                    "the holding folder {} overlaps the {what} {}",
-                    kept.display(),
-                    other.display()
+            )
+            .collect();
+        let kept = match bounded(limit, move || Ok(holding_checked(&raw, &others))).await {
+            Ok(Ok(kept)) => kept,
+            Ok(Err(why)) => return Ok(Outcome::Failed(why)),
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                return Ok(Outcome::Failed(purged_so_far(
+                    &format!("the holding folder {} {error}", params.holding),
+                    &work,
                 )));
             }
-        }
-        if !kept.join(HOLDING_SENTINEL).is_file() {
-            return Ok(Outcome::Failed(format!(
-                "the holding folder {} has no {HOLDING_SENTINEL} file: put an empty one there to show it is the real folder, mounted",
-                kept.display()
-            )));
-        }
+            Err(error) => return Err(io_error(error)),
+        };
         work.marked = true;
         work.holding = Some(kept.to_string_lossy().into_owned());
     }
@@ -1214,10 +1412,30 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     // Which directories these are now, before the sentinel is looked at: a
     // share unmounted before this is caught by the sentinel, one unmounted
     // after it by the check at the end of the step.
-    let mut folders: Vec<&Path> = roots.values().map(PathBuf::as_path).collect();
-    folders.push(&holding);
-    let before = identities(&folders);
-    if !holding.join(HOLDING_SENTINEL).is_file() {
+    let mut folders: Vec<PathBuf> = roots.values().cloned().collect();
+    folders.push(holding.clone());
+    let (before, here) = match folders_now(&folders, limit).await {
+        Ok(found) => found,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Ok(Outcome::Failed(purged_so_far(
+                &format!("a location, or the holding folder, {error}"),
+                &work,
+            )));
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    let sentinel = holding.join(HOLDING_SENTINEL);
+    let marked = match bounded(limit, move || Ok(sentinel.is_file())).await {
+        Ok(marked) => marked,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Ok(Outcome::Failed(purged_so_far(
+                &format!("the holding folder {holding_path} {error}"),
+                &work,
+            )));
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    if !marked {
         // An unmounted share hides the sentinel: try again later rather than
         // lose a file.
         return Err(io_error(io::Error::other(format!(
@@ -1238,13 +1456,13 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
                 work.last_refusal = Some(format!("call {} changed while it was purged", call.id));
             }
         } else if let Some(root) = roots.get(&call.location_id) {
-            if !root.is_dir() {
+            if !present(&folders, &here, root) {
                 return Err(io_error(io::Error::other(format!(
                     "the location {} is not there",
                     root.display()
                 ))));
             }
-            match purge_one(conn, root, &holding, call).await? {
+            match purge_one(conn, root, &holding, call, limit).await? {
                 Handled::Moved(gone) => {
                     work.moved += 1;
                     work.remove.extend(gone);
@@ -1254,11 +1472,18 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
                     work.last_refusal = Some(why);
                 }
                 Handled::Missing => work.missing += 1,
+                Handled::Hung(why) => {
+                    // The calls purged before it stay so, once their folders
+                    // are checked; their files in the archive go to the sweep.
+                    unchanged(&folders, &before, limit).await?;
+                    list_gone(conn, &work.remove).await?;
+                    return Ok(Outcome::Failed(purged_so_far(&why, &work)));
+                }
             }
         }
         work.after = Some((call.started_at, call.id));
     }
-    same_identities(&folders, &before)?;
+    unchanged(&folders, &before, limit).await?;
     let done = job.done + batch.len() as i64;
     let total = job.total.map(|total| total.max(done));
     Ok(Outcome::More {
@@ -1363,9 +1588,15 @@ mod tests {
         write(root.path(), LONGER);
         let read = call_at(&pool, root.path(), LONGER, OLD).await;
         let mut conn = pool.acquire().await.unwrap();
-        let handled = purge_one(&mut conn, root.path(), holding.path(), &read)
-            .await
-            .unwrap();
+        let handled = purge_one(
+            &mut conn,
+            root.path(),
+            holding.path(),
+            &read,
+            jobs::FILE_LIMIT,
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(&handled, Handled::Moved(Some(gone)) if gone.rel_path == LONGER),
             "the purge did not take the call's file"
@@ -1391,9 +1622,17 @@ mod tests {
             name: "New Name".to_string(),
         };
         let mut conn = pool.acquire().await.unwrap();
-        let handled = correct_one(&mut conn, root.path(), &read, &to, "215-New Name", "SYSB")
-            .await
-            .unwrap();
+        let handled = correct_one(
+            &mut conn,
+            root.path(),
+            &read,
+            &to,
+            "215-New Name",
+            "SYSB",
+            jobs::FILE_LIMIT,
+        )
+        .await
+        .unwrap();
         assert!(matches!(handled, Handled::Refused(_)));
         assert!(
             !root.path().join("2031-01-15/215-New Name").exists(),

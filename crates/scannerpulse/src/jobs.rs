@@ -377,16 +377,18 @@ pub async fn step(
         ) {
             // The files its last step replaced go before it stops: a later
             // job would not know them.
-            crate::data::release(&mut tx, &job).await?;
+            crate::data::release(&mut tx, &job, context.file_limit).await?;
         }
         Outcome::Stopped
     } else {
         match Kind::parse(&job.kind) {
             Some(Kind::Queue) => queue_step(&mut tx, &job, context.batch).await?,
             Some(Kind::AsrRun) => asr_step(&mut tx, &job, context).await?,
-            Some(Kind::Correct) => crate::data::correct_step(&mut tx, &job).await?,
-            Some(Kind::Merge) => crate::data::merge_step(&mut tx, &job).await?,
-            Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job).await?,
+            Some(Kind::Correct) => {
+                crate::data::correct_step(&mut tx, &job, context.file_limit).await?
+            }
+            Some(Kind::Merge) => crate::data::merge_step(&mut tx, &job, context.file_limit).await?,
+            Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job, context.file_limit).await?,
             Some(Kind::Move) => crate::moves::step(&mut tx, &job, context.file_limit).await?,
             Some(Kind::PurgeBefore) => crate::purges::step(&mut tx, &job).await?,
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),

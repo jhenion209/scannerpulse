@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 
 use crate::archive;
-use crate::data::{bounded, free_rel, identities, io_error, same_identities, writes};
+use crate::data::{bounded, free_rel, identities, io_error, unchanged, writes};
 use crate::jobs::{self, Job, JobError, Kind, Outcome};
 use crate::setup::folders::size;
 use crate::storage;
@@ -313,22 +313,6 @@ fn hung(what: &str, work: &MoveWork) -> Outcome {
         "{what}: {} calls were moved; start the move again once it answers",
         work.moved
     ))
-}
-
-/// Err unless every folder is still the one it was when the step began
-/// ([`same_identities`]), read in a thread of its own for `limit` at most.
-async fn unchanged(
-    folders: &[PathBuf],
-    before: &[Option<(u64, u64)>],
-    limit: Duration,
-) -> sqlx::Result<()> {
-    let (folders, before) = (folders.to_vec(), before.to_vec());
-    bounded(limit, move || {
-        let paths: Vec<&Path> = folders.iter().map(PathBuf::as_path).collect();
-        same_identities(&paths, &before).map_err(|error| io::Error::other(error.to_string()))
-    })
-    .await
-    .map_err(io_error)
 }
 
 pub(crate) async fn step(

@@ -1660,3 +1660,97 @@ async fn migration_0007_marks_only_renamed_talkgroups_with_calls(pool: PgPool) {
     assert!(names(&pool, without).await.2);
     assert!(names(&pool, never_renamed).await.2);
 }
+
+/// Runs the jobs in a thread of their own for 20 s at most, with a 2 s limit
+/// on each file: Err when they still wait then.
+async fn jobs_within(pool: &PgPool) -> Result<(), ()> {
+    let mut context = scannerpulse::jobs::Context::new(None);
+    context.file_limit = std::time::Duration::from_secs(2);
+    let (pool, handle) = (pool.clone(), tokio::runtime::Handle::current());
+    let stepping = tokio::task::spawn_blocking(move || {
+        handle.block_on(async {
+            while scannerpulse::jobs::step(&pool, "host-a", &context)
+                .await
+                .unwrap()
+                .is_some()
+            {}
+        })
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(20), stepping)
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+/// Lets a reader left waiting on the pipe end, when there is one; opening
+/// it to write would otherwise wait for a reader for ever.
+fn release(path: &std::path::Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path);
+}
+
+/// The file a hung share would hold: a pipe nobody writes holds its reader
+/// for ever.
+fn pipe(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_file_that_stops_answering_fails_a_correction_instead_of_holding_it(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let rel = "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3";
+    let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();
+    let (call, talkgroup) = filed(&pool, places, &root, rel, None, at).await;
+    pipe(&root.join(rel));
+    let mut conn = pool.acquire().await.unwrap();
+    talkgroups::rename(&mut conn, talkgroup, "Alpha 2")
+        .await
+        .unwrap();
+    let (job, _) = scannerpulse::data::start_correct(&mut conn, talkgroup, "Alpha 2", "ann")
+        .await
+        .unwrap();
+    let ended = jobs_within(&pool).await;
+    // The reader left waiting ends, whatever happened.
+    release(&root.join(rel));
+    assert!(ended.is_ok(), "the correction waited on the file for ever");
+    let job = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(job.state, "failed");
+    assert!(job.message.contains("did not answer"), "{}", job.message);
+    assert_eq!(rel_of(&pool, call).await, rel);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_file_that_stops_answering_fails_a_purge_instead_of_holding_it(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, holding) = (dir.path().join("archive"), dir.path().join("holding"));
+    std::fs::create_dir_all(&holding).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let rel = "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3";
+    let at = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();
+    let (call, talkgroup) = filed(&pool, places, &root, rel, None, at).await;
+    pipe(&root.join(rel));
+    set_holding(&pool, &holding).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, _) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    let ended = jobs_within(&pool).await;
+    release(&root.join(rel));
+    assert!(ended.is_ok(), "the purge waited on the file for ever");
+    let job = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(job.state, "failed");
+    assert!(job.message.contains("did not answer"), "{}", job.message);
+    assert_eq!(rel_of(&pool, call).await, rel);
+}

@@ -410,8 +410,15 @@ async fn a_file_that_stops_answering_fails_the_move_instead_of_holding_it(pool: 
     let stepping =
         tokio::task::spawn_blocking(move || handle.block_on(jobs::step(&pool, "host-a", &context)));
     let ended = tokio::time::timeout(Duration::from_secs(20), stepping).await;
-    // The reader left waiting ends either way.
-    std::fs::write(&pipe, b"").unwrap();
+    // The reader left waiting ends, whatever happened: opening the pipe to
+    // write would otherwise wait for a reader for ever.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(&pipe);
+    }
     assert!(ended.is_ok(), "the step waited on the file for ever");
     let (state, message, ..) = site.job(job).await;
     assert_eq!(state, "failed");
