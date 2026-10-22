@@ -26,6 +26,7 @@
   --edge-played: #7a8896;
   --warn-bg: #fff1c2;
   --warn-text: #5a4300;
+  --danger: #b42318;
   --focus: #0e749b;
   --bar-focus: #5ec8e5;
   font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -48,6 +49,7 @@
   --edge-played: #8ea3b5;
   --warn-bg: #4a3b10;
   --warn-text: #ffe39a;
+    --danger: #ff8f85;
   --focus: #5ec8e5;
   --bar-focus: #5ec8e5;
 }
@@ -70,6 +72,7 @@
     --edge-played: #8ea3b5;
     --warn-bg: #4a3b10;
     --warn-text: #ffe39a;
+    --danger: #ff8f85;
     --focus: #5ec8e5;
     --bar-focus: #5ec8e5;
   }

@@ -7,7 +7,8 @@
     action,
     confirm,
     cancel,
-  }: { title: string; text: string; action: string; confirm: () => void; cancel: () => void } = $props();
+    danger = false,
+  }: { title: string; text: string; action: string; confirm: () => void; cancel: () => void; danger?: boolean } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
   let keep: HTMLButtonElement;
@@ -24,7 +25,7 @@
   <p id={`${id}-text`}>{text} <strong>There is no undo.</strong></p>
   <div class="row">
     <button type="button" bind:this={keep} onclick={cancel}>Cancel</button>
-    <button type="button" class="primary" onclick={confirm}>{action}</button>
+    <button type="button" class={danger ? 'danger' : 'primary'} onclick={confirm}>{action}</button>
   </div>
 </dialog>
 

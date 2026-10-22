@@ -12,9 +12,13 @@
     moveAction,
     moveAsk,
     previewText,
+    purgeAction,
+    purgeAsk,
+    purgeText,
     seenBy,
     type Location,
     type MovePreview,
+    type PurgePreview,
     type Storage,
   } from './storage';
   import TypedConfirm from './TypedConfirm.svelte';
@@ -23,7 +27,7 @@
   let problem = $state<string | null>(null);
   let now = $state(new Date());
   /** The form open below the buttons. */
-  let open = $state<'add' | 'move' | null>(null);
+  let open = $state<'add' | 'move' | 'purge' | null>(null);
   /** The location whose removal waits for a second click, and a refusal by location. */
   let removing = $state<number | null>(null);
   let refusals = $state<Record<number, string>>({});
@@ -39,6 +43,11 @@
   let counting = $state(false);
   let counted = $state<MovePreview | null>(null);
   let moveRefusal = $state<string | null>(null);
+
+  let before = $state('');
+  let purgeCounting = $state(false);
+  let purgeCounted = $state<PurgePreview | null>(null);
+  let purgeRefusal = $state<string | null>(null);
 
   async function read() {
     try {
@@ -59,11 +68,13 @@
   const label = (l: Location) => (l.primary ? 'new calls are filed here' : l.mode === 'readonly' ? 'read-only: its files are never changed' : null);
   const destinations = $derived((data?.locations ?? []).filter((l) => l.mode === 'managed'));
 
-  function show(form: 'add' | 'move') {
+  function show(form: 'add' | 'move' | 'purge') {
     open = open === form ? null : form;
     addRefusal = null;
     moveRefusal = null;
     counted = null;
+    purgeRefusal = null;
+    purgeCounted = null;
   }
 
   async function add(event: SubmitEvent) {
@@ -111,6 +122,35 @@
       moveRefusal = why(error);
     } finally {
       counting = false;
+    }
+  }
+
+  /** Counts the purge; an answer for a day changed meanwhile is dropped. */
+  async function countPurge(event: SubmitEvent) {
+    event.preventDefault();
+    const asked = before;
+    purgeCounting = true;
+    purgeRefusal = null;
+    purgeCounted = null;
+    try {
+      const answer = await admin<PurgePreview>('GET', `/api/admin/storage/purge?${new URLSearchParams({ before: asked })}`);
+      if (asked === before) purgeCounted = answer;
+    } catch (error) {
+      purgeRefusal = why(error);
+    } finally {
+      purgeCounting = false;
+    }
+  }
+
+  /** Starts the purge that was counted, its day typed. */
+  async function startPurge(p: PurgePreview, confirm: string) {
+    try {
+      const done = await admin<{ job: number; calls: number }>('POST', '/api/admin/storage/purge', { before: p.before, confirm });
+      tell(`Job ${done.job} deletes ${done.calls.toLocaleString('en-US')} calls before ${p.before}; the Jobs area follows it.`);
+      purgeCounted = null;
+      open = null;
+    } catch (error) {
+      purgeRefusal = why(error);
     }
   }
 
@@ -177,6 +217,8 @@
   <div class="row actions">
     <button type="button" aria-expanded={open === 'add'} onclick={() => show('add')}>Add a storage path…</button>
     <button type="button" aria-expanded={open === 'move'} onclick={() => show('move')}>Move a date range…</button>
+    <!-- Red and apart, far from the others: it deletes for good. -->
+    <button type="button" class="danger apart" aria-expanded={open === 'purge'} onclick={() => show('purge')}>Purge older than…</button>
   </div>
 
   {#if open === 'add'}
@@ -224,6 +266,29 @@
       {/if}
     {/if}
   {/if}
+
+  {#if open === 'purge'}
+    <h2>Purge older than a day</h2>
+    <p>
+      Every call before that day goes: its record with its transcripts and labels at once, and its file for good, deleted by
+      the filer soon after. Nothing is kept. A read-only location's files stay: only their records go, and its import skips them.
+    </p>
+    <form class="grid" onsubmit={countPurge}>
+      <label for="purge-before">Before</label>
+      <input id="purge-before" type="date" required bind:value={before} oninput={() => (purgeCounted = null)} />
+      <div class="row"><button type="submit" disabled={purgeCounting}>Count first</button></div>
+    </form>
+    {#if purgeRefusal}<p class="problem" role="alert">Not purged: {purgeRefusal}</p>{/if}
+    {#if purgeCounted}
+      {@const p = purgeCounted}
+      <p>{purgeText(p)}</p>
+      {#if p.refused}
+        <p class="problem" role="alert">It cannot start: {p.refused}</p>
+      {:else}
+        <TypedConfirm name={p.before} action={purgeAction(p)} ask={purgeAsk(p)} danger start={(confirm) => startPurge(p, confirm)} />
+      {/if}
+    {/if}
+  {/if}
 </section>
 
 <style>
@@ -232,6 +297,7 @@
   .locations h2 { margin: 0 0 0.4rem; font-size: 1.05rem; }
   .locations h2 span { font-size: 0.85rem; font-weight: 400; color: var(--muted); }
   .actions { margin-top: 1rem; }
+  .actions .apart { margin-left: auto; }
   .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.4rem; max-width: 36rem; }
   .grid > label { font-weight: 600; }
 </style>

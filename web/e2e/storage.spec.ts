@@ -121,3 +121,54 @@ test("a folder that cannot be used is refused in the server's words", async ({ p
     'Not added: /no/such/folder does not exist on this machine: mount the disk or share there first',
   );
 });
+
+const PURGE = {
+  before: '2025-03-02', calls: 402_117,
+  held: [
+    { location: 'Main archive', read_only: false, calls: 400_000, bytes_about: 90_000_000_000 },
+    { location: 'Old', read_only: true, calls: 2_117, bytes_about: null },
+  ],
+  bytes_about: 90_000_000_000, refused: null,
+};
+
+test('a purge stands apart in red, is counted, its day typed, and confirmed in a pop-up whose Cancel has the focus', async ({ page }) => {
+  await fake(page);
+  const started: unknown[] = [];
+  await page.route('**/api/admin/storage/purge**', (route) => {
+    if (route.request().method() === 'GET') return route.fulfill(json(PURGE));
+    started.push(route.request().postDataJSON());
+    return route.fulfill(json({ job: 32, calls: 402_117 }, 201));
+  });
+  await signIn(page, '#storage');
+  const purge = page.getByRole('button', { name: 'Purge older than…' });
+  const move = page.getByRole('button', { name: 'Move a date range…' });
+  // Far to the right of the others.
+  const [p, m] = [await purge.boundingBox(), await move.boundingBox()];
+  expect(p!.x).toBeGreaterThan(m!.x + m!.width + 40);
+  await purge.click();
+  await page.getByLabel('Before').fill('2025-03-02');
+  await page.getByRole('button', { name: 'Count first' }).click();
+  await expect(page.getByText(
+    '402,117 calls before 2025-03-02 (about 90.0 GB) would be deleted for good: 400,000 in Main archive, 2,117 in Old (read-only: only their records go).',
+  )).toBeVisible();
+  const last = page.getByRole('button', { name: 'Delete 402,117 calls' });
+  await expect(last).toBeDisabled();
+  await page.getByLabel('Type 2025-03-02 to confirm').fill('2025-03-01');
+  await expect(last).toBeDisabled();
+  await page.getByLabel('Type 2025-03-02 to confirm').fill('2025-03-02');
+  await last.click();
+  const ask = page.getByRole('dialog', { name: 'Delete 402,117 calls before 2025-03-02?' });
+  await expect(ask).toBeVisible();
+  await expect(ask.getByText('There is no undo.')).toBeVisible();
+  await expect(ask.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  const scan = await new AxeBuilder({ page }).analyze();
+  expect(scan.violations).toEqual([]);
+  // Enter cancels.
+  await page.keyboard.press('Enter');
+  await expect(ask).toBeHidden();
+  expect(started).toEqual([]);
+  await last.click();
+  await ask.getByRole('button', { name: 'Delete 402,117 calls' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Job 32 deletes 402,117 calls before 2025-03-02' })).toBeVisible();
+  expect(started).toEqual([{ before: '2025-03-02', confirm: '2025-03-02' }]);
+});

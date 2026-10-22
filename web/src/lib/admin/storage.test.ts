@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { callsText, freeText, moveAction, moveAsk, previewText, seenBy, sizeText, type Location, type MovePreview } from './storage';
+import {
+  callsText, freeText, moveAction, moveAsk, previewText, purgeAction, purgeAsk, purgeText, seenBy, sizeText,
+  type Location, type MovePreview, type PurgePreview,
+} from './storage';
 
 const now = new Date('2026-10-21T18:00:00Z');
 
@@ -83,6 +86,34 @@ describe('a move', () => {
       title: 'Move 412,355 calls to Cold 2024?',
       text: 'Each file is copied and checked, its call then points at Cold 2024, and the old file is deleted. Moving them back is a new move.',
       action: 'Move 412,355 calls',
+    });
+  });
+});
+
+describe('a purge', () => {
+  const p: PurgePreview = {
+    before: '2025-03-02',
+    calls: 402_117,
+    held: [
+      { location: 'Main archive', read_only: false, calls: 400_000, bytes_about: 90_000_000_000 },
+      { location: 'Old', read_only: true, calls: 2_117, bytes_about: null },
+    ],
+    bytes_about: 90_000_000_000,
+    refused: null,
+  };
+
+  it('says what the count found, and which files stay', () => {
+    expect(purgeText(p)).toBe(
+      '402,117 calls before 2025-03-02 (about 90.0 GB) would be deleted for good: 400,000 in Main archive, 2,117 in Old (read-only: only their records go).',
+    );
+  });
+
+  it('names what its last button and its pop-up do', () => {
+    expect(purgeAction(p)).toBe('Delete 402,117 calls');
+    expect(purgeAsk(p)).toEqual({
+      title: 'Delete 402,117 calls before 2025-03-02?',
+      text: 'Their records go now, and their files are deleted for good; a read-only location keeps its files.',
+      action: 'Delete 402,117 calls',
     });
   });
 });

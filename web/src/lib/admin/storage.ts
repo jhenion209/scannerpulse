@@ -105,6 +105,39 @@ export function previewText(p: MovePreview): string {
 /** The last button's words, naming what it does. */
 export const moveAction = (p: MovePreview) => `Move ${callsWord(p.calls)} to ${p.to}`;
 
+/** The calls a purge takes from one location. */
+export type PurgeHeld = { location: string; read_only: boolean; calls: number; bytes_about: number | null };
+
+/** What purging every call before a day would do, as the server counted it. */
+export type PurgePreview = {
+  before: string;
+  calls: number;
+  held: PurgeHeld[];
+  bytes_about: number | null;
+  refused: string | null;
+};
+
+/** What a purge's count found, in words: a read-only location keeps its files. */
+export function purgeText(p: PurgePreview): string {
+  const space = p.bytes_about === null ? '' : ` (about ${sizeText(p.bytes_about)})`;
+  const where = p.held
+    .map((h) => `${h.calls.toLocaleString('en-US')} in ${h.location}${h.read_only ? ' (read-only: only their records go)' : ''}`)
+    .join(', ');
+  return `${callsWord(p.calls)} before ${p.before}${space} would be deleted for good: ${where}.`;
+}
+
+/** A purge's last button: red, naming what it does. */
+export const purgeAction = (p: PurgePreview) => `Delete ${callsWord(p.calls)}`;
+
+/** A purge's confirmation pop-up. */
+export function purgeAsk(p: PurgePreview): { title: string; text: string; action: string } {
+  return {
+    title: `${purgeAction(p)} before ${p.before}?`,
+    text: 'Their records go now, and their files are deleted for good; a read-only location keeps its files.',
+    action: purgeAction(p),
+  };
+}
+
 /** The confirmation pop-up's question, words and button. */
 export function moveAsk(p: MovePreview): { title: string; text: string; action: string } {
   return {

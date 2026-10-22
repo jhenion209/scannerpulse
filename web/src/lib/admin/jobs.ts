@@ -27,6 +27,8 @@ const KINDS: Record<string, string> = {
   correct: "Correct a talkgroup's files",
   merge: 'Merge two talkgroups',
   purge: 'Purge a talkgroup',
+  move: 'Move a date range',
+  purge_before: 'Purge older than a day',
 };
 
 export const kindName = (kind: string) => KINDS[kind] ?? kind;
