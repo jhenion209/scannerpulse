@@ -414,6 +414,23 @@ pub async fn run(
         .collect();
     let backups = std::env::var_os("SCANNERPULSE_BACKUPS").map(|b| canonical(PathBuf::from(b)));
     apart_from(&new, &sources, backups.as_deref())?;
+    let locations: Vec<(String, PathBuf)> = sqlx::query_as::<_, (String, String)>(
+        "SELECT name, root FROM locations WHERE NOT is_primary",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .map(|(name, root)| {
+        (
+            format!("the location {name}"),
+            canonical(PathBuf::from(root)),
+        )
+    })
+    .collect();
+    if let Some(problem) = crate::storage::folder_problem(&new, &locations) {
+        return Err(problem);
+    }
     usable(&new, &say)?;
     // Whatever is filed from here on is looked at again in the pause.
     // ponytail: a minute's margin for the archive's clock (a share's server);

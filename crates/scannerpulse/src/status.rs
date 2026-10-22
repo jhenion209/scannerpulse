@@ -138,6 +138,18 @@ pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Res
     .bind(STUCK_MINUTES)
     .fetch_one(&mut *tx)
     .await?;
+    // A running host that cannot use a storage location: its plays of those
+    // calls fail, and nothing is moved into it.
+    let locations: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT l.name, h.host, h.problem FROM location_health h \
+         JOIN locations l ON l.id = h.location_id \
+         WHERE NOT h.ok AND EXISTS (SELECT 1 FROM leases s \
+                                    WHERE s.name = $1 || h.host AND s.expires_at > now()) \
+         ORDER BY l.name, h.host",
+    )
+    .bind(crate::lease::HEARTBEAT_PREFIX)
+    .fetch_all(&mut *tx)
+    .await?;
     let twice: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM (SELECT 1 FROM calls \
            WHERE started_at > now() - make_interval(days => $1) \
@@ -160,6 +172,11 @@ pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Res
             "recent_rejected": recent_rejected,
         },
         "queue": queue,
+        "locations": locations.iter().map(|(location, host, problem)| json!({
+            "location": location,
+            "host": host,
+            "problem": problem,
+        })).collect::<Vec<_>>(),
         "failed": failed,
         "servers": servers.iter().map(|s| json!({
             "url": s.url,

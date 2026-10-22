@@ -59,6 +59,45 @@ async fn the_status_counts_what_needs_a_look(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_location_a_running_host_cannot_use_is_named(pool: PgPool) {
+    common::seed_places(
+        &pool,
+        std::path::Path::new("/srv/archive"),
+        std::path::Path::new("/srv/in"),
+    )
+    .await;
+    let cold: i16 = sqlx::query_scalar(
+        "INSERT INTO locations (name, root, mode) VALUES ('Cold', '/srv/cold', 'managed') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // host-a runs; host-b's ingest stopped an hour ago.
+    sqlx::query(
+        "INSERT INTO leases (name, holder, expires_at, renewed_at) VALUES \
+         ('ingest:host-a', 'host-a', now() + interval '1 minute', now()), \
+         ('ingest:host-b', 'host-b', now() - interval '1 hour', now() - interval '1 hour')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for host in ["host-a", "host-b"] {
+        scannerpulse::storage::record_health(
+            &pool,
+            host,
+            &[(cold, Err("it is not mounted".into()))],
+        )
+        .await
+        .unwrap();
+    }
+    let status = scannerpulse::status::read(&pool).await.unwrap();
+    assert_eq!(
+        status["locations"],
+        serde_json::json!([{"location": "Cold", "host": "host-a", "problem": "it is not mounted"}])
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_status_tab_is_for_admins(pool: PgPool) {
     let app = app(&pool);
     assert_eq!(
