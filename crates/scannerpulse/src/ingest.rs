@@ -408,7 +408,8 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         settings.missing_source_grace,
     )
     .with_db_limit(config.db_limit)
-    .with_transcription(rule.clone());
+    .with_transcription(rule.clone())
+    .with_host(&config.host);
     let mut transcriber = Transcriber::new(
         pool.clone(),
         lease.clone(),
@@ -449,6 +450,15 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
         (
             "rescans",
             tokio::spawn(rescan_loop(pool.clone(), rescan_tx, stop_rx.clone())),
+        ),
+        (
+            "locations",
+            tokio::spawn(location_loop(
+                pool.clone(),
+                config.db_limit,
+                config.host.clone(),
+                stop_rx.clone(),
+            )),
         ),
         (
             "watcher",
@@ -1162,6 +1172,47 @@ async fn health_loop(
             was_healthy = now_healthy;
         }
         if wait(&mut stop, health.timings().every).await {
+            break;
+        }
+    }
+}
+
+/// Checks every storage location once a minute, on every host, holding the
+/// lease or not: whether this host can read and write it, and the space on
+/// its disk. A move into a location waits until every running host can use
+/// it.
+async fn location_loop(
+    pool: PgPool,
+    db_limit: Duration,
+    host: String,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut hung = watcher::Hung::default();
+    loop {
+        match limited(db_limit, crate::storage::to_check(&pool)).await {
+            Ok(locations) => {
+                let found =
+                    crate::storage::check_all(locations, &host, &mut hung, FOLDER_LIMIT).await;
+                for (id, problem) in found
+                    .iter()
+                    .filter_map(|(id, f)| Some((id, f.as_ref().err()?)))
+                {
+                    log::debug(format!("location {id}: {problem}"));
+                }
+                if let Err(error) = limited(
+                    db_limit,
+                    crate::storage::record_health(&pool, &host, &found),
+                )
+                .await
+                {
+                    log::warn(format!(
+                        "what the locations hold cannot be written: {error}"
+                    ));
+                }
+            }
+            Err(error) => log::warn(format!("the locations cannot be read: {error}")),
+        }
+        if wait(&mut stop, crate::storage::CHECK_EVERY).await {
             break;
         }
     }

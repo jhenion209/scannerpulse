@@ -140,6 +140,31 @@ pub fn probe(root: &Path, marked: bool, host: &str) -> Result<(u64, u64), String
     ))
 }
 
+/// What `host` finds in each location now ([`probe`]), each in a thread of
+/// its own for `limit` at most: a hung share holds up no other location, and
+/// is not read again until its read has ended.
+pub async fn check_all(
+    locations: Vec<(i16, PathBuf, bool)>,
+    host: &str,
+    hung: &mut crate::watcher::Hung,
+    limit: Duration,
+) -> Vec<(i16, Result<(u64, u64), String>)> {
+    let ids: Vec<i16> = locations.iter().map(|(id, ..)| *id).collect();
+    let jobs = locations
+        .into_iter()
+        .map(|(_, root, marked)| {
+            let (path, host) = (root.clone(), host.to_string());
+            let work: crate::watcher::Job<Result<(u64, u64), String>> =
+                Box::new(move || Ok(probe(&path, marked, &host)));
+            (root, work)
+        })
+        .collect();
+    ids.into_iter()
+        .zip(crate::watcher::run_bounded(jobs, hung, limit).await)
+        .map(|(id, found)| (id, found.unwrap_or_else(|error| Err(error.to_string()))))
+        .collect()
+}
+
 /// The space the `calls` of a location use, about: the mean size of the
 /// files of `sample` that can be read, times the calls. None when none can.
 pub fn bytes_about(root: &Path, sample: &[String], calls: i64) -> Option<i64> {

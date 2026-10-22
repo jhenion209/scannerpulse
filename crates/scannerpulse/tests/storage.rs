@@ -230,6 +230,125 @@ async fn each_host_says_whether_it_can_use_each_location(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_host_checks_every_location_and_one_not_mounted_is_unusable(pool: PgPool) {
+    let (archive, cold, bare) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let places = seed_places(&pool, archive.path(), Path::new("/srv/in/live")).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let check = |name: &'static str| move |folder: &Path| storage::check_here(folder, name);
+    let cold_id = storage::add(&mut conn, "Cold", cold.path(), None, check("Cold"))
+        .await
+        .unwrap();
+    let bare_id = storage::add(&mut conn, "Bare", bare.path(), None, check("Bare"))
+        .await
+        .unwrap();
+    // Its share is unmounted: the mount point holds no marker.
+    std::fs::remove_file(bare.path().join(storage::MARKER)).unwrap();
+    let mut hung = scannerpulse::watcher::Hung::default();
+    let found = storage::check_all(
+        storage::to_check(&pool).await.unwrap(),
+        "host-a",
+        &mut hung,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    let ids: Vec<(i16, bool)> = found.iter().map(|(id, f)| (*id, f.is_ok())).collect();
+    assert_eq!(ids, [(places.0, true), (cold_id, true), (bare_id, false)]);
+    assert!(found[2].1.as_ref().unwrap_err().contains("not mounted"));
+    storage::record_health(&pool, "host-a", &found)
+        .await
+        .unwrap();
+    let listed = storage::list(&mut conn).await.unwrap();
+    assert!(listed[1].hosts[0].ok && listed[1].hosts[0].free_bytes.unwrap() > 0);
+    assert!(!listed[2].hosts[0].ok);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_filer_deletes_the_files_left_in_every_location_this_host_can_use(pool: PgPool) {
+    const HOLDER: &str = "host-a 1-1";
+    let (archive, cold, old) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let places = seed_places(&pool, archive.path(), Path::new("/srv/in/live")).await;
+    common::hold_lease(&pool, HOLDER).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let cold_id = storage::add(&mut conn, "Cold", cold.path(), None, |folder| {
+        storage::check_here(folder, "Cold")
+    })
+    .await
+    .unwrap();
+    let old_id: i16 = sqlx::query_scalar(
+        "INSERT INTO locations (name, root, mode) VALUES ('Old', $1, 'readonly') RETURNING id",
+    )
+    .bind(old.path().to_str().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (id, root) in [
+        (places.0, archive.path()),
+        (cold_id, cold.path()),
+        (old_id, old.path()),
+    ] {
+        std::fs::create_dir_all(root.join("2025-03-01/1-A")).unwrap();
+        std::fs::write(root.join("2025-03-01/1-A/x.mp3"), b"old").unwrap();
+        sqlx::query("INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, '2025-03-01/1-A/x.mp3')")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut filer = scannerpulse::filer::Filer::new(
+        pool.clone(),
+        common::HeldFence::new(HOLDER),
+        scannerpulse::store::Location {
+            id: places.0,
+            root: archive.path().to_path_buf(),
+        },
+        chrono_tz::America::Chicago,
+        std::time::Duration::from_secs(900),
+    )
+    .with_host("host-a");
+    let left = || async {
+        sqlx::query_scalar::<_, i16>("SELECT location_id FROM archive_leftovers ORDER BY 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    filer.pass(10).await.unwrap();
+    // The main archive's goes; the read-only location's is forgotten and
+    // kept; Cold's waits until this host has found Cold usable.
+    assert!(!archive.path().join("2025-03-01/1-A/x.mp3").exists());
+    assert!(
+        !archive.path().join("2025-03-01/1-A").exists(),
+        "its empty folder stays"
+    );
+    assert!(old.path().join("2025-03-01/1-A/x.mp3").exists());
+    assert!(cold.path().join("2025-03-01/1-A/x.mp3").exists());
+    assert_eq!(left().await, [cold_id]);
+    storage::record_health(&pool, "host-b", &[(cold_id, Ok((10, 20)))])
+        .await
+        .unwrap();
+    filer.pass(10).await.unwrap();
+    assert_eq!(
+        left().await,
+        [cold_id],
+        "another host's word is not this host's"
+    );
+    storage::record_health(&pool, "host-a", &[(cold_id, Ok((10, 20)))])
+        .await
+        .unwrap();
+    filer.pass(10).await.unwrap();
+    assert!(!cold.path().join("2025-03-01/1-A/x.mp3").exists());
+    assert!(cold.path().join(storage::MARKER).exists());
+    assert_eq!(left().await, Vec::<i16>::new());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn each_location_s_calls_are_counted_with_a_sample_of_their_files(pool: PgPool) {
     let places = seed_places(&pool, Path::new("/srv/archive"), Path::new("/srv/in/live")).await;
     let mut conn = pool.acquire().await.unwrap();

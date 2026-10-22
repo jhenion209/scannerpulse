@@ -99,6 +99,9 @@ pub struct Filer {
     folder_limit: Duration,
     /// The recorders' folders whose share stopped answering a read.
     hung: Hung,
+    /// This host's name: the files left in a location other than the main
+    /// archive are deleted only once this host found it usable.
+    host: String,
 }
 
 /// How a recorder's file is read ([`reader::read_path`]).
@@ -124,7 +127,15 @@ impl Filer {
             read: reader::read_path,
             folder_limit: watcher::FOLDER_LIMIT,
             hung: Hung::default(),
+            host: String::new(),
         }
+    }
+
+    /// Sets this host's name, as its ingest records what it finds in each
+    /// location.
+    pub fn with_host(mut self, host: &str) -> Filer {
+        self.host = host.to_string();
+        self
     }
 
     /// Reads the recorders' files with `read` (default [`reader::read_path`]).
@@ -635,10 +646,16 @@ impl Filer {
             }
             return Ok(later(why));
         }
-        // The filer deletes in its own location only: an old recording in
-        // another stays listed as a leftover.
+        // The filer deletes in its own location at once: an old recording in
+        // another stays listed as a leftover, for the sweep.
         if same.location_id == self.location.id {
-            self.remove_leftover(&same.rel_path).await?;
+            self.remove_leftover(&store::Leftover {
+                location_id: self.location.id,
+                root: self.location.root.display().to_string(),
+                rel_path: same.rel_path.clone(),
+                managed: true,
+            })
+            .await?;
         }
         drop(writing);
         if self.fence.held() {
@@ -647,39 +664,39 @@ impl Filer {
         Ok(Outcome::Replaced(same.id))
     }
 
-    /// Deletes up to `limit` archive files whose call a longer copy has
-    /// replaced, which a stop left behind.
+    /// Deletes up to `limit` archive files no call names any more, in every
+    /// location this host can use: a recording a longer copy replaced, which
+    /// a stop left behind, or a moved call's old file.
     async fn sweep(&mut self, limit: i64) -> sqlx::Result<()> {
         let leftovers = limited(
             self.db_limit,
-            store::leftovers(&self.pool, self.location.id, limit),
+            store::leftovers(&self.pool, &self.host, limit),
         )
         .await?;
         if leftovers.is_empty() || !self.fence.held() {
             return Ok(());
         }
         let _writing = archive::WRITES.lock().await;
-        for rel in leftovers {
+        for left in leftovers {
             if !self.fence.held() {
                 break;
             }
-            self.remove_leftover(&rel).await?;
+            self.remove_leftover(&left).await?;
         }
         Ok(())
     }
 
     /// Deletes an archive file that no call names any more, then its folder
-    /// if that is empty, and forgets it. A call that names it again keeps it.
-    /// Called with the archive's writes held, so that no writer takes the
-    /// file between the check and the deletion.
-    async fn remove_leftover(&self, rel: &str) -> sqlx::Result<()> {
-        if !limited(
-            self.db_limit,
-            store::named(&self.pool, self.location.id, rel),
-        )
-        .await?
+    /// if that is empty, and forgets it. A call that names it again keeps it;
+    /// a read-only location's file stays. Called with the archive's writes
+    /// held, so that no writer takes the file between the check and the
+    /// deletion.
+    async fn remove_leftover(&self, left: &store::Leftover) -> sqlx::Result<()> {
+        let (location_id, rel) = (left.location_id, left.rel_path.as_str());
+        if left.managed
+            && !limited(self.db_limit, store::named(&self.pool, location_id, rel)).await?
         {
-            let path = self.location.root.join(rel);
+            let path = Path::new(&left.root).join(rel);
             match fs::remove_file(&path) {
                 Ok(()) => {
                     if let Some(dir) = path.parent() {
@@ -697,7 +714,7 @@ impl Filer {
         }
         limited(
             self.db_limit,
-            store::forget_leftover(&self.pool, self.location.id, rel),
+            store::forget_leftover(&self.pool, location_id, rel),
         )
         .await
     }

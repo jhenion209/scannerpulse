@@ -985,17 +985,37 @@ pub async fn replace(
     Ok(true)
 }
 
-/// Up to `limit` archive files of the location that no call names any more.
+/// An archive file no call names any more, in its location.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct Leftover {
+    pub location_id: i16,
+    pub root: String,
+    pub rel_path: String,
+    /// A read-only location's file is never deleted, only forgotten.
+    pub managed: bool,
+}
+
+/// Up to `limit` archive files that no call names any more: in the main
+/// archive and the read-only locations, and in another location only when
+/// `host` found it usable in the last five minutes, so that an unmounted or
+/// hung share is left alone.
 pub async fn leftovers(
     db: impl PgExecutor<'_>,
-    location_id: i16,
+    host: &str,
     limit: i64,
-) -> sqlx::Result<Vec<String>> {
-    sqlx::query_scalar(
-        "SELECT rel_path FROM archive_leftovers WHERE location_id = $1 ORDER BY rel_path LIMIT $2",
+) -> sqlx::Result<Vec<Leftover>> {
+    sqlx::query_as(
+        "SELECT a.location_id, l.root, a.rel_path, l.mode = 'managed' AS managed \
+         FROM archive_leftovers a JOIN locations l ON l.id = a.location_id \
+         WHERE l.is_primary OR l.mode <> 'managed' \
+            OR EXISTS (SELECT 1 FROM location_health h \
+                       WHERE h.location_id = l.id AND h.host = $1 AND h.ok \
+                         AND h.checked_at > now() - make_interval(secs => $3)) \
+         ORDER BY a.location_id, a.rel_path LIMIT $2",
     )
-    .bind(location_id)
+    .bind(host)
     .bind(limit)
+    .bind(crate::storage::STALE_SECONDS)
     .fetch_all(db)
     .await
 }
