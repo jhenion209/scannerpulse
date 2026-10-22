@@ -2138,13 +2138,14 @@ async fn data_command(command: Data) -> CommandResult {
             let id = talkgroup_id(&mut conn, &talkgroup).await?;
             let preview = scannerpulse::data::purge_preview(&mut conn, id).await?;
             println!(
-                "{talkgroup} {:?}: {} calls are deleted, their files kept in {}",
+                "{talkgroup} {:?}: {} calls are deleted, their files kept in {}; {} in read-only locations lose only their records",
                 preview.talkgroup.name,
                 preview.calls,
                 preview
                     .holding_path
                     .as_deref()
-                    .unwrap_or("(purge.holding_path is not set)")
+                    .unwrap_or("(purge.holding_path is not set)"),
+                preview.read_only
             );
             let confirm = typed(confirm, "type the talkgroup's name to start: ")?;
             let (job, count) =

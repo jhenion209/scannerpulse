@@ -292,8 +292,10 @@ test('a purge starts after its count, the holding folder and its name typed', as
   await page.getByLabel('Talkgroup to purge').selectOption({ label: 'Valley Ambulance · Valley 201' });
   const count = page.getByRole('button', { name: 'Count the calls to delete' });
   await count.click();
-  await expect(page.getByText('2 of the calls are in read-only locations, whose files a purge cannot move.')).toBeVisible();
-  await expect(page.getByLabel('Type Valley Ambulance to confirm')).toHaveCount(0);
+  // A call in a read-only location loses only its record.
+  await expect(page.getByRole('status').filter({ hasText: 'calls of Valley Ambulance' }))
+    .toHaveText('5 calls of Valley Ambulance (Valley/201) are deleted; 3 files go to /srv/holding, and 2 in read-only locations keep their files.');
+  await expect(page.getByLabel('Type Valley Ambulance to confirm')).toBeVisible();
   await count.click();
   await expect(page.getByRole('status').filter({ hasText: 'calls of Valley Ambulance' }))
     .toHaveText('5 calls of Valley Ambulance (Valley/201) are deleted; their files go to /srv/holding.');

@@ -990,6 +990,86 @@ async fn a_purge_keeps_the_files_in_the_holding_folder(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_purge_takes_only_the_records_of_calls_in_a_read_only_location(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, old, holding) = (
+        dir.path().join("archive"),
+        dir.path().join("old"),
+        dir.path().join("holding"),
+    );
+    std::fs::create_dir_all(&holding).unwrap();
+    let places = common::seed_places(&pool, &root, &dir.path().join("in")).await;
+    let at = |minute| Utc.with_ymd_and_hms(2031, 3, 1, 12, minute, 0).unwrap();
+    let rel = "2031-03-01/127-Alpha Fire/20310301_120000SYSA.mp3";
+    let (_, talkgroup) = filed(
+        &pool,
+        places,
+        &root,
+        rel,
+        Some(common::tagged(&tag(Some("127\"Alpha Fire\"")), 1)),
+        at(0),
+    )
+    .await;
+    // An import's call of the same talkgroup: its file is never changed.
+    let old_id: i16 = sqlx::query_scalar(
+        "INSERT INTO locations (name, root, mode) VALUES ('Old', $1, 'readonly') RETURNING id",
+    )
+    .bind(old.to_str().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let old_rel = "2031-03-01/127-Alpha Fire/20310301_120100SYSA.mp3";
+    std::fs::create_dir_all(old.join(old_rel).parent().unwrap()).unwrap();
+    std::fs::write(old.join(old_rel), b"old").unwrap();
+    sqlx::query(
+        "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+         VALUES ($1, 2000, $2, $3, $4, $5)",
+    )
+    .bind(at(1))
+    .bind(talkgroup)
+    .bind(places.1)
+    .bind(old_id)
+    .bind(old_rel)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut conn = pool.acquire().await.unwrap();
+    let preview = scannerpulse::data::purge_preview(&mut conn, talkgroup)
+        .await
+        .unwrap();
+    assert_eq!((preview.calls, preview.read_only), (2, 1));
+    set_holding(&pool, &holding).await;
+    let (job, count) = scannerpulse::data::start_purge(&mut conn, talkgroup, "Alpha Fire", "ann")
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    run_jobs(&pool).await;
+    let ended = scannerpulse::jobs::get(&pool, job).await.unwrap().unwrap();
+    assert_eq!(ended.state, "done", "{}", ended.message);
+    assert!(
+        ended
+            .message
+            .contains("1 in a read-only location lost only its record"),
+        "{}",
+        ended.message
+    );
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM calls WHERE talkgroup_id = $1")
+        .bind(talkgroup)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    assert!(holding.join(rel).exists());
+    assert!(!root.join(rel).exists());
+    assert!(
+        old.join(old_rel).exists(),
+        "a read-only location's file stays"
+    );
+    assert!(!holding.join(old_rel).exists());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn an_admin_purges_only_with_a_holding_folder_and_the_name(pool: PgPool) {
     let seven = common::talkgroup(&pool, "SYSA", 7).await;
     let app = app(&pool);

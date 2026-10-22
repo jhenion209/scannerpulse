@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { correctText, mergeText, purgeText, readOnlyText, takenBy, type Named } from './data';
+import { correctText, mergeText, purgeText, takenBy, type Named } from './data';
 import type { AdminTalkgroup } from './transcription';
 
 const tg = (id: number, system: string, number: number, name: string): AdminTalkgroup => ({
@@ -38,12 +38,14 @@ describe('the counted sentences', () => {
       .toBe('1 call of Metro Fire South (Metro/102) goes to Metro Fire North (Metro/101); Metro Fire South goes.');
   });
 
-  it('say what a purge deletes, and what it cannot move', () => {
+  it('say what a purge deletes, and which calls keep their files', () => {
     expect(purgeText({ talkgroup: north, calls: 5, read_only: 0, holding_path: '/srv/holding' }))
       .toBe('5 calls of Metro Fire North (Metro/101) are deleted; their files go to /srv/holding.');
     expect(purgeText({ talkgroup: north, calls: 1, read_only: 0, holding_path: '/srv/holding' }))
       .toBe('1 call of Metro Fire North (Metro/101) is deleted; its file goes to /srv/holding.');
-    expect(readOnlyText(2)).toBe('2 of the calls are in read-only locations, whose files a purge cannot move.');
-    expect(readOnlyText(1)).toBe('1 of the calls is in a read-only location, whose file a purge cannot move.');
+    expect(purgeText({ talkgroup: north, calls: 5, read_only: 2, holding_path: '/srv/holding' }))
+      .toBe('5 calls of Metro Fire North (Metro/101) are deleted; 3 files go to /srv/holding, and 2 in read-only locations keep their files.');
+    expect(purgeText({ talkgroup: north, calls: 1, read_only: 1, holding_path: '/srv/holding' }))
+      .toBe('1 call of Metro Fire North (Metro/101) is deleted; 1 in a read-only location keeps its file.');
   });
 });

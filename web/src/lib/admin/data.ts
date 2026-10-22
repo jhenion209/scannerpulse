@@ -55,15 +55,21 @@ export const correctText = (p: CorrectPreview) => {
 export const mergeText = (p: MergePreview) =>
   `${counted(p.calls, 'call')} of ${written(p.from)} ${p.calls === 1 ? 'goes' : 'go'} to ${written(p.into)}; ${p.from.name} goes.`;
 
-/** What a purge deletes, in words; the holding folder is set. */
-export const purgeText = (p: PurgePreview) =>
-  `${counted(p.calls, 'call')} of ${written(p.talkgroup)} ${p.calls === 1 ? 'is' : 'are'} deleted; ${p.calls === 1 ? 'its file goes' : 'their files go'} to ${p.holding_path}.`;
-
-/** The calls a purge cannot move, in words. */
-export const readOnlyText = (n: number) =>
-  n === 1
-    ? '1 of the calls is in a read-only location, whose file a purge cannot move.'
-    : `${n.toLocaleString('en-US')} of the calls are in read-only locations, whose files a purge cannot move.`;
+/** What a purge deletes, in words; the holding folder is set. A call in a
+ * read-only location loses only its record: its file stays. */
+export const purgeText = (p: PurgePreview) => {
+  const held = p.calls - p.read_only;
+  const kept =
+    held === p.calls
+      ? `${p.calls === 1 ? 'its file goes' : 'their files go'} to ${p.holding_path}`
+      : `${counted(held, 'file')} ${held === 1 ? 'goes' : 'go'} to ${p.holding_path}`;
+  const stay =
+    p.read_only === 1
+      ? '1 in a read-only location keeps its file'
+      : `${p.read_only.toLocaleString('en-US')} in read-only locations keep their files`;
+  const parts = [held > 0 ? kept : null, p.read_only > 0 ? stay : null].filter(Boolean);
+  return `${counted(p.calls, 'call')} of ${written(p.talkgroup)} ${p.calls === 1 ? 'is' : 'are'} deleted; ${parts.join(', and ')}.`;
+};
 
 /** The talkgroup a refused rename names: the same system's, with the name
  * exactly, the lowest number first, as the server picks it. */

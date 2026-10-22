@@ -193,6 +193,9 @@ struct FileWork {
     /// The holding folder's canonical path, as the first step found it.
     #[serde(default)]
     holding: Option<String>,
+    /// A purge's calls in read-only locations: only their records went.
+    #[serde(default)]
+    records_only: i64,
 }
 
 /// A call whose file a step handles.
@@ -918,8 +921,8 @@ pub(crate) async fn merge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
 pub struct PurgePreview {
     pub talkgroup: Named,
     pub calls: i64,
-    /// Calls in read-only locations: a purge cannot move their files, so it
-    /// refuses to start while there are any.
+    /// Calls in read-only locations: only their records go, and their files
+    /// stay where they are.
     pub read_only: i64,
     pub holding_path: Option<String>,
 }
@@ -967,12 +970,6 @@ pub async fn start_purge(
             "set purge.holding_path first: the purged calls' files are kept there".into(),
         ));
     };
-    if preview.read_only > 0 {
-        return Err(JobError::Refused(format!(
-            "{} of the calls are in read-only locations, whose files a purge cannot move",
-            preview.read_only
-        )));
-    }
     confirmed(&preview.talkgroup, confirm)?;
     let filling: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM jobs WHERE kind = 'merge' AND state IN ('queued', 'running') \
@@ -1083,6 +1080,21 @@ async fn purge_one(
     })
 }
 
+/// Deletes the record of a call in a read-only location, whose file stays:
+/// false when the call is gone or has another file than the batch read.
+async fn forget_one(conn: &mut PgConnection, call: &CallFile) -> sqlx::Result<bool> {
+    let gone = sqlx::query(
+        "DELETE FROM calls WHERE id = $1 AND started_at = $2 AND location_id = $3 AND rel_path = $4",
+    )
+    .bind(call.id)
+    .bind(call.started_at)
+    .bind(call.location_id)
+    .bind(&call.rel_path)
+    .execute(&mut *conn)
+    .await?;
+    Ok(gone.rows_affected() == 1)
+}
+
 pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Result<Outcome> {
     let Ok(params) = serde_json::from_value::<Purge>(job.params.clone()) else {
         return Ok(Outcome::Failed(
@@ -1150,8 +1162,8 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
     let (after_at, after_id) = work.after.unzip();
     let batch: Vec<CallFile> = sqlx::query_as(
         "SELECT c.id, c.started_at, c.location_id, c.rel_path \
-         FROM calls c JOIN locations l ON l.id = c.location_id \
-         WHERE c.talkgroup_id = $1 AND l.mode = 'managed' \
+         FROM calls c \
+         WHERE c.talkgroup_id = $1 \
            AND ($3::timestamptz IS NULL OR (c.started_at, c.id) > ($3, $4)) \
          ORDER BY c.started_at, c.id LIMIT $2",
     )
@@ -1171,6 +1183,17 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
             holding_path,
             work.missing
         );
+        if work.records_only > 0 {
+            message.push_str(&format!(
+                "; {} in a read-only location lost only {}",
+                work.records_only,
+                if work.records_only == 1 {
+                    "its record"
+                } else {
+                    "their records"
+                }
+            ));
+        }
         if work.refused > 0 {
             message.push_str(&format!("; {} refused", work.refused));
         }
@@ -1183,7 +1206,7 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
             .await?;
         if remain > 0 {
             message.push_str(&format!(
-                "; {remain} remain (refused, in read-only locations, or filed during the purge)"
+                "; {remain} remain (refused, or filed during the purge)"
             ));
         }
         return Ok(Outcome::Done(job.done, message));
@@ -1201,8 +1224,20 @@ pub(crate) async fn purge_step(conn: &mut PgConnection, job: &Job) -> sqlx::Resu
             "the holding folder {holding_path} has no {HOLDING_SENTINEL} (unmounted?)"
         ))));
     }
+    let read_only: Vec<i16> =
+        sqlx::query_scalar("SELECT id FROM locations WHERE mode <> 'managed'")
+            .fetch_all(&mut *conn)
+            .await?;
     for call in &batch {
-        if let Some(root) = roots.get(&call.location_id) {
+        if read_only.contains(&call.location_id) {
+            // Its file is never changed: only the record goes.
+            if forget_one(conn, call).await? {
+                work.records_only += 1;
+            } else {
+                work.refused += 1;
+                work.last_refusal = Some(format!("call {} changed while it was purged", call.id));
+            }
+        } else if let Some(root) = roots.get(&call.location_id) {
             if !root.is_dir() {
                 return Err(io_error(io::Error::other(format!(
                     "the location {} is not there",

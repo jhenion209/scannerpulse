@@ -5,7 +5,7 @@
   import { tell } from '../notice.svelte';
   import { admin, why } from './session.svelte';
   import {
-    correctText, mergeText, purgeText, readOnlyText, takenBy,
+    correctText, mergeText, purgeText, takenBy,
     type CorrectPreview, type MergePreview, type PurgePreview, type Started, type Uncorrected,
   } from './data';
   import type { AdminTalkgroup } from './transcription';
@@ -332,8 +332,6 @@
   {#if purgePreview}
     {#if purgePreview.holding_path === null}
       <p class="problem" role="alert">Set <code>purge.holding_path</code> in Settings first: the purged calls' files are kept there.</p>
-    {:else if purgePreview.read_only > 0}
-      <p class="problem" role="alert">{readOnlyText(purgePreview.read_only)}</p>
     {:else}
       <p role="status" class="wrap">{purgeText(purgePreview)}</p>
       {#key purgePreview}<TypedConfirm name={purgePreview.talkgroup.name} action="Purge" start={startPurge} />{/key}
