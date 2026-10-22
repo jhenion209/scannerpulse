@@ -454,7 +454,9 @@ points at the copy, and the old file is deleted; listeners notice nothing.
 It runs as a job (Jobs area, `jobs show|stop ID`); a stopped move started
 again takes the calls left, and moving calls back to the main archive is
 another move. `storage remove NAME` removes a path that holds no call; its
-folder is left as it is. `archive move` moves the main archive only.
+folder is left as it is. It waits while the files moved out of it or
+purged are still being deleted, unless no machine reaches it any more (a
+disk that is gone): those files are then forgotten with it. `archive move` moves the main archive only.
 
 **Purging older than a day.** `storage purge-before DAY` (Purge older
 than…, red and apart on the Storage area) deletes every call before that

@@ -363,6 +363,10 @@ pub async fn remove(conn: &mut PgConnection, id: i16) -> Result<String, Refused>
             return Err(why);
         }
     };
+    sqlx::query("DELETE FROM archive_leftovers WHERE location_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM location_health WHERE location_id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -412,15 +416,21 @@ async fn removable(conn: &mut PgConnection, id: i16) -> sqlx::Result<Result<Stri
             "{name} still holds calls: move them to another location first"
         ))));
     }
-    let leftovers: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM archive_leftovers WHERE location_id = $1)",
+    // Its files wait for the sweep while a machine reaches the location. On a
+    // disk that is gone they would wait for ever: they are forgotten with it,
+    // and stay where they are.
+    let sweeping: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM archive_leftovers WHERE location_id = $1) \
+            AND EXISTS (SELECT 1 FROM location_health WHERE location_id = $1 AND ok \
+                          AND checked_at > now() - make_interval(secs => $2))",
     )
     .bind(id)
+    .bind(STALE_SECONDS)
     .fetch_one(&mut *conn)
     .await?;
-    if leftovers {
+    if sweeping {
         return Ok(Err(Refused::Refused(format!(
-            "the files moved out of {name} are still being deleted: try again in a minute"
+            "the files moved out of or purged from {name} are still being deleted: try again in a minute"
         ))));
     }
     Ok(Ok(name))

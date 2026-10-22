@@ -86,6 +86,31 @@ async fn a_location_is_added_apart_from_every_folder_in_use(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_location_no_machine_can_reach_is_removed_with_its_leftovers_forgotten(pool: PgPool) {
+    seed_places(&pool, Path::new("/srv/archive"), Path::new("/srv/in/live")).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let cold = storage::add(&mut conn, "Cold", Path::new("/srv/cold"), None, any)
+        .await
+        .unwrap();
+    // A purge emptied Cold, whose disk is gone: no sweep can reach its files.
+    sqlx::query("INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, 'x.mp3')")
+        .bind(cold)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let gone = "/srv/cold has no .scannerpulse-location file".to_string();
+    storage::record_health(&pool, "host-a", &[(cold, Err(gone))])
+        .await
+        .unwrap();
+    assert_eq!(storage::remove(&mut conn, cold).await.unwrap(), "Cold");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM archive_leftovers")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "its files stay where they are, forgotten");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn only_an_empty_location_that_is_not_the_main_archive_is_removed(pool: PgPool) {
     let places = seed_places(&pool, Path::new("/srv/archive"), Path::new("/srv/in/live")).await;
     let mut conn = pool.acquire().await.unwrap();
@@ -115,6 +140,10 @@ async fn only_an_empty_location_that_is_not_the_main_archive_is_removed(pool: Pg
     sqlx::query("INSERT INTO archive_leftovers (location_id, rel_path) VALUES ($1, 'x.mp3')")
         .bind(cold)
         .execute(&pool)
+        .await
+        .unwrap();
+    // A machine that reaches Cold deletes its files soon.
+    storage::record_health(&pool, "host-a", &[(cold, Ok((5 << 40, 10 << 40)))])
         .await
         .unwrap();
     let why = refused(storage::remove(&mut conn, cold).await);
