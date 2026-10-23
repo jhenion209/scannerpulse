@@ -85,6 +85,8 @@ pub fn time_service(report: &str) -> (Option<bool>, Option<bool>) {
 
 /// This machine's clock now.
 pub fn clock() -> Clock {
+    // Read first: the time service can take a moment to answer.
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let report = Command::new("timedatectl")
         .args(["show", "-p", "NTP", "-p", "NTPSynchronized"])
         .output()
@@ -96,7 +98,7 @@ pub fn clock() -> Clock {
     Clock {
         ntp,
         synchronized,
-        now_ms: chrono::Utc::now().timestamp_millis(),
+        now_ms,
     }
 }
 
@@ -105,6 +107,15 @@ pub fn clock() -> Clock {
 /// trip, in milliseconds.
 pub fn offset(sent: i64, answered: i64, theirs: i64) -> i64 {
     theirs - (sent + answered) / 2
+}
+
+/// How far another clock surely is from this one: [`offset`] less half the
+/// round trip, towards nought. Over ssh the far side reads its clock after
+/// the login and its program's start, near the end of the round trip, so a
+/// slow answer would otherwise read as a clock ahead.
+pub fn beyond_round_trip(sent: i64, answered: i64, theirs: i64) -> i64 {
+    let (off, slack) = (offset(sent, answered, theirs), (answered - sent) / 2);
+    off.signum() * (off.abs() - slack).max(0)
 }
 
 /// Keeps a machine's check, in place of its last.
@@ -189,7 +200,7 @@ pub async fn asked(host: &str, role: &str, mine: i64) -> Checked {
             ntp: theirs.ntp,
             synchronized: theirs.synchronized,
             // Theirs less mine, plus mine less the database's.
-            offset_ms: Some(offset(sent, answered, theirs.now_ms) + mine),
+            offset_ms: Some(beyond_round_trip(sent, answered, theirs.now_ms) + mine),
             problem: None,
         },
         Err(_) => unchecked(format!("answered {:?}, not a clock", text.trim())),
@@ -486,6 +497,17 @@ mod tests {
             "ssh: connect to host 192.0.2.1 port 22: Connection timed out"
         );
         assert_eq!(last_line("refused"), "refused");
+    }
+
+    #[test]
+    fn a_slow_answer_is_never_taken_for_a_clock_ahead() {
+        // A small referee answers in 2.4 s and reads its clock near the end:
+        // right, it reads 1.2 s past the midpoint.
+        assert_eq!(beyond_round_trip(0, 2_400, 2_390), 0);
+        // One truly 5 s ahead is still more than 4.9 s ahead whatever the
+        // moment it read its clock.
+        assert_eq!(beyond_round_trip(0, 2_400, 7_390), 4_990);
+        assert_eq!(beyond_round_trip(1_000, 1_200, -2_000), -3_000);
     }
 
     #[test]
