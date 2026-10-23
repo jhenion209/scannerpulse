@@ -809,22 +809,25 @@ async fn correct_files(
 }
 
 /// The last step: the talkgroup's files are marked correct when no call of
-/// it is left in another folder. Returns the job's last message.
+/// it is left in another folder of a location it may write. A read-only
+/// location's files are never written, so they keep their names and their
+/// own layout. Returns the job's last message.
 async fn finish_correction(
     conn: &mut PgConnection,
     talkgroup: &Named,
     folder: &str,
     work: &FileWork,
 ) -> sqlx::Result<String> {
-    let left: i64 = sqlx::query_scalar(concat!(
-        "SELECT count(*) FROM calls c WHERE c.talkgroup_id = $1 AND ",
+    let (left, read_only): (i64, i64) = sqlx::query_as(concat!(
+        "SELECT count(*), count(*) FILTER (WHERE l.mode <> 'managed') FROM calls c \
+         JOIN locations l ON l.id = c.location_id WHERE c.talkgroup_id = $1 AND ",
         to_correct!()
     ))
     .bind(talkgroup.id)
     .bind(folder)
     .fetch_one(&mut *conn)
     .await?;
-    if left == 0 {
+    if left == read_only {
         sqlx::query(
             "UPDATE talkgroups SET files_correct = true, files_name = NULL WHERE id = $1 AND name = $2",
         )

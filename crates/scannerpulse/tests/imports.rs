@@ -647,3 +647,39 @@ async fn an_imports_files_are_listed_where_no_filer_takes_them(pool: PgPool) {
             .unwrap();
     assert_eq!(states, [("listed".to_string(), 6)]);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_talkgroup_with_imported_calls_is_corrected_all_the_same(pool: PgPool) {
+    site(&pool).await;
+    let old = tempfile::tempdir().unwrap();
+    std::fs::write(
+        old.path().join("20190301_130000_b.mp3"),
+        recording("Metro", 703, "Police Main", 4),
+    )
+    .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let correct = || async {
+        sqlx::query_scalar::<_, bool>("SELECT files_correct FROM talkgroups WHERE number = 703")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    // The file names 703 otherwise: its files are not all under its name.
+    assert!(!correct().await);
+    let id: i32 = sqlx::query_scalar("SELECT id FROM talkgroups WHERE number = 703")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    scannerpulse::data::start_correct(&mut conn, id, "Police", "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    // A correction never writes in the import's folder, so its file keeps
+    // its name there; the talkgroup is corrected all the same.
+    assert!(correct().await);
+    assert!(old.path().join("20190301_130000_b.mp3").exists());
+}
