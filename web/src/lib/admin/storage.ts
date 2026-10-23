@@ -222,6 +222,7 @@ export function reviewLines(r: Review): string[] {
         `${about(r, r.copies)} ${copies} already in the archive (skipped), ${about(r, r.unknown)} of systems not named yet (they wait), ` +
         `${about(r, r.unreadable)} unreadable (skipped).`,
     );
+    lines.push('The folder’s own copies of a call count here as new calls: the import keeps one of each.');
     if (r.differ > 0) {
       const differ = about(r, r.differ);
       lines.push(`${differ[0].toUpperCase()}${differ.slice(1)} new calls name their talkgroup otherwise: the names wait for approval on the Recorders area.`);
@@ -267,13 +268,17 @@ export function importCount(r: Review, offset: string): number | null {
   return i >= 0 ? (r.new_at[i] ?? 0) : null;
 }
 
-/** The import's last button, naming what it does at the offset typed; no number at an offset the review did not try. */
+/**
+ * The import's last button, naming what it does at the offset typed; no
+ * number at an offset the review did not try. "Up to": the review counts the
+ * folder's own copies of a call as new calls.
+ */
 export function importAction(r: Review, name: string, offset: string): string {
   const counted = importCount(r, offset);
   if (counted === null) return `Import into ${name}`;
   const n = r.read >= r.left || r.read === 0 ? counted : Math.round((counted * r.left) / r.read);
   const calls = `${number(n)} ${n === 1 ? 'call' : 'calls'}`;
-  return `Import ${r.read > 0 && r.read < r.left ? 'about ' : ''}${calls} into ${name}`;
+  return `Import up to ${r.read > 0 && r.read < r.left ? 'about ' : ''}${calls} into ${name}`;
 }
 
 /** `POST /api/admin/storage/import`: what starting the import did. */

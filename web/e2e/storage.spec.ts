@@ -210,7 +210,7 @@ test('an older archive is reviewed first, then imported with the offset the revi
   await expect(page.getByText('2019/03/02/20190302_090000_e.mp3: the system County')).toBeVisible();
   const scan = await new AxeBuilder({ page }).include('main').analyze();
   expect(scan.violations).toEqual([]);
-  await page.getByRole('button', { name: 'Import about 852 calls into Old' }).click();
+  await page.getByRole('button', { name: 'Import up to about 852 calls into Old' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Job 42 imports /srv/old as Old, its times moved by +01:00' })).toBeVisible();
   expect(started).toEqual([{ name: 'Old', folder: '/srv/old', offset: '+01:00' }]);
 });

@@ -155,12 +155,14 @@ describe('an import', () => {
     expect(reviewLines(review())).toEqual([
       '4,003 mp3 files in /srv/old; 3 with no date and time in their names are skipped.',
       'Of the 4,000 left, 1,000 were read: about 2,400 new calls, about 1,600 copies of calls already in the archive (skipped), 0 of systems not named yet (they wait), 0 unreadable (skipped).',
+      'The folder’s own copies of a call count here as new calls: the import keeps one of each.',
       'About 40 new calls name their talkgroup otherwise: the names wait for approval on the Recorders area.',
       'Copies at each offset: -02:00 0, -01:00 0, +00:00 400, +01:00 10, +02:00 0.',
     ]);
     expect(reviewLines(review({ left: 5, read: 5, new: 4, copies: 1, differ: 0, copies_at: [0, 0, 1, 0, 0], new_at: [4, 4, 4, 5, 4], suggested: 60 }))).toEqual([
       '4,003 mp3 files in /srv/old; 3 with no date and time in their names are skipped.',
       'Of the 5 left, all were read: 4 new calls, 1 copy of a call already in the archive (skipped), 0 of systems not named yet (they wait), 0 unreadable (skipped).',
+      'The folder’s own copies of a call count here as new calls: the import keeps one of each.',
       'Copies at each offset: -02:00 0, -01:00 0, +00:00 1, +01:00 0, +02:00 0.',
       'The files are copies once their times are moved by +01:00: the older install’s clock or time zone was off.',
       'At +01:00: 5 new calls, 0 copies of calls already in the archive.',
@@ -169,13 +171,13 @@ describe('an import', () => {
   });
 
   it('names what its last button does, at the offset in the field', () => {
-    expect(importAction(review(), 'Old', '')).toBe('Import about 2,400 calls into Old');
-    expect(importAction(review({ new_at: [600, 600, 600, 213, 600] }), 'Old', '+01:00')).toBe('Import about 852 calls into Old');
+    expect(importAction(review(), 'Old', '')).toBe('Import up to about 2,400 calls into Old');
+    expect(importAction(review({ new_at: [600, 600, 600, 213, 600] }), 'Old', '+01:00')).toBe('Import up to about 852 calls into Old');
     // An offset the review did not try gives no number.
     expect(importAction(review(), 'Old', '+00:30')).toBe('Import into Old');
     // An import that keeps its offset was reviewed at it.
-    expect(importAction(review({ kept_offset: 30 }), 'Old', '+00:30')).toBe('Import about 2,400 calls into Old');
-    expect(importAction(review({ left: 4, read: 4, new: 1 }), 'Old', '')).toBe('Import 1 call into Old');
+    expect(importAction(review({ kept_offset: 30 }), 'Old', '+00:30')).toBe('Import up to about 2,400 calls into Old');
+    expect(importAction(review({ left: 4, read: 4, new: 1 }), 'Old', '')).toBe('Import up to 1 call into Old');
   });
 
   it('is consolidated once counted, its word typed, and confirmed', () => {
