@@ -479,6 +479,51 @@ own for a limit (60 s for a job): a share that stops answering ends the job
 with its counts, and holds back neither the filing of new calls nor the
 other machine.
 
+**Importing an older archive.** `storage import NAME FOLDER` (Import an
+older archive… on the Storage area) takes in an older install's folder of
+recordings, such as another machine's SDRTrunk or TrunkingRecorder, where it
+is: the folder, mounted on every ScannerPulse machine, becomes the read-only
+location NAME, and nothing in it is ever written, renamed or deleted. Each
+machine checks it by listing it; an empty folder counts as not mounted.
+
+A review comes first and writes nothing (`--review`). It counts the mp3
+files, and those whose names hold no date and time, which are skipped. It
+reads up to 1,000 of the others, spread over the folder, and counts:
+- the new calls;
+- the copies of calls already in the archive: the same talkgroup,
+  overlapping by more than a second and by at least half the shorter, the
+  same radio when both name one;
+- the files of a system not named yet;
+- the talkgroups the files name otherwise.
+
+It shows some of each. It also counts the copies at each whole-hour offset
+from −2 h to +2 h, and suggests the offset at which clearly more files are
+copies: the older install's clock or time zone was off.
+
+The import then runs as a job with that offset (`--offset ±HH:MM`). The
+offset moves the times the file names give; the names stay as they are, and
+a file's modification time is never used. Each file becomes a call of NAME,
+at its path in the folder, except:
+- a copy of a call is skipped, and never replaces the archive's recording;
+- a file of a system not named yet waits in the folder, until the system is
+  named on the Recorders area and the import runs again.
+
+A talkgroup name a file gives otherwise waits for approval, as a recorder's
+does. Imported calls are not announced to listeners, and not queued for
+transcription: `scannerpulse transcribe --talkgroup … --from … --to …`
+queues them. Run again, an import takes only the files it has not taken,
+with the offset it keeps, and skips the files from before a day it was
+purged before.
+
+**Consolidating an import.** `storage consolidate NAME` (Consolidate… on
+the import's card), never by default, copies each call of the import into
+the main archive's layout, reads it back, and points the call at the copy,
+as a move does. The import's own files stay as they are. It counts first,
+and starts only once `move` is typed (`--confirm move`); the admin page asks
+once more in a pop-up. Once the import holds no call, `storage remove NAME`
+removes it. Its register stays, so that an import of the folder again takes
+none of the files it took.
+
 ## Commands
 
 `scannerpulse --help` lists them. Every command first reads the machine's
@@ -501,8 +546,8 @@ already set in the environment wins. So far:
   `systems`); `POST /api/admin/names/approve` and `dismiss` take
   `talkgroup_id` and `name`; `POST /api/admin/staging/new-system`, `map`
   and `discard` take `system`, with `to` (map) or `confirm` (discard).
-- `storage list|add|remove|move` are described under Install, "Storage
-  paths beside the archive". `GET /api/admin/storage` lists the locations,
+- `storage list|add|remove|move|purge-before|import|consolidate` are
+  described under Install, "Storage paths beside the archive" and after it. `GET /api/admin/storage` lists the locations,
   each with its calls (counted at most ten minutes before), what each
   machine found there, and the machines whose ingest runs; `POST` adds one
   (`name`, `folder`) and `DELETE /api/admin/storage/<id>` removes one. `GET
@@ -511,7 +556,14 @@ already set in the environment wins. So far:
   `to`, `from`, `until` and `confirm` (`move`). `GET
   /api/admin/storage/purge?before=` counts a purge (each location's calls,
   and whether it is read-only); `POST /api/admin/storage/purge` starts it
-  with `before` and `confirm` (the day).
+  with `before` and `confirm` (the day). `POST
+  /api/admin/storage/import/review` starts a review (`name`, `folder`), and
+  `GET /api/admin/storage/import/review/<job>` gives what it found (`done`
+  once complete); `POST /api/admin/storage/import` starts the import, with
+  `name`, `folder` and `offset` (`±HH:MM`, optional). `GET
+  /api/admin/storage/consolidate?name=` counts a consolidation; `POST
+  /api/admin/storage/consolidate` starts it with `name` and `confirm`
+  (`move`).
 - `db promote`, `db rejoin` and `db switchover`, as root, change the two
   database machines' roles (above); `node serve`, `node status` and `node
   backup` are a database machine's (or the referee's) own, and `join info`
