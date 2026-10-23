@@ -47,6 +47,7 @@ pub mod settings;
 pub mod setup;
 pub mod smartsort;
 pub mod status;
+pub mod steps;
 pub mod storage;
 pub mod store;
 pub mod talkgroups;

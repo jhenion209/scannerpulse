@@ -23,6 +23,7 @@ impl From<JobError> for ApiError {
             JobError::NoSuch(_) => ApiError::Missing(error.to_string()),
             JobError::Ended(_) | JobError::Busy(_) => ApiError::Conflict(error.to_string()),
             JobError::Refused(_) => ApiError::BadRequest(error.to_string()),
+            JobError::Excluded(_) => ApiError::Conflict(error.to_string()),
         }
     }
 }

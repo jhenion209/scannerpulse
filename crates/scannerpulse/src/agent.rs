@@ -298,7 +298,23 @@ async fn carry_out(pool: &PgPool, id: i64, kind: Kind) -> (bool, String) {
                 .unwrap_or_else(|error| Err(format!("the switchover stopped: {error}")))
                 .map(well)
         }
-        _ => convert_step(pool, kind, said).await,
+        _ => {
+            let by: String =
+                sqlx::query_scalar("SELECT requested_by FROM agent_requests WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap_or_else(|_| "the root helper".into());
+            let options = pool.connect_options();
+            crate::steps::carry_out(
+                Some(&options),
+                crate::steps::words(kind),
+                &by,
+                |line| crate::log::warn(format!("agent: {line}")),
+                convert_step(pool, kind, said),
+            )
+            .await
+        }
     };
     let _ = writer.await;
     match result {

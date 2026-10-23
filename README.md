@@ -797,6 +797,16 @@ already set in the environment wins. So far:
   prints them oldest first, each time in the site's zone; `--admin root`
   takes root's commands on every machine, and `--follow` keeps printing new
   entries as they come. The admin page does not show the log.
+- **A step of the conversion and the jobs that change archive files exclude
+  each other.** The jobs are a move, purge older than, import, consolidate,
+  and a talkgroup's correct, merge and purge. The steps are the archive's
+  check and switch, the database's move, switch and removal, and the second
+  machine's addition, asked of the root helper or run as a command.
+  Whichever is started second is refused, naming what runs and who started
+  it; a job waiting its turn counts. This holds only while a step is carried
+  out, not between steps, and for every admin and command alike. Update now
+  and a switchover are not steps. A step that cannot reach the database
+  goes on unchecked, and says so.
 - `settings list`, `settings set KEY JSON` and `settings unset KEY` show and
   change the administrator's settings, such as `settings set time_zone
   '"America/Chicago"'`. A change is checked as the part that reads the

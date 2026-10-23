@@ -38,6 +38,34 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub const ALL: [Kind; 10] = [
+        Kind::Queue,
+        Kind::AsrRun,
+        Kind::Correct,
+        Kind::Merge,
+        Kind::Purge,
+        Kind::Move,
+        Kind::PurgeBefore,
+        Kind::ImportReview,
+        Kind::Import,
+        Kind::Consolidate,
+    ];
+
+    /// Whether the job changes archive files: a step of the conversion and
+    /// it exclude each other (`steps`). A review only reads its folder.
+    pub fn changes_archive(self) -> bool {
+        matches!(
+            self,
+            Kind::Correct
+                | Kind::Merge
+                | Kind::Purge
+                | Kind::Move
+                | Kind::PurgeBefore
+                | Kind::Import
+                | Kind::Consolidate
+        )
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Kind::Queue => "queue",
@@ -105,13 +133,15 @@ pub enum JobError {
     Ended(i64),
     /// The job's row is locked by a step that is still running.
     Busy(i64),
+    /// A step of the conversion is being carried out; the text names it.
+    Excluded(String),
     Database(sqlx::Error),
 }
 
 impl fmt::Display for JobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JobError::Refused(why) => f.write_str(why),
+            JobError::Refused(why) | JobError::Excluded(why) => f.write_str(why),
             JobError::NoSuch(id) => write!(f, "there is no job {id}"),
             JobError::Ended(id) => write!(f, "job {id} has ended already"),
             JobError::Busy(id) => write!(
@@ -141,23 +171,38 @@ pub(crate) fn from_settings(error: crate::settings::SettingsError) -> JobError {
 }
 
 /// Adds a job, queued behind any others; returns its id. `params` must
-/// already be checked by the kind's own function.
+/// already be checked by the kind's own function. A job that changes
+/// archive files is refused while a step of the conversion is carried out:
+/// the statement that adds it holds the steps' lock shared until its
+/// transaction ends, so a step that begins meanwhile waits, then sees it.
 pub async fn create(
     db: impl sqlx::PgExecutor<'_>,
     kind: Kind,
     params: &Value,
     total: Option<i64>,
     started_by: &str,
-) -> sqlx::Result<i64> {
-    sqlx::query_scalar(
-        "INSERT INTO jobs (kind, params, total, started_by) VALUES ($1, $2, $3, $4) RETURNING id",
-    )
+) -> Result<i64, JobError> {
+    let (id, running): (Option<i64>, Option<String>) = sqlx::query_as(&format!(
+        "WITH free AS (SELECT NOT $5 OR pg_try_advisory_xact_lock_shared(hashtext($6)) AS free), \
+              made AS (INSERT INTO jobs (kind, params, total, started_by) \
+                       SELECT $1, $2, $3, $4 FROM free WHERE free RETURNING id) \
+         SELECT (SELECT id FROM made), ({})",
+        crate::steps::RUNNING
+    ))
     .bind(kind.name())
     .bind(params)
     .bind(total)
     .bind(started_by)
+    .bind(kind.changes_archive())
+    .bind(crate::steps::LOCK)
     .fetch_one(db)
-    .await
+    .await?;
+    id.ok_or_else(|| {
+        JobError::Excluded(format!(
+            "{} is being carried out: start this once it has ended",
+            running.unwrap_or_else(|| "a step of the conversion".into())
+        ))
+    })
 }
 
 /// The newest jobs first.

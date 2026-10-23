@@ -58,7 +58,12 @@ pub async fn record_command(db: impl sqlx::PgExecutor<'_>, what: &str) -> sqlx::
 /// Who runs a command on this machine: "<account> on <machine>".
 pub fn command_actor() -> String {
     let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
-    let host = std::env::var("SCANNERPULSE_HOST")
+    format!("{user} on {}", this_machine())
+}
+
+/// This machine's name, as the site knows it.
+pub fn this_machine() -> String {
+    std::env::var("SCANNERPULSE_HOST")
         .ok()
         .or_else(|| {
             std::fs::read_to_string("/proc/sys/kernel/hostname")
@@ -66,8 +71,7 @@ pub fn command_actor() -> String {
                 .map(|name| name.trim().to_string())
         })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "this machine".into());
-    format!("{user} on {host}")
+        .unwrap_or_else(|| "this machine".into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]

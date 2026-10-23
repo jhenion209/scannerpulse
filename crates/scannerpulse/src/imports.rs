@@ -440,7 +440,7 @@ pub async fn start_review(
         folder: real.display().to_string(),
     })
     .expect("plain data");
-    Ok(jobs::create(&mut *conn, Kind::ImportReview, &params, None, started_by).await?)
+    jobs::create(&mut *conn, Kind::ImportReview, &params, None, started_by).await
 }
 
 /// What the review `job` found, once it has walked the folder.

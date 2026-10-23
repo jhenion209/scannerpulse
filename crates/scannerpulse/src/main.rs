@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use chrono::{NaiveDate, SecondsFormat, Utc};
 use scannerpulse::MIGRATOR;
 use scannerpulse::accuracy::{self, Candidate, Run};
+use scannerpulse::agent::Kind;
 use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
@@ -1163,6 +1164,27 @@ async fn record_command(args: &[&str]) {
     }
 }
 
+/// Carries out a step of the conversion run on this machine: refused while
+/// a job that changes archive files waits or runs, and the jobs of those
+/// kinds refused while it runs (`steps`).
+async fn as_step<T>(
+    kind: Kind,
+    step: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let options = match std::env::var("DATABASE_URL") {
+        Ok(url) => scannerpulse::primary::options(&url).await.ok(),
+        Err(_) => None,
+    };
+    scannerpulse::steps::carry_out(
+        options.as_ref(),
+        scannerpulse::steps::words(kind),
+        &command_line_user(),
+        |line| eprintln!("{line}"),
+        step,
+    )
+    .await
+}
+
 /// The arguments as a shell would take them back: each with a character a
 /// shell reads in single quotes.
 fn as_typed(args: &[&str]) -> String {
@@ -1411,7 +1433,19 @@ async fn execute(command: Option<Command>) -> ExitCode {
             }
         }
         Some(Command::Change(change)) => {
-            match scannerpulse::setup::change::run_change(change).await {
+            let result = if matches!(change, Change::Second { .. }) {
+                as_step(Kind::Second, async {
+                    scannerpulse::setup::change::run_change(change)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await
+            } else {
+                scannerpulse::setup::change::run_change(change)
+                    .await
+                    .map_err(|error| error.to_string())
+            };
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{error}");
@@ -1452,23 +1486,32 @@ async fn execute(command: Option<Command>) -> ExitCode {
                         // Run again, the move reads its plan: the database
                         // may be restarting under pg_autoctl.
                         let mut conn = connect().await.ok();
-                        scannerpulse::setup::db_move::begin(conn.as_mut(), nodes, hub, referee)
-                            .await
+                        as_step(
+                            Kind::DbMove,
+                            scannerpulse::setup::db_move::begin(conn.as_mut(), nodes, hub, referee),
+                        )
+                        .await
                     }
                     // A terminal gone mid-switch must not panic it.
                     DbMove::Switch => {
-                        scannerpulse::setup::db_move::switch(|line| {
-                            let _ = writeln!(std::io::stdout(), "{line}");
-                        })
+                        as_step(
+                            Kind::DbSwitch,
+                            scannerpulse::setup::db_move::switch(|line| {
+                                let _ = writeln!(std::io::stdout(), "{line}");
+                            }),
+                        )
                         .await
                     }
                     DbMove::Retire => {
-                        scannerpulse::setup::db_move::retire(|question| {
-                            inquire::Confirm::new(question)
-                                .with_default(false)
-                                .prompt()
-                                .unwrap_or(false)
-                        })
+                        as_step(
+                            Kind::DbRetire,
+                            scannerpulse::setup::db_move::retire(|question| {
+                                inquire::Confirm::new(question)
+                                    .with_default(false)
+                                    .prompt()
+                                    .unwrap_or(false)
+                            }),
+                        )
                         .await
                     }
                     DbMove::Cancel => {
@@ -1488,12 +1531,25 @@ async fn execute(command: Option<Command>) -> ExitCode {
             let result = match as_root() {
                 Ok(()) => match connect().await {
                     Ok(mut conn) => {
+                        let kind = if switch {
+                            Kind::ArchiveSwitch
+                        } else {
+                            Kind::ArchiveCheck
+                        };
                         // A terminal gone mid-switch must not panic it.
-                        scannerpulse::setup::archive_move::run(&mut conn, &new, switch, |line| {
-                            let _ = writeln!(std::io::stdout(), "{line}");
+                        as_step(kind, async {
+                            scannerpulse::setup::archive_move::run(
+                                &mut conn,
+                                &new,
+                                switch,
+                                |line| {
+                                    let _ = writeln!(std::io::stdout(), "{line}");
+                                },
+                            )
+                            .await
+                            .map(|(_, said)| said)
                         })
                         .await
-                        .map(|(_, said)| said)
                     }
                     Err(error) => Err(error.to_string()),
                 },

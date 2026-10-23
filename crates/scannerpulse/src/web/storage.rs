@@ -51,6 +51,7 @@ fn refused(error: Refused) -> ApiError {
 fn job_refused(error: JobError) -> ApiError {
     match error {
         JobError::Database(error) => ApiError::Database(error),
+        JobError::Excluded(why) => ApiError::Conflict(why),
         other => ApiError::BadRequest(other.to_string()),
     }
 }

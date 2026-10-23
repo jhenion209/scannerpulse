@@ -187,6 +187,23 @@ async fn a_move_is_counted_then_started_only_with_move_typed(pool: PgPool) {
     let wrong = send(&app, "POST", "/api/admin/storage/move", &h, body("Move")).await;
     assert_eq!(wrong.status, 400);
     assert_eq!(wrong.body["detail"], "type move to confirm");
+    // While a step of the conversion is carried out, the move is refused,
+    // naming the step.
+    let options = pool.connect_options();
+    let step = scannerpulse::steps::Step::begin(&options, "the archive's switch", "bob")
+        .await
+        .unwrap();
+    let held = send(&app, "POST", "/api/admin/storage/move", &h, body("move")).await;
+    assert_eq!(held.status, 409, "{:?}", held.body);
+    assert!(
+        held.body["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("the archive's switch (started by bob on "),
+        "{:?}",
+        held.body
+    );
+    step.end().await;
     let started = send(&app, "POST", "/api/admin/storage/move", &h, body("move")).await;
     assert_eq!(started.status, 201, "{:?}", started.body);
     assert_eq!(started.body["calls"], 1);
