@@ -150,3 +150,15 @@ async fn a_step_and_a_job_started_at_once_are_never_both_let_through(pool: PgPoo
             .unwrap();
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_lock_whose_key_only_hashes_like_the_steps_holds_no_job_back(pool: PgPool) {
+    // A sign-in locks keys made by `hashtext` of what a visitor types; one
+    // that hashed like the steps' lock must not refuse a move.
+    let mut visitor = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext('scannerpulse conversion step'))")
+        .execute(&mut *visitor)
+        .await
+        .unwrap();
+    create(&pool, Kind::Move, "cy").await.unwrap();
+}

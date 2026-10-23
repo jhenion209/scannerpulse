@@ -183,7 +183,7 @@ pub async fn create(
     started_by: &str,
 ) -> Result<i64, JobError> {
     let (id, running): (Option<i64>, Option<String>) = sqlx::query_as(&format!(
-        "WITH free AS (SELECT NOT $5 OR pg_try_advisory_xact_lock_shared(hashtext($6)) AS free), \
+        "WITH free AS (SELECT NOT $5 OR pg_try_advisory_xact_lock_shared($6, $7) AS free), \
               made AS (INSERT INTO jobs (kind, params, total, started_by) \
                        SELECT $1, $2, $3, $4 FROM free WHERE free RETURNING id) \
          SELECT (SELECT id FROM made), ({})",
@@ -194,7 +194,8 @@ pub async fn create(
     .bind(total)
     .bind(started_by)
     .bind(kind.changes_archive())
-    .bind(crate::steps::LOCK)
+    .bind(crate::steps::LOCK.0)
+    .bind(crate::steps::LOCK.1)
     .fetch_one(db)
     .await?;
     id.ok_or_else(|| {

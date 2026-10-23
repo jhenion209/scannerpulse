@@ -14,8 +14,10 @@ use sqlx::postgres::{PgConnectOptions, PgConnection};
 use crate::agent::Kind;
 use crate::jobs;
 
-/// The advisory lock's name (`hashtext` of it is the key).
-pub const LOCK: &str = "scannerpulse conversion step";
+/// The advisory lock's key, two numbers (the imports' first, then this
+/// migration's), so it never meets a key made by `hashtext` of what a
+/// visitor types: a sign-in locks those.
+pub const LOCK: (i32, i32) = (1397048658, 20);
 
 /// A step of the conversion in words.
 pub fn words(kind: Kind) -> &'static str {
@@ -61,8 +63,9 @@ impl Step {
             .execute(&mut conn)
             .await
             .map_err(failed)?;
-        let locked = sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
-            .bind(LOCK)
+        let locked = sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(LOCK.0)
+            .bind(LOCK.1)
             .execute(&mut conn)
             .await;
         if let Err(error) = locked {
