@@ -782,13 +782,14 @@ already set in the environment wins. So far:
   so off alone is not named), is a second or more from the database's,
   cannot be checked, or was last checked over 30 minutes ago. A recorder is
   measured from its newest 200 files of the last day (5 at least; never an
-  import, nor a file first seen over an hour after the time its name gives,
-  a backlog; a recorder taken in when asked only by its copies). A file is
+  import; a recorder taken in when asked only by its copies). A file is
   seen once it has been still for 2 s after its call ended; counting from
-  then, a recorder is named when its files are seen more than a second
-  early (its clock is ahead) or more than a minute late (behind, or slow to
-  arrive), or when its copies of another recorder's calls are named a
-  second or more apart from them, which can keep one short call as two.
+  then, a recorder is named when one in ten of its files is seen more than
+  a second early (its clock is ahead), or nine in ten more than a minute
+  late (behind, an hour without daylight saving say, or slow to arrive): a
+  rescan, an outage or a backlog only ever adds delay. It is named too when
+  its copies of another recorder's calls are named a second or more apart
+  from them, which can keep one short call as two.
 - `talkgroups` lists the talkgroups and their transcription switches;
   `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
   `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts

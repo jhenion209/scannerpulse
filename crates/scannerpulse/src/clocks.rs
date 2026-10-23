@@ -30,13 +30,13 @@ pub const LATE_MS: i64 = 60_000;
 /// The files of a recorder measured: its newest of the last day.
 const SAMPLE: i64 = 200;
 
-/// A file first seen this long after the time its name gives is a backlog
-/// brought in (or one that waited while ingest was stopped), not a clock:
-/// it is not measured.
-const BACKLOG: &str = "1 hour";
-
 /// Fewer files or copies than this tell nothing.
 const FEWEST: i64 = 5;
+
+/// A recorder's files are measured by the delay that this share of them
+/// beat: every delay added to its clock's (the watcher's rescan and tick, a
+/// backlog brought in, an outage) is positive, so the low tail is the clock.
+const LOW_TAIL: f64 = 0.1;
 
 /// How long a database machine or the referee may take to answer.
 const ASK_LIMIT: Duration = Duration::from_secs(20);
@@ -320,29 +320,29 @@ pub async fn machine_warnings(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec
 }
 
 /// The recorders whose clocks need a look, measured from their newest files
-/// of the last day ([`SAMPLE`] at most, [`FEWEST`] at least; an import or a
-/// [`BACKLOG`] is never measured). A file is seen, by the database's clock,
-/// once it has been still for [`crate::watcher::STABLE_FOR`] after its call
-/// ended (its name's time and its length): counting from then, a recorder
-/// is named when its files are seen more than [`LIMIT_MS`] early (its clock
-/// is ahead) or more than [`LATE_MS`] late. A recorder taken in when asked
-/// brings its files in late, and has no such measure. Names give whole
-/// seconds, and a recorder is named too when its copies of other recorders'
-/// calls are named [`LIMIT_MS`] or more apart from them (the median, both
-/// ways), enough to keep one short call as two.
+/// of the last day ([`SAMPLE`] at most, [`FEWEST`] at least; never an
+/// import). A file is seen, by the database's clock, once it has been still
+/// for [`crate::watcher::STABLE_FOR`] after its call ended (its name's time
+/// and its length): counting from then, a recorder is named when the delay
+/// [`LOW_TAIL`] of its files beat is more than [`LIMIT_MS`] early (its clock
+/// is ahead) or more than [`LATE_MS`] late (an hour behind, say, kept
+/// without daylight saving). A recorder taken in when asked brings its files
+/// in late, and has no such measure. Names give whole seconds, and a
+/// recorder is named too when its copies of other recorders' calls are
+/// named [`LIMIT_MS`] or more apart from them (the median, both ways),
+/// enough to keep one short call as two.
 pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<Warning>> {
     let recorders: Vec<(String, Option<f64>)> = sqlx::query_as(
         "SELECT s.name, \
-                CASE WHEN count(*) >= $2 THEN percentile_cont(0.5) WITHIN GROUP \
+                CASE WHEN count(*) >= $2 THEN percentile_cont($4) WITHIN GROUP \
                     (ORDER BY extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000 \
-                              - c.duration_ms - $4) END \
+                              - c.duration_ms - $3) END \
          FROM sources s \
          CROSS JOIN LATERAL ( \
              SELECT f.first_seen, f.named_at, f.call_id, f.call_started_at \
              FROM ingest_files f \
              WHERE f.source_id = s.id AND f.state = 'done' AND f.named_at IS NOT NULL \
                AND f.first_seen > now() - interval '1 day' \
-               AND f.first_seen < f.named_at + $3::interval \
                AND s.removed_at IS NULL AND s.intake <> 'asked' \
                AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
              ORDER BY f.first_seen DESC LIMIT $1) f \
@@ -352,8 +352,8 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
     )
     .bind(SAMPLE)
     .bind(FEWEST)
-    .bind(BACKLOG)
     .bind(crate::watcher::STABLE_FOR.as_millis() as i64)
+    .bind(LOW_TAIL)
     .fetch_all(&mut *db)
     .await?;
     let mut warnings = Vec::new();

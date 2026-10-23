@@ -357,3 +357,20 @@ async fn an_imports_rows_are_never_read_to_measure_the_recorders(pool: PgPool) {
     .unwrap();
     assert_eq!(read, 0, "the import's rows were read");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_an_hour_behind_is_named(pool: PgPool) {
+    // Its machine keeps no daylight saving: its 2 s calls are named an hour
+    // before they end, while its files arrive on time.
+    let north = recorder(&pool, "north").await;
+    for minute in 1..=6 {
+        let seen = ago(minute * 60);
+        filed(&pool, north, seen - Duration::seconds(3604), 2_000, seen).await;
+    }
+    assert_eq!(
+        recorder_warnings(&pool).await,
+        [
+            "north: its files are seen 3600.0 s after their calls end: its clock may be behind, or its files slow to arrive"
+        ]
+    );
+}
