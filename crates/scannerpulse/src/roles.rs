@@ -46,7 +46,12 @@ pub enum Function {
     Transcribe,
     Queue,
     Evaluation,
+    /// The `transcription.*` settings, `transcription.servers` (where every
+    /// call's audio goes) among them.
+    TranscriptionSettings,
     Settings,
+    /// `logs.syslog`: where the journal's lines go.
+    Syslog,
     Maintenance,
     Favorites,
     StopJobs,
@@ -54,7 +59,7 @@ pub enum Function {
 }
 
 impl Function {
-    pub const ALL: [Function; 22] = [
+    pub const ALL: [Function; 24] = [
         Function::Locations,
         Function::Move,
         Function::Purge,
@@ -72,7 +77,9 @@ impl Function {
         Function::Transcribe,
         Function::Queue,
         Function::Evaluation,
+        Function::TranscriptionSettings,
         Function::Settings,
+        Function::Syslog,
         Function::Maintenance,
         Function::Favorites,
         Function::StopJobs,
@@ -99,7 +106,9 @@ impl Function {
             Function::Transcribe => "transcribe",
             Function::Queue => "queue",
             Function::Evaluation => "evaluation",
+            Function::TranscriptionSettings => "transcription-settings",
             Function::Settings => "settings",
+            Function::Syslog => "syslog",
             Function::Maintenance => "maintenance",
             Function::Favorites => "favorites",
             Function::StopJobs => "stop-jobs",
@@ -127,7 +136,9 @@ impl Function {
             Function::Transcribe => ("Transcription", "Transcribe"),
             Function::Queue => ("Transcription", "Queue"),
             Function::Evaluation => ("Transcription", "Evaluation runs"),
+            Function::TranscriptionSettings => ("Transcription", "Transcription settings"),
             Function::Settings => ("Site", "Settings"),
+            Function::Syslog => ("Site", "Syslog"),
             Function::Maintenance => ("Site", "Maintenance"),
             Function::Favorites => ("Site", "Favorites"),
             Function::StopJobs => ("Site", "Stop a job"),
@@ -203,12 +214,17 @@ pub fn helper_function(kind: crate::agent::Kind) -> Function {
 }
 
 /// The function a setting's change needs; `None` for a setting that decides
-/// who signs in, which only a super admin changes.
+/// who signs in, which only a super admin changes. The settings that send
+/// data off the machine have functions of their own.
 pub fn setting_function(key: &str) -> Option<Function> {
     if key.starts_with("oidc.") || key == "auth.password_signin" || key == "web.trusted_proxies" {
         None
     } else if key == "maintenance.enabled" {
         Some(Function::Maintenance)
+    } else if key.starts_with("transcription.") {
+        Some(Function::TranscriptionSettings)
+    } else if key.starts_with("logs.") {
+        Some(Function::Syslog)
     } else {
         Some(Function::Settings)
     }
@@ -277,5 +293,10 @@ mod tests {
             setting_function("web.system_order"),
             Some(Function::Settings)
         );
+        assert_eq!(
+            setting_function("transcription.servers"),
+            Some(Function::TranscriptionSettings)
+        );
+        assert_eq!(setting_function("logs.syslog"), Some(Function::Syslog));
     }
 }

@@ -146,6 +146,13 @@ fn changes() -> Vec<(&'static str, &'static str, Option<Value>, Function)> {
             F::Maintenance,
         ),
         (
+            "PUT",
+            "/api/admin/settings/transcription.model",
+            Some(json!({"value": 5})),
+            F::TranscriptionSettings,
+        ),
+        ("DELETE", "/api/admin/settings/logs.syslog", None, F::Syslog),
+        (
             "POST",
             "/api/admin/helper",
             Some(json!({"kind": "update"})),
@@ -479,4 +486,43 @@ async fn an_associate_who_signs_in_through_oidc_cannot_give_themselves_a_passwor
     )
     .await;
     assert_eq!(given.status, 204, "{:?}", given.body);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn transcription_and_syslog_settings_need_their_own_functions(pool: PgPool) {
+    let (app, cookie, csrf) = associate(&pool, &[Function::Settings]).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let servers =
+        json!({"value": [{"url": "https://192.0.2.1/v1/audio/transcriptions", "weight": 1}]});
+    for (method, uri, body) in [
+        (
+            "PUT",
+            "/api/admin/settings/transcription.servers",
+            Some(servers),
+        ),
+        (
+            "PUT",
+            "/api/admin/settings/transcription.enabled",
+            Some(json!({"value": true})),
+        ),
+        ("DELETE", "/api/admin/settings/transcription.model", None),
+        (
+            "PUT",
+            "/api/admin/settings/logs.syslog",
+            Some(json!({"value": "udp://192.0.2.1:514"})),
+        ),
+    ] {
+        let answer = send(&app, method, uri, &h, body).await;
+        assert_eq!(answer.status, 403, "{method} {uri}: {:?}", answer.body);
+    }
+    let other = Some(json!({"value": ["B", "A"]}));
+    let order = send(
+        &app,
+        "PUT",
+        "/api/admin/settings/web.system_order",
+        &h,
+        other,
+    )
+    .await;
+    assert_ne!(order.status, 403, "{:?}", order.body);
 }

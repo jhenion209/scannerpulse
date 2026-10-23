@@ -47,6 +47,9 @@ describe('who may change a setting', () => {
     for (const key of ['auth.password_signin', 'oidc.issuer', 'web.trusted_proxies']) expect(settingFunction(key)).toBeNull();
     expect(settingFunction('maintenance.enabled')).toBe('maintenance');
     expect(settingFunction('web.system_order')).toBe('settings');
+    expect(settingFunction('transcription.servers')).toBe('transcription-settings');
+    expect(settingFunction('transcription.enabled')).toBe('transcription-settings');
+    expect(settingFunction('logs.syslog')).toBe('syslog');
   });
 });
 

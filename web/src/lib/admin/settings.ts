@@ -41,7 +41,11 @@ export const showValue = (value: unknown) =>
  * decides who signs in, which only a super admin changes. */
 export function settingFunction(key: string): string | null {
   if (key.startsWith('oidc.') || key === 'auth.password_signin' || key === 'web.trusted_proxies') return null;
-  return key === 'maintenance.enabled' ? 'maintenance' : 'settings';
+  if (key === 'maintenance.enabled') return 'maintenance';
+  // The settings that send data off the machine have switches of their own.
+  if (key.startsWith('transcription.')) return 'transcription-settings';
+  if (key.startsWith('logs.')) return 'syslog';
+  return 'settings';
 }
 
 export const withPrefix = (settings: Setting[], prefix: string) => settings.filter((s) => s.key.startsWith(prefix));

@@ -767,7 +767,10 @@ already set in the environment wins. So far:
   (name proposals and staged systems), `update` (Update now), `switchover`,
   `convert` (each step of converting to high availability), `transcribe`
   (per talkgroup), `queue` (past calls, and retrying failed ones),
-  `evaluation` (a candidate's run), `settings`, `maintenance`, `favorites`,
+  `evaluation` (a candidate's run), `transcription-settings` (the
+  `transcription.*` settings, `transcription.servers` among them: where every
+  call's audio goes), `settings` (every other setting), `syslog`
+  (`logs.syslog`: where the journal's lines go), `maintenance`, `favorites`,
   `stop-jobs` (another admin's job: whoever started a job may always stop
   it) and `rescan`. Only a super admin adds admins, sets roles and
   functions, sets another's password, and changes the settings that decide
