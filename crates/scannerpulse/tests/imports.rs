@@ -252,6 +252,7 @@ async fn a_review_counts_an_older_archive_and_writes_nothing(pool: PgPool) {
         .unwrap();
     run_jobs(&pool).await;
     let review = imports::review(&mut conn, job).await.unwrap().unwrap();
+    assert!(review.done);
     assert_eq!((review.files, review.no_date, review.read), (6, 1, 5));
     assert_eq!(
         (
@@ -317,6 +318,7 @@ async fn a_review_suggests_the_offset_at_which_the_files_are_copies(pool: PgPool
         .unwrap();
     run_jobs(&pool).await;
     let review = imports::review(&mut conn, job).await.unwrap().unwrap();
+    assert!(review.done);
     assert_eq!(review.copies_at, [0, 0, 0, 6, 0]);
     assert_eq!((review.copies, review.new), (0, 6));
     assert_eq!(review.suggested, Some(60));

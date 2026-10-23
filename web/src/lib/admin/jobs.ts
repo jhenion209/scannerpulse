@@ -29,6 +29,9 @@ const KINDS: Record<string, string> = {
   purge: 'Purge a talkgroup',
   move: 'Move a date range',
   purge_before: 'Purge older than a day',
+  import_review: 'Review an older archive',
+  import: 'Import an older archive',
+  consolidate: 'Consolidate an import',
 };
 
 export const kindName = (kind: string) => KINDS[kind] ?? kind;

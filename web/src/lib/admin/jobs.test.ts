@@ -12,6 +12,9 @@ describe('a job', () => {
     expect(kindName('queue')).toBe('Queue past calls for transcription');
     expect(kindName('move')).toBe('Move a date range');
     expect(kindName('purge_before')).toBe('Purge older than a day');
+    expect(kindName('import_review')).toBe('Review an older archive');
+    expect(kindName('import')).toBe('Import an older archive');
+    expect(kindName('consolidate')).toBe('Consolidate an import');
     expect(kindName('something new')).toBe('something new');
     expect(progressText(job({ done: 1234, total: 5000 }))).toBe('1,234 of 5,000');
     expect(progressText(job({ total: null }))).toBe('40');

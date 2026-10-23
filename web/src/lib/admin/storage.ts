@@ -19,6 +19,8 @@ export interface Location {
   root: string;
   mode: 'managed' | 'readonly';
   primary: boolean;
+  /** An import's offset, in minutes: its file names' times are moved by it. */
+  offset_minutes: number | null;
   hosts: Seen[];
   calls: number;
   first_call: string | null;
@@ -144,5 +146,133 @@ export function moveAsk(p: MovePreview): { title: string; text: string; action: 
     title: `${moveAction(p)}?`,
     text: `Each file is copied and checked, its call then points at ${p.to}, and the old file is deleted. Moving them back is a new move.`,
     action: `Move ${callsWord(p.calls)}`,
+  };
+}
+
+/** Examples of each kind of file a review found. */
+export interface Examples {
+  no_date: string[];
+  new: string[];
+  copies: string[];
+  unknown: string[];
+  differ: string[];
+  unreadable: string[];
+}
+
+/**
+ * `GET /api/admin/storage/import/review/<job>`: what a review of an older
+ * archive's folder found. The kinds of call are counted among the files
+ * `read`, a sample of those `left`.
+ */
+export interface Review {
+  name: string;
+  folder: string;
+  files: number;
+  taken: number;
+  no_date: number;
+  bad_names: number;
+  left: number;
+  read: number;
+  new: number;
+  copies: number;
+  unknown: number;
+  differ: number;
+  unreadable: number;
+  before_purge: number;
+  examples: Examples;
+  copies_at: number[];
+  suggested: number | null;
+  kept_offset: number | null;
+  done: boolean;
+}
+
+/** The offsets at which a review counts the copies (`imports::OFFSETS`). */
+export const OFFSETS = [-120, -60, 0, 60, 120];
+
+/** An offset as the server reads it: `+01:00`, `-00:30`. */
+export function offsetText(minutes: number): string {
+  const sign = minutes < 0 ? '-' : '+';
+  const abs = Math.abs(minutes);
+  const two = (n: number) => String(n).padStart(2, '0');
+  return `${sign}${two(Math.floor(abs / 60))}:${two(abs % 60)}`;
+}
+
+const number = (n: number) => n.toLocaleString('en-US');
+
+/** A count made on the review's sample, scaled to the files left. */
+function about(r: Review, n: number): string {
+  if (n === 0 || r.read === 0 || r.read >= r.left) return number(n);
+  return `about ${number(Math.round((n * r.left) / r.read))}`;
+}
+
+/** What a review found, one sentence a line. */
+export function reviewLines(r: Review): string[] {
+  let files = `${number(r.files)} mp3 ${r.files === 1 ? 'file' : 'files'} in ${r.folder}`;
+  if (r.taken > 0) files += `; ${number(r.taken)} taken by an earlier run`;
+  if (r.no_date > 0) files += `; ${number(r.no_date)} with no date and time in their names are skipped`;
+  if (r.bad_names > 0) files += `; ${number(r.bad_names)} whose names are not UTF-8 are skipped`;
+  const lines = [`${files}.`];
+  if (r.read > 0) {
+    const read = r.read >= r.left ? 'all were read' : `${number(r.read)} were read`;
+    const copies = r.copies === 1 ? 'copy of a call' : 'copies of calls';
+    lines.push(
+      `Of the ${number(r.left)} left, ${read}: ${about(r, r.new)} new ${r.new === 1 ? 'call' : 'calls'}, ` +
+        `${about(r, r.copies)} ${copies} already in the archive (skipped), ${about(r, r.unknown)} of systems not named yet (they wait), ` +
+        `${about(r, r.unreadable)} unreadable (skipped).`,
+    );
+    if (r.differ > 0) {
+      const differ = about(r, r.differ);
+      lines.push(`${differ[0].toUpperCase()}${differ.slice(1)} new calls name their talkgroup otherwise: the names wait for approval on the Recorders area.`);
+    }
+    if (r.before_purge > 0) lines.push(`${about(r, r.before_purge)} are from before the day this import was purged before (skipped).`);
+    lines.push(`Copies at each offset: ${OFFSETS.map((o, i) => `${offsetText(o)} ${number(r.copies_at[i] ?? 0)}`).join(', ')}.`);
+  }
+  if (r.kept_offset !== null) lines.push(`This import keeps its offset, ${offsetText(r.kept_offset)}.`);
+  else if (r.suggested !== null)
+    lines.push(`The files are copies once their times are moved by ${offsetText(r.suggested)}: the older install’s clock or time zone was off.`);
+  return lines;
+}
+
+/** The import's last button, naming what it does. */
+export function importAction(r: Review, name: string): string {
+  const n = r.read >= r.left || r.read === 0 ? r.new : Math.round((r.new * r.left) / r.read);
+  const calls = `${number(n)} ${n === 1 ? 'call' : 'calls'}`;
+  return `Import ${r.read > 0 && r.read < r.left ? 'about ' : ''}${calls} into ${name}`;
+}
+
+/** `POST /api/admin/storage/import`: what starting the import did. */
+export interface ImportStarted {
+  job: number;
+  location: number;
+  source: number;
+  offset: number;
+  again: boolean;
+}
+
+/** `GET /api/admin/storage/consolidate`: what consolidating an import would do. */
+export interface ConsolidatePreview {
+  name: string;
+  calls: number;
+  bytes_about: number | null;
+  free_bytes: number | null;
+  refused: string | null;
+}
+
+/** What consolidating an import would do, in words. */
+export function consolidateText(p: ConsolidatePreview): string {
+  const space = p.bytes_about === null ? '' : ` (about ${sizeText(p.bytes_about)})`;
+  const free = p.free_bytes === null ? '' : `, which has ${sizeText(p.free_bytes)} free`;
+  return `${callsWord(p.calls)} of ${p.name}${space} would be copied into the main archive${free}. ${p.name}’s own files stay as they are.`;
+}
+
+/** A consolidation's last button. */
+export const consolidateAction = (p: ConsolidatePreview) => `Copy ${callsWord(p.calls)} into the main archive`;
+
+/** A consolidation's confirmation pop-up. */
+export function consolidateAsk(p: ConsolidatePreview): { title: string; text: string; action: string } {
+  return {
+    title: `Copy ${callsWord(p.calls)} of ${p.name} into the main archive?`,
+    text: `Each file is copied and checked, and its call then points at the copy. ${p.name}’s files stay as they are; once it holds no call, ${p.name} can be removed.`,
+    action: `Copy ${callsWord(p.calls)}`,
   };
 }

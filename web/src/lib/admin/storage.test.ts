@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  callsText, freeText, moveAction, moveAsk, previewText, purgeAction, purgeAsk, purgeText, seenBy, sizeText,
-  type Location, type MovePreview, type PurgePreview,
+  callsText, consolidateAction, consolidateAsk, consolidateText, freeText, importAction, moveAction, moveAsk, offsetText,
+  previewText, purgeAction, purgeAsk, purgeText, reviewLines, seenBy, sizeText,
+  type ConsolidatePreview, type Location, type MovePreview, type PurgePreview, type Review,
 } from './storage';
 
 const now = new Date('2026-10-21T18:00:00Z');
@@ -12,6 +13,7 @@ const cold = (over: Partial<Location> = {}): Location => ({
   root: '/srv/cold-2024',
   mode: 'managed',
   primary: false,
+  offset_minutes: null,
   hosts: [
     { host: 'host-a', ok: true, problem: null, free_bytes: 1_100_000_000_000, total_bytes: 2_000_000_000_000, checked_at: '2026-10-21T17:59:30Z' },
     { host: 'host-b', ok: false, problem: '/srv/cold-2024 has no .scannerpulse-location file: the disk or share is not mounted there', free_bytes: null, total_bytes: null, checked_at: '2026-10-21T17:59:40Z' },
@@ -114,6 +116,71 @@ describe('a purge', () => {
       title: 'Delete 402,117 calls before 2025-03-02?',
       text: 'Their records go now, and their files are deleted for good; a read-only location keeps its files.',
       action: 'Delete 402,117 calls',
+    });
+  });
+});
+
+describe('an import', () => {
+  const review = (over: Partial<Review> = {}): Review => ({
+    name: 'Old',
+    folder: '/srv/old',
+    files: 4_003,
+    taken: 0,
+    no_date: 3,
+    bad_names: 0,
+    left: 4_000,
+    read: 1_000,
+    new: 600,
+    copies: 400,
+    unknown: 0,
+    differ: 10,
+    unreadable: 0,
+    before_purge: 0,
+    examples: { no_date: ['notes/readme.mp3'], new: [], copies: [], unknown: [], differ: [], unreadable: [] },
+    copies_at: [0, 0, 400, 10, 0],
+    suggested: null,
+    kept_offset: null,
+    done: true,
+    ...over,
+  });
+
+  it('writes an offset as the server reads it', () => {
+    expect(offsetText(60)).toBe('+01:00');
+    expect(offsetText(-30)).toBe('-00:30');
+    expect(offsetText(0)).toBe('+00:00');
+  });
+
+  it('says what the review found, scaled to the files left when it read a sample', () => {
+    expect(reviewLines(review())).toEqual([
+      '4,003 mp3 files in /srv/old; 3 with no date and time in their names are skipped.',
+      'Of the 4,000 left, 1,000 were read: about 2,400 new calls, about 1,600 copies of calls already in the archive (skipped), 0 of systems not named yet (they wait), 0 unreadable (skipped).',
+      'About 40 new calls name their talkgroup otherwise: the names wait for approval on the Recorders area.',
+      'Copies at each offset: -02:00 0, -01:00 0, +00:00 400, +01:00 10, +02:00 0.',
+    ]);
+    expect(reviewLines(review({ left: 5, read: 5, new: 4, copies: 1, differ: 0, copies_at: [0, 0, 1, 0, 0], suggested: 60 }))).toEqual([
+      '4,003 mp3 files in /srv/old; 3 with no date and time in their names are skipped.',
+      'Of the 5 left, all were read: 4 new calls, 1 copy of a call already in the archive (skipped), 0 of systems not named yet (they wait), 0 unreadable (skipped).',
+      'Copies at each offset: -02:00 0, -01:00 0, +00:00 1, +01:00 0, +02:00 0.',
+      'The files are copies once their times are moved by +01:00: the older install’s clock or time zone was off.',
+    ]);
+    expect(reviewLines(review({ taken: 900, kept_offset: -60 })).at(-1)).toBe('This import keeps its offset, -01:00.');
+  });
+
+  it('names what its last button does', () => {
+    expect(importAction(review(), 'Old')).toBe('Import about 2,400 calls into Old');
+    expect(importAction(review({ left: 4, read: 4, new: 1 }), 'Old')).toBe('Import 1 call into Old');
+  });
+
+  it('is consolidated once counted, its word typed, and confirmed', () => {
+    const p: ConsolidatePreview = { name: 'Old', calls: 2_117, bytes_about: 300_000_000, free_bytes: 400_000_000_000, refused: null };
+    expect(consolidateText(p)).toBe(
+      '2,117 calls of Old (about 300.0 MB) would be copied into the main archive, which has 400.0 GB free. Old’s own files stay as they are.',
+    );
+    expect(consolidateAction(p)).toBe('Copy 2,117 calls into the main archive');
+    expect(consolidateAsk(p)).toEqual({
+      title: 'Copy 2,117 calls of Old into the main archive?',
+      text: 'Each file is copied and checked, and its call then points at the copy. Old’s files stay as they are; once it holds no call, Old can be removed.',
+      action: 'Copy 2,117 calls',
     });
   });
 });

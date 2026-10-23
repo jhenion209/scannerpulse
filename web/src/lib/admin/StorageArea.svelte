@@ -5,10 +5,17 @@
   import { siteZone } from '../status.svelte';
   import { STATUS_EVERY_MS } from './health';
   import { admin, why } from './session.svelte';
+  import type { Job } from './jobs';
   import {
     CONFIRM,
     callsText,
+    consolidateAction,
+    consolidateAsk,
+    consolidateText,
     freeText,
+    importAction,
+    offsetText,
+    reviewLines,
     moveAction,
     moveAsk,
     previewText,
@@ -16,9 +23,12 @@
     purgeAsk,
     purgeText,
     seenBy,
+    type ConsolidatePreview,
+    type ImportStarted,
     type Location,
     type MovePreview,
     type PurgePreview,
+    type Review,
     type Storage,
   } from './storage';
   import TypedConfirm from './TypedConfirm.svelte';
@@ -27,7 +37,7 @@
   let problem = $state<string | null>(null);
   let now = $state(new Date());
   /** The form open below the buttons. */
-  let open = $state<'add' | 'move' | 'purge' | null>(null);
+  let open = $state<'add' | 'move' | 'purge' | 'import' | 'consolidate' | null>(null);
   /** The location whose removal waits for a second click, and a refusal by location. */
   let removing = $state<number | null>(null);
   let refusals = $state<Record<number, string>>({});
@@ -49,6 +59,21 @@
   let purgeCounted = $state<PurgePreview | null>(null);
   let purgeRefusal = $state<string | null>(null);
 
+  let importName = $state('');
+  let importFolder = $state('');
+  let offset = $state('');
+  /** The review's job, and what it found so far. */
+  let reviewJob = $state<number | null>(null);
+  let review = $state<Review | null>(null);
+  let importRefusal = $state<string | null>(null);
+  let importing = $state(false);
+
+  /** The import consolidated, and what its count found. */
+  let consolidating = $state('');
+  let consolidateCounting = $state(false);
+  let consolidateCounted = $state<ConsolidatePreview | null>(null);
+  let consolidateRefusal = $state<string | null>(null);
+
   async function read() {
     try {
       data = await admin<Storage>('GET', '/api/admin/storage', undefined, { poll: true });
@@ -68,13 +93,118 @@
   const label = (l: Location) => (l.primary ? 'new calls are filed here' : l.mode === 'readonly' ? 'read-only: its files are never changed' : null);
   const destinations = $derived((data?.locations ?? []).filter((l) => l.mode === 'managed'));
 
-  function show(form: 'add' | 'move' | 'purge') {
+  function show(form: 'add' | 'move' | 'purge' | 'import' | 'consolidate') {
     open = open === form ? null : form;
     addRefusal = null;
     moveRefusal = null;
     counted = null;
     purgeRefusal = null;
     purgeCounted = null;
+    importRefusal = null;
+    reviewJob = null;
+    review = null;
+    consolidateRefusal = null;
+    consolidateCounted = null;
+  }
+
+  /** The import form, filled for the import `l` to run again. */
+  function importAgain(l: Location) {
+    show('import');
+    open = 'import';
+    importName = l.name;
+    importFolder = l.root;
+    offset = l.offset_minutes === null ? '' : offsetText(l.offset_minutes);
+  }
+
+  /** Starts the review, then reads what it found until it is complete or its job ends. */
+  async function startReview(event: SubmitEvent) {
+    event.preventDefault();
+    importRefusal = null;
+    review = null;
+    try {
+      const started = await admin<{ job: number }>('POST', '/api/admin/storage/import/review', {
+        name: importName,
+        folder: importFolder,
+      });
+      reviewJob = started.job;
+      void follow(started.job);
+    } catch (error) {
+      importRefusal = why(error);
+    }
+  }
+
+  async function follow(job: number) {
+    while (reviewJob === job) {
+      try {
+        const found = await admin<Review>('GET', `/api/admin/storage/import/review/${job}`, undefined, { poll: true }).catch(() => null);
+        if (reviewJob !== job) return;
+        if (found) {
+          review = found;
+          if (found.done) {
+            if (found.kept_offset !== null) offset = offsetText(found.kept_offset);
+            else if (found.suggested !== null) offset = offsetText(found.suggested);
+            return;
+          }
+        }
+        const state = await admin<Job>('GET', `/api/admin/jobs/${job}`, undefined, { poll: true });
+        if (state.state === 'failed' || state.state === 'stopped') {
+          importRefusal = state.message;
+          return;
+        }
+      } catch (error) {
+        importRefusal = why(error);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+
+  /** Starts the import that was reviewed. */
+  async function startImport(r: Review) {
+    importing = true;
+    importRefusal = null;
+    try {
+      const done = await admin<ImportStarted>('POST', '/api/admin/storage/import', { name: r.name, folder: r.folder, offset });
+      tell(
+        `Job ${done.job} imports ${r.folder} as ${r.name}${done.again ? ', taking only the files it has not taken' : ''}, its times moved by ${offsetText(done.offset)}; the Jobs area follows it.`,
+      );
+      open = null;
+      reviewJob = null;
+      review = null;
+      await read();
+    } catch (error) {
+      importRefusal = why(error);
+    } finally {
+      importing = false;
+    }
+  }
+
+  /** Counts a consolidation of the import `l`. */
+  async function countConsolidate(l: Location) {
+    show('consolidate');
+    open = 'consolidate';
+    consolidating = l.name;
+    consolidateCounting = true;
+    try {
+      const answer = await admin<ConsolidatePreview>('GET', `/api/admin/storage/consolidate?${new URLSearchParams({ name: l.name })}`);
+      if (consolidating === l.name) consolidateCounted = answer;
+    } catch (error) {
+      consolidateRefusal = why(error);
+    } finally {
+      consolidateCounting = false;
+    }
+  }
+
+  /** Starts the consolidation that was counted, `move` typed. */
+  async function startConsolidate(p: ConsolidatePreview, confirm: string) {
+    try {
+      const done = await admin<{ job: number; calls: number }>('POST', '/api/admin/storage/consolidate', { name: p.name, confirm });
+      tell(`Job ${done.job} copies ${done.calls.toLocaleString('en-US')} calls of ${p.name} into the main archive; the Jobs area follows it.`);
+      consolidateCounted = null;
+      open = null;
+    } catch (error) {
+      consolidateRefusal = why(error);
+    }
   }
 
   async function add(event: SubmitEvent) {
@@ -175,8 +305,8 @@
 <section class="area" aria-labelledby="storage-title">
   <h1 id="storage-title">Storage</h1>
   <p class="lead">
-    The main archive, where new calls are filed, and the storage paths beside it that hold calls moved out of it.
-    Each is mounted on every ScannerPulse machine; listeners find a moved call where it is.
+    The main archive, where new calls are filed, the storage paths beside it that hold calls moved out of it, and the
+    older archives imported where they are. Each is mounted on every ScannerPulse machine; listeners find a call where it is.
   </p>
   {#if problem}<p class="problem" role="alert">The locations could not be read: {problem}</p>{/if}
   {#if data === null}
@@ -192,10 +322,19 @@
             <dt>Folder</dt><dd>{l.root}</dd>
             <dt>Calls</dt><dd>{callsText(l, siteZone())}</dd>
             {#if free}<dt>Space</dt><dd>{free}</dd>{/if}
+            {#if l.offset_minutes !== null}<dt>Offset</dt><dd>its file names' times are moved by {offsetText(l.offset_minutes)}</dd>{/if}
             <dt>Seen by</dt>
             <dd>{seen.filter((s) => s.ok).map((s) => s.text).join(', ') || '—'}</dd>
           </dl>
           {#each seen.filter((s) => !s.ok) as trouble (trouble.host)}<p class="problem">{trouble.text}</p>{/each}
+          {#if l.mode === 'readonly' && l.offset_minutes !== null}
+            <div class="row">
+              <button type="button" aria-label={`Import again… ${l.name}`} onclick={() => importAgain(l)}>Import again…</button>
+              {#if l.calls > 0}
+                <button type="button" aria-label={`Consolidate… ${l.name}`} onclick={() => countConsolidate(l)}>Consolidate…</button>
+              {/if}
+            </div>
+          {/if}
           {#if !l.primary && l.calls === 0}
             {#if removing === l.id}
               <p>Remove {l.name}? It holds no call; its folder is left as it is.</p>
@@ -217,6 +356,7 @@
   <div class="row actions">
     <button type="button" aria-expanded={open === 'add'} onclick={() => show('add')}>Add a storage path…</button>
     <button type="button" aria-expanded={open === 'move'} onclick={() => show('move')}>Move a date range…</button>
+    <button type="button" aria-expanded={open === 'import'} onclick={() => show('import')}>Import an older archive…</button>
     <!-- Red and apart, far from the others: it deletes for good. -->
     <button type="button" class="danger apart" aria-expanded={open === 'purge'} onclick={() => show('purge')}>Purge older than…</button>
   </div>
@@ -267,6 +407,65 @@
     {/if}
   {/if}
 
+  {#if open === 'import'}
+    <h2>Import an older archive</h2>
+    <p>
+      An older install's folder of recordings, mounted on every ScannerPulse machine, becomes a read-only location: nothing
+      in it is ever written, renamed or deleted. A review comes first and changes nothing. Copies of calls already in the
+      archive are skipped; files of a system not named yet wait until it is named on the Recorders area.
+    </p>
+    <form class="grid" onsubmit={startReview}>
+      <label for="import-name">Name</label>
+      <input id="import-name" type="text" autocomplete="off" maxlength="40" required bind:value={importName} oninput={() => (review = null)} />
+      <label for="import-folder">Folder</label>
+      <input id="import-folder" type="text" autocomplete="off" required placeholder="/srv/old-archive" bind:value={importFolder} oninput={() => (review = null)} />
+      <div class="row"><button type="submit" disabled={reviewJob !== null && !(review?.done ?? false) && importRefusal === null}>Review first</button></div>
+    </form>
+    {#if importRefusal}<p class="problem" role="alert">Not imported: {importRefusal}</p>{/if}
+    {#if reviewJob !== null && !review?.done && importRefusal === null}
+      <p role="status">Reviewing… {review ? `${review.read.toLocaleString('en-US')} of ${Math.min(review.left, 1000).toLocaleString('en-US')} files read` : 'listing the folder'}</p>
+    {/if}
+    {#if review?.done}
+      {@const r = review}
+      {#each reviewLines(r) as line (line)}<p>{line}</p>{/each}
+      {#each [['No date and time in the name', r.examples.no_date], ['New', r.examples.new], ['Copies', r.examples.copies], ['Systems not named yet', r.examples.unknown], ['Talkgroups named otherwise', r.examples.differ], ['Unreadable', r.examples.unreadable]] as [what, list] (what)}
+        {#if list.length > 0}
+          <details>
+            <summary>{what}</summary>
+            <ul class="examples">{#each list as line (line)}<li>{line}</li>{/each}</ul>
+          </details>
+        {/if}
+      {/each}
+      <div class="grid">
+        <label for="import-offset">Offset</label>
+        <input id="import-offset" type="text" autocomplete="off" placeholder="+00:00" readonly={r.kept_offset !== null} bind:value={offset} />
+        <p class="hint">The times its file names give are moved by this, as ±HH:MM; the names stay as they are.</p>
+        <div class="row">
+          <button type="button" class="primary" disabled={importing || r.new + r.unknown === 0} onclick={() => startImport(r)}>{importAction(r, r.name)}</button>
+        </div>
+      </div>
+    {/if}
+  {/if}
+
+  {#if open === 'consolidate'}
+    <h2>Consolidate {consolidating} into the main archive</h2>
+    <p>
+      Each of its calls is copied into the main archive, in its layout, checked, and pointed there, as a move does. Its own
+      files stay as they are. Once it holds no call, {consolidating} can be removed.
+    </p>
+    {#if consolidateCounting}<p role="status">Counting…</p>{/if}
+    {#if consolidateRefusal}<p class="problem" role="alert">Not consolidated: {consolidateRefusal}</p>{/if}
+    {#if consolidateCounted}
+      {@const p = consolidateCounted}
+      <p>{consolidateText(p)}</p>
+      {#if p.refused}
+        <p class="problem" role="alert">It cannot start: {p.refused}</p>
+      {:else}
+        <TypedConfirm name={CONFIRM} action={consolidateAction(p)} ask={consolidateAsk(p)} start={(confirm) => startConsolidate(p, confirm)} />
+      {/if}
+    {/if}
+  {/if}
+
   {#if open === 'purge'}
     <h2>Purge older than a day</h2>
     <p>
@@ -300,4 +499,6 @@
   .actions .apart { margin-left: auto; }
   .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.4rem; max-width: 36rem; }
   .grid > label { font-weight: 600; }
+  .hint { margin: 0; color: var(--muted); font-size: 0.9rem; }
+  .examples { margin: 0.3rem 0 0.6rem; padding-left: 1.2rem; overflow-wrap: anywhere; }
 </style>

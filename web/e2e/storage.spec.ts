@@ -15,17 +15,22 @@ const now = () => new Date().toISOString();
 const STORAGE = () => ({
   locations: [
     {
-      id: 1, name: 'Main archive', root: '/srv/archive', mode: 'managed', primary: true,
+      id: 1, name: 'Main archive', root: '/srv/archive', mode: 'managed', primary: true, offset_minutes: null,
       hosts: [{ host: 'host-a', ok: true, problem: null, free_bytes: 400_000_000_000, total_bytes: 2_500_000_000_000, checked_at: now() }],
       calls: 9_812_440, first_call: '2025-01-01T06:00:00Z', last_call: now(), bytes_about: 2_100_000_000_000,
     },
     {
-      id: 2, name: 'Cold 2024', root: '/srv/cold-2024', mode: 'managed', primary: false,
+      id: 2, name: 'Cold 2024', root: '/srv/cold-2024', mode: 'managed', primary: false, offset_minutes: null,
       hosts: [
         { host: 'host-a', ok: true, problem: null, free_bytes: 1_100_000_000_000, total_bytes: 2_000_000_000_000, checked_at: now() },
         { host: 'host-b', ok: false, problem: '/srv/cold-2024 cannot be listed: Permission denied', free_bytes: null, total_bytes: null, checked_at: now() },
       ],
       calls: 3_204_118, first_call: '2024-01-01T06:00:00Z', last_call: '2024-12-31T23:00:00Z', bytes_about: 900_000_000_000,
+    },
+    {
+      id: 3, name: 'Old', root: '/srv/old', mode: 'readonly', primary: false, offset_minutes: 60,
+      hosts: [{ host: 'host-a', ok: true, problem: null, free_bytes: 10_000_000_000, total_bytes: 50_000_000_000, checked_at: now() }],
+      calls: 2_117, first_call: '2019-03-01T19:00:00Z', last_call: '2019-12-31T23:00:00Z', bytes_about: 300_000_000,
     },
   ],
   hosts: ['host-a', 'host-b'],
@@ -171,4 +176,69 @@ test('a purge stands apart in red, is counted, its day typed, and confirmed in a
   await ask.getByRole('button', { name: 'Delete 402,117 calls' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Job 32 deletes 402,117 calls before 2025-03-02' })).toBeVisible();
   expect(started).toEqual([{ before: '2025-03-02', confirm: '2025-03-02' }]);
+});
+
+const REVIEW = {
+  name: 'Old', folder: '/srv/old', files: 4_003, taken: 0, no_date: 3, bad_names: 0, left: 4_000, read: 1_000,
+  new: 600, copies: 3, unknown: 2, differ: 0, unreadable: 1, before_purge: 0,
+  examples: {
+    no_date: ['notes/readme.mp3'], new: ['2019/03/01/20190301_120000_a.mp3'], copies: [], unknown: ['2019/03/02/20190302_090000_e.mp3: the system County'],
+    differ: [], unreadable: [],
+  },
+  copies_at: [0, 0, 3, 390, 0], suggested: 60, kept_offset: null, done: true,
+};
+
+test('an older archive is reviewed first, then imported with the offset the review suggests', async ({ page }) => {
+  await fake(page);
+  const started: unknown[] = [];
+  await page.route('**/api/admin/storage/import/review', (route) => route.fulfill(json({ job: 41 }, 201)));
+  await page.route('**/api/admin/storage/import/review/41', (route) => route.fulfill(json(REVIEW)));
+  await page.route('**/api/admin/storage/import', (route) => {
+    started.push(route.request().postDataJSON());
+    return route.fulfill(json({ job: 42, location: 3, source: 9, offset: 60, again: false }, 201));
+  });
+  await signIn(page, '#storage');
+  await page.getByRole('button', { name: 'Import an older archive…' }).click();
+  await page.getByLabel('Name').fill('Old');
+  await page.getByLabel('Folder').fill('/srv/old');
+  await page.getByRole('button', { name: 'Review first' }).click();
+  await expect(page.getByText('4,003 mp3 files in /srv/old; 3 with no date and time in their names are skipped.')).toBeVisible();
+  await expect(page.getByText('Copies at each offset: -02:00 0, -01:00 0, +00:00 3, +01:00 390, +02:00 0.')).toBeVisible();
+  await expect(page.getByText('The files are copies once their times are moved by +01:00')).toBeVisible();
+  await expect(page.getByLabel('Offset')).toHaveValue('+01:00');
+  await page.getByText('Systems not named yet', { exact: true }).click();
+  await expect(page.getByText('2019/03/02/20190302_090000_e.mp3: the system County')).toBeVisible();
+  const scan = await new AxeBuilder({ page }).include('main').analyze();
+  expect(scan.violations).toEqual([]);
+  await page.getByRole('button', { name: 'Import about 2,400 calls into Old' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Job 42 imports /srv/old as Old, its times moved by +01:00' })).toBeVisible();
+  expect(started).toEqual([{ name: 'Old', folder: '/srv/old', offset: '+01:00' }]);
+});
+
+test("an import's card says it is read-only, and it is consolidated once counted, move typed and confirmed", async ({ page }) => {
+  await fake(page);
+  const started: unknown[] = [];
+  await page.route('**/api/admin/storage/consolidate**', (route) => {
+    if (route.request().method() === 'GET')
+      return route.fulfill(json({ name: 'Old', calls: 2_117, bytes_about: 300_000_000, free_bytes: 400_000_000_000, refused: null }));
+    started.push(route.request().postDataJSON());
+    return route.fulfill(json({ job: 43, calls: 2_117 }, 201));
+  });
+  await signIn(page, '#storage');
+  const old = card(page, 'Old');
+  await expect(old.getByText('read-only: its files are never changed')).toBeVisible();
+  await expect(old.getByText("its file names' times are moved by +01:00")).toBeVisible();
+  await old.getByRole('button', { name: 'Consolidate… Old' }).click();
+  await expect(page.getByText(
+    '2,117 calls of Old (about 300.0 MB) would be copied into the main archive, which has 400.0 GB free. Old’s own files stay as they are.',
+  )).toBeVisible();
+  const last = page.getByRole('button', { name: 'Copy 2,117 calls into the main archive' });
+  await expect(last).toBeDisabled();
+  await page.getByLabel('Type move to confirm').fill('move');
+  await last.click();
+  const ask = page.getByRole('dialog', { name: 'Copy 2,117 calls of Old into the main archive?' });
+  await expect(ask.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await ask.getByRole('button', { name: 'Copy 2,117 calls' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Job 43 copies 2,117 calls of Old into the main archive' })).toBeVisible();
+  expect(started).toEqual([{ name: 'Old', confirm: 'move' }]);
 });

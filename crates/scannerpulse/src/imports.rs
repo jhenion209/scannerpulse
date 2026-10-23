@@ -373,6 +373,9 @@ pub struct Review {
     pub suggested: Option<i32>,
     /// The offset the import keeps, when it ran before.
     pub kept_offset: Option<i32>,
+    /// Every file of the sample is read: the review is complete.
+    #[serde(default)]
+    pub done: bool,
     /// The files of the sample still to read.
     #[serde(default)]
     sample: Vec<String>,
@@ -532,6 +535,7 @@ pub(crate) async fn review_step(
             .collect();
         work.copies_at = vec![0; OFFSETS.len()];
         work.walked = true;
+        work.done = work.sample.is_empty();
         return Ok(more_review(&work));
     }
     let batch: Vec<String> = work
@@ -608,6 +612,7 @@ pub(crate) async fn review_step(
     }
     if work.sample.is_empty() {
         work.suggested = suggest(&work.copies_at);
+        work.done = true;
     }
     Ok(more_review(&work))
 }
