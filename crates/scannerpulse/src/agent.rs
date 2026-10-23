@@ -421,6 +421,7 @@ pub async fn run(
     let started_with = settings();
     spawn_beat(pool.clone(), host.clone());
     spawn_check(pool.clone());
+    crate::clocks::spawn_nodes(pool.clone());
     // Until the requests it left unfinished are closed, it takes none: the
     // database may not answer at once (the pool finds the primary first).
     let mut cleaned = false;

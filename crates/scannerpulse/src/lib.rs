@@ -9,6 +9,7 @@ pub mod asr;
 pub mod backfill;
 pub mod backup;
 pub mod cert;
+pub mod clocks;
 pub mod cloudflare;
 pub mod consolidate;
 pub mod convert;

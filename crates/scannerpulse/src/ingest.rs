@@ -461,6 +461,15 @@ pub async fn run(config: Config, stop: impl Future<Output = ()> + Send) -> Resul
             )),
         ),
         (
+            "clocks",
+            tokio::spawn(clock_loop(
+                pool.clone(),
+                config.db_limit,
+                config.host.clone(),
+                stop_rx.clone(),
+            )),
+        ),
+        (
             "watcher",
             tokio::spawn(watch_loop(
                 pool.clone(),
@@ -1215,6 +1224,28 @@ async fn location_loop(
             Err(error) => log::warn(format!("the locations cannot be read: {error}")),
         }
         if wait(&mut stop, crate::storage::CHECK_EVERY).await {
+            break;
+        }
+    }
+}
+
+/// Checks this machine's clock against the database's every
+/// [`crate::clocks::CHECK_EVERY`].
+async fn clock_loop(
+    pool: PgPool,
+    db_limit: Duration,
+    host: String,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        let checked = async {
+            let checked = crate::clocks::own(&pool, &host).await?;
+            crate::clocks::record(&pool, &checked).await
+        };
+        if let Err(error) = limited(db_limit, checked).await {
+            log::warn(format!("this machine's clock cannot be checked: {error}"));
+        }
+        if wait(&mut stop, crate::clocks::CHECK_EVERY).await {
             break;
         }
     }

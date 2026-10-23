@@ -1118,6 +1118,9 @@ pub enum Asked {
     /// This machine's version and processor (`scannerpulse update` asks
     /// every machine first).
     Version,
+    /// This machine's clock: its time service and its time (the clock
+    /// check asks every machine).
+    Clock,
     /// The release's program of this name, on standard input with the
     /// release's signed checksums, takes this machine's program's place once
     /// they check out, and its services restart.
@@ -1152,6 +1155,7 @@ pub fn asked(command: &str) -> Option<Asked> {
             Some(Asked::Follow(host.to_string()))
         }
         ["version"] => Some(Asked::Version),
+        ["clock"] => Some(Asked::Clock),
         ["update", name] if crate::update::is_program(name) => {
             Some(Asked::Update(name.to_string()))
         }
@@ -1172,7 +1176,7 @@ pub fn serve() -> Result<String, String> {
     }
     match asked(&command) {
         None => Err(format!(
-            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST, switchover, version or update PROGRAM"
+            "{command:?} is not a database machine's command: status, stop, start, promote [after LSN], follow HOST, switchover, version, clock or update PROGRAM"
         )),
         Some(Asked::Status) => serde_json::to_string(&status()).map_err(|e| e.to_string()),
         Some(Asked::Stop) => stop(),
@@ -1182,6 +1186,9 @@ pub fn serve() -> Result<String, String> {
         Some(Asked::PromoteAfter(lsn)) => promote_after(&lsn).map(|()| "promoted".into()),
         Some(Asked::Follow(host)) => follow(&host).map(|()| format!("following {host}")),
         Some(Asked::Version) => Ok(crate::update::running_here()),
+        Some(Asked::Clock) => {
+            serde_json::to_string(&crate::clocks::clock()).map_err(|e| e.to_string())
+        }
         Some(Asked::Update(name)) => {
             let version = crate::update::receive(
                 Path::new(super::BINARY),
@@ -2059,6 +2066,10 @@ mod tests {
             "{options:?}"
         );
         assert_eq!(asked("version"), Some(Asked::Version));
+        // Its clock, asked by the hub's clock check; a referee answers it too.
+        assert_eq!(asked("clock"), Some(Asked::Clock));
+        assert!(!refused_with_referee(true, &Asked::Clock));
+        assert_eq!(asked("clock now"), None);
         assert_eq!(
             asked("update scannerpulse-x86_64-linux"),
             Some(Asked::Update("scannerpulse-x86_64-linux".into()))
