@@ -70,7 +70,8 @@ pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Res
                 count(*) FILTER (WHERE state = 'rejected'), \
                 count(*) FILTER (WHERE state = 'waiting' \
                                  AND first_seen < now() - make_interval(mins => $1)) \
-         FROM ingest_files",
+         FROM ingest_files f \
+         WHERE NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = f.source_id)",
     )
     .bind(LEFT_MINUTES)
     .fetch_one(&mut *tx)
@@ -78,7 +79,9 @@ pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Res
     let recent_rejected: Vec<Rejected> = sqlx::query_as(
         "SELECT s.name AS source, f.rel_path, f.reason, f.seen_at \
          FROM ingest_files f JOIN sources s ON s.id = f.source_id \
-         WHERE f.state = 'rejected' ORDER BY f.seen_at DESC LIMIT $1",
+         WHERE f.state = 'rejected' \
+           AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = f.source_id) \
+         ORDER BY f.seen_at DESC LIMIT $1",
     )
     .bind(LISTED)
     .fetch_all(&mut *tx)

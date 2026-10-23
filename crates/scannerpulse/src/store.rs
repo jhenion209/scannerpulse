@@ -275,6 +275,7 @@ pub async fn waiting(
                 AND (EXISTS (SELECT 1 FROM systems y WHERE y.name = f.staged_system) \
                      OR EXISTS (SELECT 1 FROM system_spellings y WHERE y.name = f.staged_system)))) \
            AND (s.removed_at IS NULL OR f.state = 'staged') AND f.id <> ALL($2) \
+           AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = f.source_id) \
          ORDER BY f.first_seen, regexp_replace(f.rel_path, '^.*/', ''), f.id LIMIT $1",
     )
     .bind(limit)
@@ -335,11 +336,12 @@ pub async fn mark_done(
 }
 
 /// Deletes the rows of files filed, or deleted as duplicates, more than
-/// `days` days ago.
+/// `days` days ago. An import's rows stay: they are its register.
 pub async fn prune_done(db: impl PgExecutor<'_>, days: u32) -> sqlx::Result<u64> {
     let done = sqlx::query(
-        "DELETE FROM ingest_files WHERE state IN ('done', 'duplicate') \
-         AND seen_at < now() - make_interval(days => $1)",
+        "DELETE FROM ingest_files f WHERE state IN ('done', 'duplicate') \
+         AND seen_at < now() - make_interval(days => $1) \
+         AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = f.source_id)",
     )
     .bind(i32::try_from(days).unwrap_or(i32::MAX))
     .execute(db)

@@ -16,6 +16,10 @@ use sqlx::PgConnection;
 /// The longest name a recorder may have, in characters.
 pub const MAX_NAME: usize = 40;
 
+/// The source `s` is a recorder, not an older archive imported where it is,
+/// whose source only names its calls' origin.
+const NOT_IMPORT: &str = "NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id)";
+
 /// How a recorder's files are taken in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -242,18 +246,24 @@ pub async fn add(
     if let Some(problem) = name_problem(name) {
         return Err(Refused::Refused(problem));
     }
-    let taken: Option<bool> =
-        sqlx::query_scalar("SELECT removed_at IS NOT NULL FROM sources WHERE name = $1")
-            .bind(name)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let taken: Option<(bool, bool)> = sqlx::query_as(&format!(
+        "SELECT removed_at IS NOT NULL, NOT {NOT_IMPORT} FROM sources s WHERE name = $1"
+    ))
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await?;
     match taken {
-        Some(false) => {
+        Some((_, true)) => {
+            return Err(Refused::Refused(format!(
+                "an older archive imported as {name} keeps the name: choose another"
+            )));
+        }
+        Some((false, _)) => {
             return Err(Refused::Refused(format!(
                 "a recorder named {name} exists already"
             )));
         }
-        Some(true) => {
+        Some((true, _)) => {
             return Err(Refused::Refused(format!(
                 "a removed recorder was named {name}, and its calls keep the name: choose another"
             )));
@@ -294,21 +304,24 @@ pub async fn add(
 
 /// The id of the recorder named `name`, unless it was removed.
 pub async fn find(conn: &mut PgConnection, name: &str) -> Result<i16, Refused> {
-    sqlx::query_scalar("SELECT id FROM sources WHERE name = $1 AND removed_at IS NULL")
-        .bind(name)
-        .fetch_optional(&mut *conn)
-        .await?
-        .ok_or_else(|| Refused::NoSuch(format!("there is no recorder named {name}")))
+    sqlx::query_scalar(&format!(
+        "SELECT id FROM sources s WHERE name = $1 AND removed_at IS NULL AND {NOT_IMPORT}"
+    ))
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| Refused::NoSuch(format!("there is no recorder named {name}")))
 }
 
 /// Makes one change to a recorder and tells every running ingest. Removing
 /// one also forgets its files that were waiting: they stay in its folder.
 pub async fn change(conn: &mut PgConnection, id: i16, change: Change) -> Result<(), Refused> {
-    let intake: Option<String> =
-        sqlx::query_scalar("SELECT intake FROM sources WHERE id = $1 AND removed_at IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let intake: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT intake FROM sources s WHERE id = $1 AND removed_at IS NULL AND {NOT_IMPORT}"
+    ))
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(intake) = intake else {
         return Err(Refused::NoSuch(format!("there is no recorder {id}")));
     };
@@ -398,7 +411,7 @@ type HealthRow = (
 /// Every recorder but the removed ones, with its counts since `since` (the
 /// start of the day in the site's time zone) and its folder's health.
 pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result<Vec<Recorder>> {
-    let rows: Vec<Row> = sqlx::query_as(
+    let rows: Vec<Row> = sqlx::query_as(&format!(
         "SELECT s.id, s.name, s.path, s.enabled, s.intake, \
                 s.bring_in_at IS NOT NULL AND s.brought_in_at IS DISTINCT FROM s.bring_in_at, \
                 (SELECT max(f.first_seen) FROM ingest_files f WHERE f.source_id = s.id), \
@@ -411,8 +424,8 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                  WHERE f.source_id = s.id AND f.first_seen >= $1 AND f.state = 'staged'), \
                 (SELECT count(*) FROM ingest_files f \
                  WHERE f.source_id = s.id AND f.first_seen >= $1 AND f.state = 'duplicate') \
-         FROM sources s WHERE s.removed_at IS NULL ORDER BY s.id",
-    )
+         FROM sources s WHERE s.removed_at IS NULL AND {NOT_IMPORT} ORDER BY s.id"
+    ))
     .bind(since)
     .fetch_all(&mut *conn)
     .await?;

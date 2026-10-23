@@ -349,10 +349,15 @@ pub(super) async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
     let mut conn = crate::primary::connect(&url, std::time::Duration::from_secs(5))
         .await
         .ok()?;
-    let sources: Vec<String> = sqlx::query_scalar("SELECT path FROM sources ORDER BY id")
-        .fetch_all(&mut conn)
-        .await
-        .ok()?;
+    // An older archive imported where it is stays as it was: nothing is
+    // written in it, not even its access list.
+    let sources: Vec<String> = sqlx::query_scalar(
+        "SELECT path FROM sources s \
+         WHERE NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) ORDER BY id",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .ok()?;
     let archive: Option<String> = sqlx::query_scalar("SELECT root FROM locations WHERE is_primary")
         .fetch_optional(&mut conn)
         .await

@@ -251,10 +251,12 @@ async fn taken(
         sqlx::query_as("SELECT name, root, is_primary FROM locations ORDER BY id")
             .fetch_all(&mut *conn)
             .await?;
-    let recorders: Vec<(String, String)> =
-        sqlx::query_as("SELECT name, path FROM sources WHERE removed_at IS NULL ORDER BY id")
-            .fetch_all(&mut *conn)
-            .await?;
+    let recorders: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT name, path, EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
+         FROM sources s WHERE removed_at IS NULL ORDER BY id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
     let holding: Option<String> =
         sqlx::query_scalar("SELECT value #>> '{}' FROM settings WHERE key = 'purge.holding_path'")
             .fetch_optional(&mut *conn)
@@ -270,11 +272,14 @@ async fn taken(
             (what, PathBuf::from(root))
         })
         .collect();
-    taken.extend(
-        recorders
-            .into_iter()
-            .map(|(name, path)| (format!("the folder of the recorder {name}"), path.into())),
-    );
+    taken.extend(recorders.into_iter().map(|(name, path, imported)| {
+        let what = if imported {
+            format!("the older archive imported as {name}")
+        } else {
+            format!("the folder of the recorder {name}")
+        };
+        (what, path.into())
+    }));
     taken.extend(holding.map(|path| ("the purge's holding folder".to_string(), path.into())));
     taken.extend(backups.map(|path| ("the backups' folder".to_string(), path.to_path_buf())));
     Ok(taken)
