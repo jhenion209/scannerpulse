@@ -370,6 +370,11 @@ pub struct Review {
     pub examples: Examples,
     /// The copies found at each of [`OFFSETS`] among the files read.
     pub copies_at: Vec<i64>,
+    /// The new calls an import at each of [`OFFSETS`] would make among the
+    /// files read. The other counts are at the import's own offset: the one
+    /// it keeps, or none.
+    #[serde(default)]
+    pub new_at: Vec<i64>,
     /// The offset at which clearly more files are copies than at none.
     pub suggested: Option<i32>,
     /// The offset the import keeps, when it ran before.
@@ -535,6 +540,7 @@ pub(crate) async fn review_step(
             .map(|i| left[i * left.len() / wanted].clone())
             .collect();
         work.copies_at = vec![0; OFFSETS.len()];
+        work.new_at = vec![0; OFFSETS.len()];
         work.walked = true;
         work.done = work.sample.is_empty();
         return Ok(more_review(&work));
@@ -543,8 +549,9 @@ pub(crate) async fn review_step(
         .sample
         .drain(..work.sample.len().min(REVIEW_PER_STEP))
         .collect();
+    let own = work.kept_offset.unwrap_or(0);
     for rel in batch {
-        let call = match read_call(&root, &rel, 0, zone, limit).await {
+        let call = match read_call(&root, &rel, own, zone, limit).await {
             Ok(Ok(call)) => call,
             Ok(Err(why)) => {
                 work.read += 1;
@@ -592,22 +599,17 @@ pub(crate) async fn review_step(
             }
         }
         // The same file at each offset: a clock or a zone an hour or two off
-        // shows as copies found only once the times are moved.
-        if let (Some(system), Some(talkgroup)) =
-            (call.described.system.as_deref(), &call.described.talkgroup)
-            && let Some(id) = store::talkgroup_of(&mut *conn, system, talkgroup.number).await?
-        {
-            for (i, offset) in OFFSETS.iter().enumerate() {
-                let moved = FileCall {
-                    started_at: call.started_at + TimeDelta::minutes((*offset).into()),
-                    ..call.clone()
-                };
-                if store::same_call(&mut *conn, id, &moved, source_id)
-                    .await?
-                    .is_some()
-                {
-                    work.copies_at[i] += 1;
-                }
+        // shows as copies found only once the times are moved, and the new
+        // calls an import at that offset would make are counted with them.
+        for (i, offset) in OFFSETS.iter().enumerate() {
+            let moved = FileCall {
+                started_at: started_at(call.local_start, *offset, zone),
+                ..call.clone()
+            };
+            match classify(conn, source_id, &moved, purged_before, zone).await? {
+                Class::Copy(_) => work.copies_at[i] += 1,
+                Class::New(_) => work.new_at[i] += 1,
+                Class::BeforePurge(_) | Class::UnknownSystem(_) => {}
             }
         }
     }
@@ -725,10 +727,20 @@ pub fn review_text(review: &Review) -> String {
             "  this import keeps its offset, {}\n",
             offset_text(kept)
         )),
-        (None, Some(offset)) => text.push_str(&format!(
-            "  the files are copies once their times are moved by {0}: the older install's clock or zone was off; import with --offset {0}\n",
-            offset_text(offset)
-        )),
+        (None, Some(offset)) => {
+            text.push_str(&format!(
+                "  the files are copies once their times are moved by {0}: the older install's clock or zone was off; import with --offset {0}\n",
+                offset_text(offset)
+            ));
+            if let Some(i) = OFFSETS.iter().position(|o| *o == offset) {
+                text.push_str(&format!(
+                    "  at {}: {} new calls, {} copies of calls already in the archive\n",
+                    offset_text(offset),
+                    about(review.new_at.get(i).copied().unwrap_or(0)),
+                    about(review.copies_at.get(i).copied().unwrap_or(0))
+                ));
+            }
+        }
         (None, None) => {}
     }
     let e = &review.examples;

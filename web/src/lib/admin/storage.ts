@@ -181,6 +181,8 @@ export interface Review {
   before_purge: number;
   examples: Examples;
   copies_at: number[];
+  /** The new calls an import at each of `OFFSETS` would make; the other counts are at the import's own offset. */
+  new_at: number[];
   suggested: number | null;
   kept_offset: number | null;
   done: boolean;
@@ -228,14 +230,48 @@ export function reviewLines(r: Review): string[] {
     lines.push(`Copies at each offset: ${OFFSETS.map((o, i) => `${offsetText(o)} ${number(r.copies_at[i] ?? 0)}`).join(', ')}.`);
   }
   if (r.kept_offset !== null) lines.push(`This import keeps its offset, ${offsetText(r.kept_offset)}.`);
-  else if (r.suggested !== null)
+  else if (r.suggested !== null) {
     lines.push(`The files are copies once their times are moved by ${offsetText(r.suggested)}: the older install’s clock or time zone was off.`);
+    const i = OFFSETS.indexOf(r.suggested);
+    if (i >= 0) {
+      const [fresh, copies] = [r.new_at[i] ?? 0, r.copies_at[i] ?? 0];
+      lines.push(
+        `At ${offsetText(r.suggested)}: ${about(r, fresh)} new ${fresh === 1 ? 'call' : 'calls'}, ${about(r, copies)} ${copies === 1 ? 'copy of a call' : 'copies of calls'} already in the archive.`,
+      );
+    }
+  }
   return lines;
 }
 
-/** The import's last button, naming what it does. */
-export function importAction(r: Review, name: string): string {
-  const n = r.read >= r.left || r.read === 0 ? r.new : Math.round((r.new * r.left) / r.read);
+/** An offset as a person types it (`+01:00`, `-00:30`, `0`), in minutes; null when it is not one. */
+export function parseOffset(text: string): number | null {
+  const found = /^([+-]?)(\d+):(\d{2})$/.exec(text.trim());
+  if (text.trim() === '0') return 0;
+  if (!found) return null;
+  const [hours, minutes] = [Number(found[2]), Number(found[3])];
+  if (minutes >= 60 || hours * 60 + minutes > 24 * 60) return null;
+  return (found[1] === '-' ? -1 : 1) * (hours * 60 + minutes);
+}
+
+/**
+ * The new calls an import at the offset typed would make, as the review
+ * counted them: at the import's own offset (the one it keeps, or none; an
+ * empty field), or at one it tried; null at any other.
+ */
+export function importCount(r: Review, offset: string): number | null {
+  const own = r.kept_offset ?? 0;
+  const minutes = offset.trim() === '' ? own : parseOffset(offset);
+  if (minutes === null) return null;
+  if (minutes === own) return r.new;
+  const i = OFFSETS.indexOf(minutes);
+  return i >= 0 ? (r.new_at[i] ?? 0) : null;
+}
+
+/** The import's last button, naming what it does at the offset typed; no number at an offset the review did not try. */
+export function importAction(r: Review, name: string, offset: string): string {
+  const counted = importCount(r, offset);
+  if (counted === null) return `Import into ${name}`;
+  const n = r.read >= r.left || r.read === 0 ? counted : Math.round((counted * r.left) / r.read);
   const calls = `${number(n)} ${n === 1 ? 'call' : 'calls'}`;
   return `Import ${r.read > 0 && r.read < r.left ? 'about ' : ''}${calls} into ${name}`;
 }

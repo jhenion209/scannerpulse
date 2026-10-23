@@ -185,7 +185,7 @@ const REVIEW = {
     no_date: ['notes/readme.mp3'], new: ['2019/03/01/20190301_120000_a.mp3'], copies: [], unknown: ['2019/03/02/20190302_090000_e.mp3: the system County'],
     differ: [], unreadable: [],
   },
-  copies_at: [0, 0, 3, 390, 0], suggested: 60, kept_offset: null, done: true,
+  copies_at: [0, 0, 3, 390, 0], new_at: [600, 600, 600, 213, 600], suggested: 60, kept_offset: null, done: true,
 };
 
 test('an older archive is reviewed first, then imported with the offset the review suggests', async ({ page }) => {
@@ -210,7 +210,7 @@ test('an older archive is reviewed first, then imported with the offset the revi
   await expect(page.getByText('2019/03/02/20190302_090000_e.mp3: the system County')).toBeVisible();
   const scan = await new AxeBuilder({ page }).include('main').analyze();
   expect(scan.violations).toEqual([]);
-  await page.getByRole('button', { name: 'Import about 2,400 calls into Old' }).click();
+  await page.getByRole('button', { name: 'Import about 852 calls into Old' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Job 42 imports /srv/old as Old, its times moved by +01:00' })).toBeVisible();
   expect(started).toEqual([{ name: 'Old', folder: '/srv/old', offset: '+01:00' }]);
 });

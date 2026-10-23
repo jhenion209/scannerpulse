@@ -14,6 +14,7 @@
     consolidateText,
     freeText,
     importAction,
+    importCount,
     offsetText,
     reviewLines,
     moveAction,
@@ -442,7 +443,7 @@
         <input id="import-offset" type="text" autocomplete="off" placeholder="+00:00" readonly={r.kept_offset !== null} bind:value={offset} />
         <p class="hint">The times its file names give are moved by this, as ±HH:MM; the names stay as they are.</p>
         <div class="row">
-          <button type="button" class="primary" disabled={importing || r.new + r.unknown === 0} onclick={() => startImport(r)}>{importAction(r, r.name)}</button>
+          <button type="button" class="primary" disabled={importing || (importCount(r, offset) ?? 1) + r.unknown === 0} onclick={() => startImport(r)}>{importAction(r, r.name, offset)}</button>
         </div>
       </div>
     {/if}

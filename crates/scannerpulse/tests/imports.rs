@@ -320,6 +320,8 @@ async fn a_review_suggests_the_offset_at_which_the_files_are_copies(pool: PgPool
     let review = imports::review(&mut conn, job).await.unwrap().unwrap();
     assert!(review.done);
     assert_eq!(review.copies_at, [0, 0, 0, 6, 0]);
+    // Imported at +01:00, none of them would be a new call.
+    assert_eq!(review.new_at, [6, 6, 6, 0, 6]);
     assert_eq!((review.copies, review.new), (0, 6));
     assert_eq!(review.suggested, Some(60));
     assert_eq!(imports::offset_text(60), "+01:00");
