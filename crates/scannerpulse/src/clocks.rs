@@ -343,11 +343,11 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
              WHERE f.source_id = s.id AND f.state = 'done' AND f.named_at IS NOT NULL \
                AND f.first_seen > now() - interval '1 day' \
                AND f.first_seen < f.named_at + $3::interval \
+               AND s.removed_at IS NULL AND s.intake <> 'asked' \
+               AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
              ORDER BY f.first_seen DESC LIMIT $1) f \
          JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
               AND c.source_id = s.id \
-         WHERE s.removed_at IS NULL AND s.intake <> 'asked' \
-           AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
          GROUP BY s.name",
     )
     .bind(SAMPLE)
@@ -375,7 +375,9 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
         });
     }
     // Each copy says how far its recorder's names run from those of the
-    // recorder of the call, as long as the call had no other copy.
+    // recorder of the call, as long as the call had no other copy. A
+    // source's own conditions sit inside each LATERAL, as a gate: an
+    // import's listing, millions of rows, is never read.
     let pairs: Vec<(String, String, i64, f64)> = sqlx::query_as(
         "SELECT a.name, b.name, count(*), percentile_cont(0.5) WITHIN GROUP (ORDER BY p.ms) \
          FROM (SELECT least(s.id, c.source_id) AS a, greatest(s.id, c.source_id) AS b, \
@@ -386,11 +388,12 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
                    SELECT f.named_at, f.call_id, f.call_started_at FROM ingest_files f \
                    WHERE f.source_id = s.id AND f.state = 'duplicate' AND f.named_at IS NOT NULL \
                      AND f.first_seen > now() - interval '1 day' \
+                     AND s.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
                    ORDER BY f.first_seen DESC LIMIT $1) f \
                JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
                     AND c.copies_from = ARRAY[s.id] \
-               WHERE s.removed_at IS NULL \
-                 AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id IN (s.id, c.source_id))) p \
+               WHERE NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = c.source_id)) p \
          JOIN sources a ON a.id = p.a \
          JOIN sources b ON b.id = p.b \
          GROUP BY a.name, b.name \

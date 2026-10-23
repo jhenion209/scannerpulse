@@ -321,3 +321,39 @@ async fn two_recorders_whose_copies_differ_by_seconds_are_named_once(pool: PgPoo
         ]
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_imports_rows_are_never_read_to_measure_the_recorders(pool: PgPool) {
+    let old = recorder(&pool, "older-archive").await;
+    sqlx::query("INSERT INTO imports (source_id) VALUES ($1)")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // An import's listing, just made: rows waiting to be taken.
+    sqlx::query(
+        "INSERT INTO ingest_files (source_id, rel_path, first_seen, seen_at, state) \
+         SELECT $1, 'old/' || n || '.mp3', now(), now(), 'listed' FROM generate_series(1, 2000) n",
+    )
+    .bind(old)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // As on any install, this month's calls have their partition.
+    store::ensure_partition(&pool, Utc::now()).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    assert!(clocks::recorder_warnings(&mut tx).await.unwrap().is_empty());
+    // Status reads the recorders' clocks every 15 s: an import of millions
+    // of files must cost it nothing.
+    // Rows read by scans of the table, and fetched through its indexes.
+    let read: i64 = sqlx::query_scalar(
+        "SELECT (pg_stat_get_xact_tuples_returned('ingest_files'::regclass) \
+               + pg_stat_get_xact_tuples_fetched('ingest_files'::regclass) \
+               + (SELECT coalesce(sum(pg_stat_get_xact_tuples_fetched(indexrelid)), 0) \
+                  FROM pg_index WHERE indrelid = 'ingest_files'::regclass))::bigint",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(read, 0, "the import's rows were read");
+}
