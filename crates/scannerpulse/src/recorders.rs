@@ -52,6 +52,9 @@ pub struct Recorder {
     pub duplicates_today: i64,
     /// What each host's watcher last found in its folder.
     pub hosts: Vec<FolderHealth>,
+    /// What its files say is wrong with its clock, if anything
+    /// ([`crate::clocks::recorder_warnings`]).
+    pub clock: Option<String>,
 }
 
 /// What one host's watcher last found in a recorder's folder.
@@ -434,6 +437,7 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
     )
     .fetch_all(&mut *conn)
     .await?;
+    let clocks = crate::clocks::recorder_warnings(&mut *conn).await?;
     Ok(rows
         .into_iter()
         .map(
@@ -456,6 +460,10 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                     (_, true) => State::Watched,
                     (_, false) => State::Paused,
                 };
+                let clock = clocks
+                    .iter()
+                    .find(|w| w.subject == name)
+                    .map(|w| w.text.clone());
                 Recorder {
                     id,
                     name,
@@ -479,6 +487,7 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                             checked_at: *checked_at,
                         })
                         .collect(),
+                    clock,
                 }
             },
         )

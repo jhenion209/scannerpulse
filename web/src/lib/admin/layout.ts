@@ -15,6 +15,8 @@ export interface LayoutMachine {
   up: boolean;
   holds_shared: boolean;
   holds_lease: boolean;
+  /** What is wrong with its clock, if anything. An older server sends none. */
+  clock?: string | null;
 }
 
 export interface DatabaseMachine {
@@ -24,6 +26,7 @@ export interface DatabaseMachine {
   error?: string;
   behind_bytes?: number | null;
   replayed_seconds_ago?: number | null;
+  clock?: string | null;
 }
 
 export interface LayoutInfo {
@@ -37,7 +40,7 @@ export interface LayoutInfo {
   /** The machine that files and transcribes calls. */
   lease: string | null;
   database: DatabaseMachine[];
-  referee: { host: string; answers: boolean; error?: string } | null;
+  referee: { host: string; answers: boolean; error?: string; clock?: string | null } | null;
   /** Run on the first machine; null on one machine alone. */
   switchover: string | null;
 }

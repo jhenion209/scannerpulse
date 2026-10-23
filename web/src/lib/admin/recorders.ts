@@ -28,6 +28,8 @@ export interface Recorder {
   staged_today: number;
   duplicates_today: number;
   hosts: FolderHealth[];
+  /** What its files say is wrong with its clock. An older server sends none. */
+  clock?: string | null;
 }
 
 /** `GET /api/admin/recorders`: the recorders, and the hosts whose ingest runs. */

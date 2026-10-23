@@ -56,7 +56,7 @@
           <!-- The plan names the second machine by its name. -->
           <dt>{machineLabel(machine.host, data.second)}</dt>
           <dd>
-            <span class={state.ok ? '' : 'flag'}>{state.text}</span>{#if machine.holds_shared}; holds the shared address{/if}{#if machine.holds_lease}; files and transcribes the calls{/if}
+            <span class={state.ok ? '' : 'flag'}>{state.text}</span>{#if machine.holds_shared}; holds the shared address{/if}{#if machine.holds_lease}; files and transcribes the calls{/if}{#if machine.clock}; <span class="flag">{machine.clock}</span>{/if}
           </dd>
         {/each}
       </dl>
@@ -83,7 +83,7 @@
             {:else}
               {@const behind = standbyText(node)}
               the standby, <span class={behind.ok ? '' : 'flag'}>{behind.text}</span>
-            {/if}
+            {/if}{#if node.clock}; <span class="flag">{node.clock}</span>{/if}
           </dd>
         {/each}
       </dl>
@@ -94,7 +94,7 @@
       <dl class="facts">
         <dt>{data.referee.host}</dt>
         <dd>
-          {#if data.referee.answers}answers on its port{:else}<span class="flag">does not answer: {data.referee.error}</span> (while it is down, nothing is promoted){/if}
+          {#if data.referee.answers}answers on its port{:else}<span class="flag">does not answer: {data.referee.error}</span> (while it is down, nothing is promoted){/if}{#if data.referee.clock}; <span class="flag">{data.referee.clock}</span>{/if}
         </dd>
       </dl>
     {/if}

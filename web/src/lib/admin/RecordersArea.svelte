@@ -3,7 +3,7 @@
   import { callTime, counted, seconds, source } from '../format';
   import { tell } from '../notice.svelte';
   import { siteZone } from '../status.svelte';
-  import { STATUS_EVERY_MS } from './health';
+  import { clockSentence, STATUS_EVERY_MS } from './health';
   import {
     CHANGE_LABEL,
     changedText,
@@ -170,6 +170,7 @@
             {#if held}<dt>Waiting</dt><dd>{held}</dd>{/if}
           </dl>
           {#each troubles as trouble (trouble)}<p class="problem">{trouble}</p>{/each}
+          {#if r.clock}<p class="problem">{clockSentence(r.clock)}</p>{/if}
           {#if removing === r.id}
             <p>Remove {r.name}? Its files stay in its folder and are no longer taken; its calls stay in the archive.</p>
             <div class="row">

@@ -3,6 +3,12 @@
 
 import { durationText } from '../status';
 
+/** A machine or recorder whose clock needs a look, and what is wrong. */
+export interface ClockWarning {
+  subject: string;
+  text: string;
+}
+
 export interface Heartbeat {
   host: string;
   /** Seconds since it was last renewed. */
@@ -22,6 +28,8 @@ export interface AdminStatus {
   queue: { queued: number; due: number; failed: number; last_minute: number };
   /** Each storage location a running host cannot use. */
   locations: { location: string; host: string; problem: string | null }[];
+  /** Each clock to look at, by name. An older server sends none. */
+  clocks?: ClockWarning[];
   failed: { call_id: number; started_at: string; attempts: number; last_error: string | null }[];
   servers: { url: string; cooling_until: string | null; failed_rounds: number; last_error: string | null; updated_at: string | null }[];
   totals: { calls_about: number | null; transcripts_about: number | null };
@@ -95,6 +103,14 @@ export const locationWarnings = (locations: AdminStatus['locations'] | undefined
   (locations ?? []).map(
     (l) => `${l.host} cannot use the storage location ${l.location}: ${l.problem ?? 'it cannot be read'}. Its calls there do not play from ${l.host}.`,
   );
+
+/** A warning for each clock to look at: the machine's or recorder's name,
+ * then what is wrong with its clock. */
+export const clockWarnings = (clocks: ClockWarning[] | undefined): string[] =>
+  (clocks ?? []).map((c) => `${c.subject}: ${c.text}.`);
+
+/** A clock's warning as a sentence of its own, under its machine or recorder. */
+export const clockSentence = (text: string): string => `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 
 /** The warning when the referee does not answer; none when it does or there is none. */
 export function refereeWarning(referee: AdminStatus['referee']): { text: string; reason: string | undefined } | null {

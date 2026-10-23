@@ -277,6 +277,34 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    // Their clocks as last checked: radio-a's is right.
+    let checked = |host: &str, role: &str| scannerpulse::clocks::Checked {
+        host: host.into(),
+        role: role.into(),
+        ntp: Some(true),
+        synchronized: Some(true),
+        offset_ms: Some(10),
+        problem: None,
+    };
+    for row in [
+        checked("radio-a", "scannerpulse"),
+        scannerpulse::clocks::Checked {
+            offset_ms: Some(2_400),
+            ..checked("radio-b", "scannerpulse")
+        },
+        scannerpulse::clocks::Checked {
+            ntp: Some(false),
+            synchronized: Some(false),
+            ..checked(&primary.host, "database")
+        },
+        scannerpulse::clocks::Checked {
+            offset_ms: None,
+            problem: Some("did not answer within 20 s".into()),
+            ..checked("192.0.2.1", "referee")
+        },
+    ] {
+        scannerpulse::clocks::record(&pool, &row).await.unwrap();
+    }
     let mut state = scannerpulse::web::AppState::new(pool.clone());
     state.host = "radio-a".into();
     state.machine = scannerpulse::web::Machine {
@@ -317,6 +345,16 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
     assert_eq!(body["database"][0]["role"], "primary");
     assert_eq!(body["referee"]["host"], "192.0.2.1");
     assert_eq!(body["referee"]["answers"], false);
+    assert_eq!(body["machines"][0]["clock"], serde_json::Value::Null);
+    assert_eq!(
+        body["machines"][1]["clock"],
+        "its clock is 2.4 s ahead of the database's"
+    );
+    assert_eq!(body["database"][0]["clock"], "its time service is off");
+    assert_eq!(
+        body["referee"]["clock"],
+        "its clock could not be checked: did not answer within 20 s"
+    );
     assert_eq!(
         body["switchover"],
         "sudo /usr/local/bin/scannerpulse db switchover"
@@ -332,6 +370,15 @@ async fn an_admin_sees_the_installs_layout(pool: PgPool) {
     .await;
     assert_eq!(status.body["referee"]["host"], "192.0.2.1");
     assert_eq!(status.body["referee"]["answers"], false);
+    // And of every clock to look at.
+    let clocks: Vec<&str> = status.body["clocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(clocks.len(), 3, "{clocks:?}");
+    assert!(clocks.contains(&"radio-b") && !clocks.contains(&"radio-a"));
     // A second that has never said it is up is listed as down, not left
     // out; a machine not heard from for a week is forgotten.
     let silent = dir.path().join("silent.json");

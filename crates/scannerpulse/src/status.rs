@@ -161,8 +161,10 @@ pub async fn read_within(pool: &PgPool, limit: std::time::Duration) -> sqlx::Res
     .bind(TWICE_DAYS)
     .fetch_one(&mut *tx)
     .await?;
+    let clocks = crate::clocks::warnings(&mut tx).await?;
     Ok(json!({
         "maintenance": maintenance,
+        "clocks": clocks,
         "lease": {
             "valid": lease.valid(),
             "holder": lease.holder,

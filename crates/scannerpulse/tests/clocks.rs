@@ -286,4 +286,23 @@ async fn two_recorders_whose_copies_differ_by_seconds_are_named_once(pool: PgPoo
         recorder_warnings(&pool).await,
         ["south: its clock is 2.0 s ahead of north's (6 copies): one call can be kept as two"]
     );
+    // The Recorders area shows it on south's row.
+    let listed = scannerpulse::recorders::list(&mut pool.acquire().await.unwrap(), ago(3600))
+        .await
+        .unwrap();
+    let clocks: Vec<(&str, Option<&str>)> = listed
+        .iter()
+        .map(|r| (r.name.as_str(), r.clock.as_deref()))
+        .collect();
+    assert_eq!(
+        clocks,
+        [
+            ("north", None),
+            (
+                "south",
+                Some("its clock is 2.0 s ahead of north's (6 copies): one call can be kept as two")
+            ),
+            ("east", None)
+        ]
+    );
 }

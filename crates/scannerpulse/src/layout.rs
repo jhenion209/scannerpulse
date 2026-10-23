@@ -257,7 +257,15 @@ pub async fn report(
     )
     .fetch_all(&mut *conn)
     .await?;
+    let clocks = crate::clocks::machine_warnings(&mut *conn).await?;
     drop(conn);
+    // What is wrong with a machine's clock, if anything.
+    let clock = |host: &str| {
+        clocks
+            .iter()
+            .find(|w| w.subject == host)
+            .map(|w| w.text.clone())
+    };
     let mut machines: Vec<Value> = rows
         .into_iter()
         .map(|(host, version, holds_shared, age)| {
@@ -269,6 +277,7 @@ pub async fn report(
                 "up": up,
                 "holds_shared": up && holds_shared,
                 "holds_lease": lease_host.as_deref() == Some(host.as_str()),
+                "clock": clock(&host),
             })
         })
         .collect();
@@ -284,6 +293,7 @@ pub async fn report(
             "up": false,
             "holds_shared": false,
             "holds_lease": false,
+            "clock": clock(second),
         }));
     }
     let options = pool.connect_options();
@@ -296,19 +306,28 @@ pub async fn report(
         .iter()
         .zip(answers)
         .zip(roles)
-        .map(|((node, answer), role)| match (answer, role) {
-            (Ok((false, at, ..)), Some(role)) => json!({"host": node.host, "role": role, "at": at}),
-            (Ok((_, at, replayed, _)), _) => json!({
-                "host": node.host,
-                "role": "standby",
-                "at": at,
-                "behind_bytes": primary_at.as_deref().and_then(|p| behind(p, &at)),
-                "replayed_seconds_ago": replayed.map(f64::round),
-            }),
-            (Err(why), _) => json!({"host": node.host, "role": null, "error": why}),
+        .map(|((node, answer), role)| {
+            let mut row = match (answer, role) {
+                (Ok((false, at, ..)), Some(role)) => {
+                    json!({"host": node.host, "role": role, "at": at})
+                }
+                (Ok((_, at, replayed, _)), _) => json!({
+                    "host": node.host,
+                    "role": "standby",
+                    "at": at,
+                    "behind_bytes": primary_at.as_deref().and_then(|p| behind(p, &at)),
+                    "replayed_seconds_ago": replayed.map(f64::round),
+                }),
+                (Err(why), _) => json!({"host": node.host, "role": null, "error": why}),
+            };
+            row["clock"] = json!(clock(&node.host));
+            row
         })
         .collect();
-    let referee = referee(layout).await;
+    let mut referee = referee(layout).await;
+    if let Some(host) = referee["host"].as_str().map(String::from) {
+        referee["clock"] = json!(clock(&host));
+    }
     let mode = match layout {
         Some(layout) => layout.mode(),
         None if nodes.is_empty() => "one",

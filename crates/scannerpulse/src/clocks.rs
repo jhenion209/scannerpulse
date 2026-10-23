@@ -411,6 +411,14 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
     Ok(warnings)
 }
 
+/// Every clock to look at, machines and recorders, by name.
+pub async fn warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<Warning>> {
+    let mut warnings = machine_warnings(&mut *db).await?;
+    warnings.extend(recorder_warnings(db).await?);
+    warnings.sort_by(|x, y| x.subject.cmp(&y.subject));
+    Ok(warnings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

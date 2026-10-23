@@ -201,7 +201,8 @@ for the first). The joining machine reads its place over SSH, installs
 PostgreSQL 17, lets in only this machine and the other database machine
 (TLS and a password), and the second copies the first and follows it. Each
 lets this machine's key run only `scannerpulse node serve` (status, stop,
-start, promote, promote after, follow, and on the referee switchover).
+start, promote, promote after, follow, and on the referee switchover; on
+each, clock).
 Then this machine makes the tables and starts. Its services are given both
 machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on the one that is the
 primary, moving to the other within seconds after a change of roles; a
@@ -771,6 +772,22 @@ already set in the environment wins. So far:
   month edge.
   It is read in one snapshot, and each of its queries gives up after 10
   seconds rather than wait on a locked or slow table.
+  Its `clocks` list names each clock to look at, as do the Layout area's
+  machines and the Recorders area's cards; nothing sets a clock. Every 10
+  minutes each ScannerPulse machine checks its own (its time service, by
+  `timedatectl`, and how far it is from the primary database's clock), and
+  the first machine's helper asks each database machine and the referee the
+  same over their restricted key. A machine is named when its clock is not
+  synchronized (its time service off or not: a container's is its host's,
+  so off alone is not named), is a second or more from the database's,
+  cannot be checked, or was last checked over 30 minutes ago. A recorder is
+  measured from its newest 200 files of the last day (5 at least; never an
+  import, nor a file first seen over an hour after the time its name gives,
+  a backlog): named when its files are seen more than a
+  second before the times their names give (its clock is ahead), or more
+  than a minute after their calls end (behind, or slow to arrive), or when
+  its copies of another recorder's calls are named a second or more apart
+  from them, which can keep one short call as two.
 - `talkgroups` lists the talkgroups and their transcription switches;
   `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
   `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts

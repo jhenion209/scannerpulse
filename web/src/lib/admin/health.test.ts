@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { about, failoverChecks, locationWarnings, refereeWarning, type AdminStatus, leaseText, transcriptState } from './health';
+import { about, clockSentence, clockWarnings, failoverChecks, locationWarnings, refereeWarning, type AdminStatus, leaseText, transcriptState } from './health';
 
 describe('the lease', () => {
   it('says who holds it and for how long', () => {
@@ -68,5 +68,26 @@ describe('the storage warnings', () => {
     expect(locationWarnings([{ location: 'Cold 2024', host: 'host-b', problem: 'it is not mounted' }])).toEqual([
       'host-b cannot use the storage location Cold 2024: it is not mounted. Its calls there do not play from host-b.',
     ]);
+  });
+});
+
+describe('the clocks', () => {
+  it('names each machine or recorder whose clock needs a look', () => {
+    expect(clockWarnings(undefined)).toEqual([]);
+    expect(
+      clockWarnings([
+        { subject: 'db1', text: 'its time service is off' },
+        { subject: 'south', text: "its clock is 2.0 s ahead of north's (6 copies): one call can be kept as two" },
+      ]),
+    ).toEqual([
+      'db1: its time service is off.',
+      "south: its clock is 2.0 s ahead of north's (6 copies): one call can be kept as two.",
+    ]);
+  });
+
+  it("says a recorder's clock warning as a sentence", () => {
+    expect(clockSentence('its files are seen 90.0 s after their calls end')).toBe(
+      'Its files are seen 90.0 s after their calls end.',
+    );
   });
 });
