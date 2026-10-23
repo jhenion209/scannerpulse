@@ -310,31 +310,31 @@ pub async fn machine_warnings(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec
 
 /// The recorders whose clocks need a look, measured from their newest files
 /// of the last day ([`SAMPLE`] at most, [`FEWEST`] at least; an import or a
-/// [`BACKLOG`] is never measured). A recorder taken in when asked brings its
-/// files in late: only its copies are compared. Names give whole seconds, so a recorder is named when:
-/// its files are seen, by the database's clock, more than [`LIMIT_MS`] before
-/// the times their names give (its clock is ahead); they are seen more than
-/// [`LATE_MS`] after their calls end; or its copies of other recorders' calls
-/// are named [`LIMIT_MS`] or more apart from them (the median, both ways),
-/// enough to keep one short call as two.
+/// [`BACKLOG`] is never measured). A file is seen, by the database's clock,
+/// once it has been still for [`crate::watcher::STABLE_FOR`] after its call
+/// ended (its name's time and its length): counting from then, a recorder
+/// is named when its files are seen more than [`LIMIT_MS`] early (its clock
+/// is ahead) or more than [`LATE_MS`] late. A recorder taken in when asked
+/// brings its files in late, and has no such measure. Names give whole
+/// seconds, and a recorder is named too when its copies of other recorders'
+/// calls are named [`LIMIT_MS`] or more apart from them (the median, both
+/// ways), enough to keep one short call as two.
 pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<Warning>> {
-    let recorders: Vec<(String, Option<f64>, Option<f64>)> = sqlx::query_as(
+    let recorders: Vec<(String, Option<f64>)> = sqlx::query_as(
         "SELECT s.name, \
                 CASE WHEN count(*) >= $2 THEN percentile_cont(0.5) WITHIN GROUP \
-                    (ORDER BY extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000) END, \
-                CASE WHEN count(c.id) >= $2 THEN percentile_cont(0.5) WITHIN GROUP \
                     (ORDER BY extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000 \
-                              - c.duration_ms) END \
+                              - c.duration_ms - $4) END \
          FROM sources s \
          CROSS JOIN LATERAL ( \
-             SELECT f.first_seen, f.named_at, f.state, f.call_id, f.call_started_at \
+             SELECT f.first_seen, f.named_at, f.call_id, f.call_started_at \
              FROM ingest_files f \
-             WHERE f.source_id = s.id AND f.named_at IS NOT NULL \
+             WHERE f.source_id = s.id AND f.state = 'done' AND f.named_at IS NOT NULL \
                AND f.first_seen > now() - interval '1 day' \
                AND f.first_seen < f.named_at + $3::interval \
              ORDER BY f.first_seen DESC LIMIT $1) f \
-         LEFT JOIN calls c ON f.state = 'done' AND c.id = f.call_id \
-               AND c.started_at = f.call_started_at AND c.source_id = s.id \
+         JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
+              AND c.source_id = s.id \
          WHERE s.removed_at IS NULL AND s.intake <> 'asked' \
            AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
          GROUP BY s.name",
@@ -342,26 +342,21 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
     .bind(SAMPLE)
     .bind(FEWEST)
     .bind(BACKLOG)
+    .bind(crate::watcher::STABLE_FOR.as_millis() as i64)
     .fetch_all(&mut *db)
     .await?;
     let mut warnings = Vec::new();
-    for (name, seen, late) in recorders {
-        let (seen, late) = (
-            seen.map(|ms| ms.round() as i64),
-            late.map(|ms| ms.round() as i64),
-        );
-        let text = if let Some(ms) = seen.filter(|ms| *ms < -LIMIT_MS) {
-            format!(
-                "its clock is {} ahead of the database's: its files are seen before the times their names give",
+    for (name, delay) in recorders {
+        let text = match delay.map(|ms| ms.round() as i64) {
+            Some(ms) if ms < -LIMIT_MS => format!(
+                "its clock is {} ahead of the database's: its files are seen before their calls end",
                 seconds(ms)
-            )
-        } else if let Some(ms) = late.filter(|ms| *ms > LATE_MS) {
-            format!(
+            ),
+            Some(ms) if ms > LATE_MS => format!(
                 "its files are seen {} after their calls end: its clock may be behind, or its files slow to arrive",
                 seconds(ms)
-            )
-        } else {
-            continue;
+            ),
+            _ => continue,
         };
         warnings.push(Warning {
             subject: name,

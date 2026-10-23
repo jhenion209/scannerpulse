@@ -213,19 +213,21 @@ async fn a_recorder_whose_files_are_seen_before_their_names_say_is_ahead(pool: P
         .execute(&pool)
         .await
         .unwrap();
+    // A file is seen once it has been still for 2 s, so once its call has
+    // ended: a 2 s call named 4 s before it is seen is on time.
     for minute in 1..=6 {
         let seen = ago(minute * 60);
-        // North's names run 3 s ahead: its files are seen before they start.
-        filed(&pool, north, seen + Duration::seconds(3), 2_000, seen).await;
-        // South's are seen a second after they end.
-        filed(&pool, south, seen - Duration::seconds(3), 2_000, seen).await;
+        // North's names run 3 s ahead.
+        filed(&pool, north, seen - Duration::seconds(1), 2_000, seen).await;
+        // South's are seen a second late.
+        filed(&pool, south, seen - Duration::seconds(5), 2_000, seen).await;
         // An import's names are old, whatever its offset.
         filed(&pool, old, seen + Duration::seconds(30), 2_000, seen).await;
     }
     // Too few files to tell.
     for minute in 1..=4 {
         let seen = ago(minute * 60);
-        filed(&pool, few, seen + Duration::seconds(3), 2_000, seen).await;
+        filed(&pool, few, seen - Duration::seconds(1), 2_000, seen).await;
     }
     // A backlog brought in hours late is no clock's doing: south's last two
     // hours' files, seen now.
@@ -236,7 +238,7 @@ async fn a_recorder_whose_files_are_seen_before_their_names_say_is_ahead(pool: P
     assert_eq!(
         recorder_warnings(&pool).await,
         [
-            "north: its clock is 3.0 s ahead of the database's: its files are seen before the times their names give"
+            "north: its clock is 3.0 s ahead of the database's: its files are seen before their calls end"
         ]
     );
 }
@@ -256,8 +258,8 @@ async fn a_recorder_whose_files_are_seen_long_after_their_calls_end_is_named(poo
         .unwrap();
     for minute in 2..=7 {
         let seen = ago(minute * 60);
-        filed(&pool, north, seen - Duration::seconds(95), 5_000, seen).await;
-        filed(&pool, asked, seen - Duration::seconds(95), 5_000, seen).await;
+        filed(&pool, north, seen - Duration::seconds(97), 5_000, seen).await;
+        filed(&pool, asked, seen - Duration::seconds(97), 5_000, seen).await;
     }
     assert_eq!(
         recorder_warnings(&pool).await,
@@ -274,11 +276,13 @@ async fn two_recorders_whose_copies_differ_by_seconds_are_named_once(pool: PgPoo
         recorder(&pool, "south").await,
         recorder(&pool, "east").await,
     );
-    // South's names run 2 s ahead of north's: three of north's calls south
-    // had copies of, three of south's north had copies of.
+    // North's clock runs 2 s behind, which the files' delay does not show
+    // (well under a minute); south's names run 2 s ahead of north's: three
+    // of north's calls south had copies of, three of south's north had
+    // copies of.
     for minute in 1..=6 {
         let seen = ago(minute * 60);
-        let start = seen - Duration::seconds(5);
+        let start = seen - Duration::seconds(7);
         if minute <= 3 {
             let call = filed(&pool, north, start, 3_000, seen).await;
             copied(&pool, south, call, start + Duration::seconds(2)).await;
