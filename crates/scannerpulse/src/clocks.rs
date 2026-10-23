@@ -179,7 +179,7 @@ pub async fn asked(host: &str, role: &str, mine: i64) -> Checked {
     let text = match answer {
         Err(_) => return unchecked(format!("did not answer within {} s", ASK_LIMIT.as_secs())),
         Ok(Err(error)) => return unchecked(error.to_string()),
-        Ok(Ok(Err(why))) => return unchecked(why),
+        Ok(Ok(Err(why))) => return unchecked(last_line(&why)),
         Ok(Ok(Ok(text))) => text,
     };
     match serde_json::from_str::<Clock>(text.trim()) {
@@ -194,6 +194,17 @@ pub async fn asked(host: &str, role: &str, mine: i64) -> Checked {
         },
         Err(_) => unchecked(format!("answered {:?}, not a clock", text.trim())),
     }
+}
+
+/// What a failed check said, by its last line: ssh says its warnings first
+/// and its error last.
+fn last_line(said: &str) -> String {
+    said.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Checks the database machines' and the referee's clocks every
@@ -431,6 +442,17 @@ mod tests {
         );
         // A machine without systemd's time service says nothing.
         assert_eq!(time_service(""), (None, None));
+    }
+
+    #[test]
+    fn a_check_that_failed_is_named_by_its_last_line() {
+        let ssh = "192.0.2.1: Warning: Identity file /k not accessible: No such file or directory.\n\
+                   ssh: connect to host 192.0.2.1 port 22: Connection timed out\n";
+        assert_eq!(
+            last_line(ssh),
+            "ssh: connect to host 192.0.2.1 port 22: Connection timed out"
+        );
+        assert_eq!(last_line("refused"), "refused");
     }
 
     #[test]
