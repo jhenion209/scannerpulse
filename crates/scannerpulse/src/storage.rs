@@ -408,6 +408,12 @@ pub async fn remove(conn: &mut PgConnection, id: i16) -> Result<String, Refused>
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    // An import's register stays: imported again, the folder gives none of
+    // the files it gave.
+    sqlx::query("UPDATE imports SET location_id = NULL WHERE location_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM locations WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -431,16 +437,24 @@ async fn removable(conn: &mut PgConnection, id: i16) -> sqlx::Result<Result<Stri
             "{name} is the main archive, where new calls are filed: it cannot be removed"
         ))));
     }
-    let job: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM jobs WHERE kind = 'move' AND state IN ('queued', 'running') \
-           AND (params ->> 'to')::smallint = $1 ORDER BY id LIMIT 1",
+    let job: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id, kind FROM jobs WHERE state IN ('queued', 'running') \
+           AND ((kind = 'move' AND (params ->> 'to')::smallint = $1) \
+             OR (kind IN ('import', 'consolidate') AND params ->> 'name' = $2)) \
+         ORDER BY id LIMIT 1",
     )
     .bind(id)
+    .bind(&name)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some(job) = job {
+    if let Some((job, kind)) = job {
+        let does = match kind.as_str() {
+            "import" => format!("imports {name}"),
+            "consolidate" => format!("consolidates {name}"),
+            _ => format!("moves calls into {name}"),
+        };
         return Ok(Err(Refused::Refused(format!(
-            "job {job} moves calls into {name}: stop it first"
+            "job {job} {does}: stop it first"
         ))));
     }
     let holds: bool =

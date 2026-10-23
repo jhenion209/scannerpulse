@@ -6,10 +6,10 @@ use std::time::SystemTime;
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use common::seed_places;
 use id3::TagLike;
-use scannerpulse::imports;
 use scannerpulse::jobs::JobError;
 use scannerpulse::recorders::{self, Refused};
 use scannerpulse::store;
+use scannerpulse::{consolidate, imports};
 use sqlx::PgPool;
 use tempfile::TempDir;
 
@@ -539,4 +539,86 @@ async fn an_imports_offset_and_its_purge_date_its_files(pool: PgPool) {
         message,
         "1 call imported into Old; 1 file skipped: it is from before 2019-03-02, before which Old was purged"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_consolidation_copies_an_imports_calls_into_the_archive(pool: PgPool) {
+    let (archive, places) = site(&pool).await;
+    let old = older_archive();
+    let mut conn = pool.acquire().await.unwrap();
+    let (_, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let before = snapshot(old.path());
+    // Counted first, and started only with the word typed.
+    let preview = consolidate::preview(&mut conn, "Old").await.unwrap();
+    assert_eq!((preview.calls, preview.refused.as_deref()), (2, None));
+    let why = refusal(consolidate::start(&mut conn, "Old", "yes", "admin").await);
+    assert_eq!(why, "type move to confirm");
+    let why = refusal(consolidate::start(&mut conn, "New", "move", "admin").await);
+    assert_eq!(why, "there is no import named New");
+    consolidate::start(&mut conn, "Old", "move", "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    // Its calls are in the main archive's layout now: the day, the folder of
+    // the talkgroup their files name, their names.
+    let paths: Vec<String> =
+        sqlx::query_scalar("SELECT rel_path FROM calls WHERE location_id = $1 ORDER BY started_at")
+            .bind(places.0)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        paths,
+        [
+            "2019-03-01/702-Fire/20190301_120000.mp3",
+            "2019-03-01/702-Fire/20190301_130000_b.mp3",
+            "2019-03-01/703-Police Main/20190301_140000_c.mp3",
+        ]
+    );
+    for (copy, original) in [
+        (&paths[1], "2019-03-01/20190301_130000_b.mp3"),
+        (&paths[2], "20190301_140000_c.mp3"),
+    ] {
+        assert_eq!(
+            std::fs::read(archive.path().join(copy)).unwrap(),
+            std::fs::read(old.path().join(original)).unwrap()
+        );
+    }
+    // The import's files stay as they were, and none is left for the sweep.
+    assert_eq!(snapshot(old.path()), before);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM archive_leftovers").await,
+        0
+    );
+    // It holds no call now: it can be removed, and its register stays.
+    let preview = consolidate::preview(&mut conn, "Old").await.unwrap();
+    assert_eq!(preview.refused.as_deref(), Some("Old holds no call"));
+    assert_eq!(
+        scannerpulse::storage::remove(&mut conn, started.location)
+            .await
+            .unwrap(),
+        "Old"
+    );
+    let linked: Option<i16> =
+        sqlx::query_scalar("SELECT location_id FROM imports WHERE source_id = $1")
+            .bind(started.source)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(linked, None);
+    // Imported again, it takes nothing it took before.
+    let (job, again) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    assert!(again.again);
+    run_jobs(&pool).await;
+    let message: String = sqlx::query_scalar("SELECT message FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(message, "0 calls imported into Old");
 }

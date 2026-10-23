@@ -33,6 +33,8 @@ pub enum Kind {
     ImportReview,
     /// Imports an older archive where it is, as a read-only location.
     Import,
+    /// Copies an import's calls into the main archive, as a move does.
+    Consolidate,
 }
 
 impl Kind {
@@ -47,6 +49,7 @@ impl Kind {
             Kind::PurgeBefore => "purge_before",
             Kind::ImportReview => "import_review",
             Kind::Import => "import",
+            Kind::Consolidate => "consolidate",
         }
     }
 
@@ -61,6 +64,7 @@ impl Kind {
             "purge_before" => Some(Kind::PurgeBefore),
             "import_review" => Some(Kind::ImportReview),
             "import" => Some(Kind::Import),
+            "consolidate" => Some(Kind::Consolidate),
             _ => None,
         }
     }
@@ -404,6 +408,9 @@ pub async fn step(
             }
             Some(Kind::Import) => {
                 crate::imports::import_step(&mut tx, pool, &job, context.file_limit).await?
+            }
+            Some(Kind::Consolidate) => {
+                crate::consolidate::step(&mut tx, &job, context.file_limit).await?
             }
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
