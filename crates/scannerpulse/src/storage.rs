@@ -38,6 +38,8 @@ pub struct Location {
     pub mode: String,
     /// The main archive: new calls are filed here.
     pub primary: bool,
+    /// An import's offset: its file names' times are moved by it.
+    pub offset_minutes: Option<i32>,
     /// What each host's ingest last found there.
     pub hosts: Vec<Seen>,
 }
@@ -490,8 +492,10 @@ async fn removable(conn: &mut PgConnection, id: i16) -> sqlx::Result<Result<Stri
 /// Every location, the main archive first, with what each host last found
 /// there.
 pub async fn list(conn: &mut PgConnection) -> sqlx::Result<Vec<Location>> {
-    let rows: Vec<(i16, String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, name, root, mode, is_primary FROM locations ORDER BY is_primary DESC, id",
+    let rows: Vec<(i16, String, String, String, bool, Option<i32>)> = sqlx::query_as(
+        "SELECT l.id, l.name, l.root, l.mode, l.is_primary, i.offset_minutes \
+         FROM locations l LEFT JOIN imports i ON i.location_id = l.id \
+         ORDER BY l.is_primary DESC, l.id",
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -531,12 +535,13 @@ pub async fn list(conn: &mut PgConnection) -> sqlx::Result<Vec<Location>> {
     .collect();
     Ok(rows
         .into_iter()
-        .map(|(id, name, root, mode, primary)| Location {
+        .map(|(id, name, root, mode, primary, offset_minutes)| Location {
             id,
             name,
             root,
             mode,
             primary,
+            offset_minutes,
             hosts: seen
                 .iter()
                 .filter(|(of, _)| *of == id)

@@ -425,7 +425,11 @@ pub async fn review(conn: &mut PgConnection, job: i64) -> sqlx::Result<Option<Re
             .await?;
     Ok(found
         .and_then(|work| serde_json::from_value::<Review>(work).ok())
-        .filter(|review| review.walked))
+        .filter(|review| review.walked)
+        .map(|review| Review {
+            sample: Vec::new(),
+            ..review
+        }))
 }
 
 /// Of `paths`, those the import `source_id` has taken: every row it has but
@@ -638,6 +642,106 @@ fn review_message(work: &Review) -> String {
         message.push_str(&format!("; suggested offset {}", offset_text(offset)));
     }
     message
+}
+
+/// A review as the command line shows it. Counts made on a sample are
+/// scaled to the files left, as "about".
+pub fn review_text(review: &Review) -> String {
+    let sampled = review.read > 0 && review.read < review.left;
+    let about = |n: i64| {
+        if sampled && n > 0 {
+            format!(
+                "about {}",
+                (n * review.left + review.read / 2) / review.read
+            )
+        } else {
+            n.to_string()
+        }
+    };
+    let mut text = format!(
+        "{}: {}\n  {}",
+        review.name,
+        review.folder,
+        counted(review.files, "mp3 file", "mp3 files")
+    );
+    if review.taken > 0 {
+        text.push_str(&format!("; {} taken by an earlier run", review.taken));
+    }
+    if review.no_date > 0 {
+        text.push_str(&format!(
+            "; {} with no date and time in their names, skipped",
+            review.no_date
+        ));
+    }
+    if review.bad_names > 0 {
+        text.push_str(&format!(
+            "; {} whose names are not UTF-8, skipped",
+            review.bad_names
+        ));
+    }
+    text.push('\n');
+    if review.read > 0 {
+        text.push_str(&format!(
+            "  of the {} left{}: {} new calls, {} copies of calls already in the archive (skipped), \
+             {} of systems not named yet (they wait), {} unreadable (skipped)\n",
+            review.left,
+            if sampled {
+                format!(", {} read", review.read)
+            } else {
+                String::new()
+            },
+            about(review.new),
+            about(review.copies),
+            about(review.unknown),
+            about(review.unreadable)
+        ));
+        if review.differ > 0 {
+            text.push_str(&format!(
+                "  {} new calls name their talkgroup otherwise: the names wait for approval\n",
+                about(review.differ)
+            ));
+        }
+        if review.before_purge > 0 {
+            text.push_str(&format!(
+                "  {} are from before the day this import was purged before (skipped)\n",
+                about(review.before_purge)
+            ));
+        }
+        let at: Vec<String> = OFFSETS
+            .iter()
+            .zip(&review.copies_at)
+            .map(|(offset, copies)| format!("{} {copies}", offset_text(*offset)))
+            .collect();
+        text.push_str(&format!("  copies at each offset: {}\n", at.join(", ")));
+    }
+    match (review.kept_offset, review.suggested) {
+        (Some(kept), _) => text.push_str(&format!(
+            "  this import keeps its offset, {}\n",
+            offset_text(kept)
+        )),
+        (None, Some(offset)) => text.push_str(&format!(
+            "  the files are copies once their times are moved by {0}: the older install's clock or zone was off; import with --offset {0}\n",
+            offset_text(offset)
+        )),
+        (None, None) => {}
+    }
+    let e = &review.examples;
+    for (what, list) in [
+        ("no date and time in the name", &e.no_date),
+        ("new", &e.new),
+        ("copies", &e.copies),
+        ("systems not named yet", &e.unknown),
+        ("talkgroups named otherwise", &e.differ),
+        ("unreadable", &e.unreadable),
+    ] {
+        if !list.is_empty() {
+            text.push_str(&format!("  {what}:\n"));
+            for line in list {
+                text.push_str(&format!("    {line}\n"));
+            }
+        }
+    }
+    text
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1077,5 +1181,34 @@ mod tests {
         assert_eq!(suggest(&[0, 0, 4, 7, 0]), None);
         assert_eq!(suggest(&[0, 0, 0, 4, 0]), None);
         assert_eq!(suggest(&[0, 0, 9, 6, 0]), None);
+    }
+
+    #[test]
+    fn a_reviews_sampled_counts_are_scaled_to_the_files_left() {
+        let review = Review {
+            name: "Old".into(),
+            folder: "/srv/old".into(),
+            files: 4003,
+            no_date: 3,
+            left: 4000,
+            read: 1000,
+            new: 600,
+            copies: 400,
+            copies_at: vec![0, 0, 400, 10, 0],
+            examples: Examples {
+                no_date: vec!["notes/readme.mp3".into()],
+                ..Examples::default()
+            },
+            suggested: None,
+            ..Review::default()
+        };
+        assert_eq!(
+            review_text(&review),
+            "Old: /srv/old\n  4003 mp3 files; 3 with no date and time in their names, skipped\n  \
+             of the 4000 left, 1000 read: about 2400 new calls, about 1600 copies of calls already in the archive (skipped), \
+             0 of systems not named yet (they wait), 0 unreadable (skipped)\n  \
+             copies at each offset: -02:00 0, -01:00 0, +00:00 400, +01:00 10, +02:00 0\n  \
+             no date and time in the name:\n    notes/readme.mp3\n"
+        );
     }
 }

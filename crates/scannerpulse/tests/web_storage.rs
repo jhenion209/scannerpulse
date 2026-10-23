@@ -250,3 +250,131 @@ async fn a_purge_is_counted_then_started_only_with_its_date_typed(pool: PgPool) 
         ("purge_before", Some(1), "ann")
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_import_is_reviewed_started_and_consolidated(pool: PgPool) {
+    use id3::TagLike;
+    let archive = tempfile::tempdir().unwrap();
+    seed_places(&pool, archive.path(), std::path::Path::new("/srv/in/live")).await;
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('time_zone', '\"America/Chicago\"')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let old = tempfile::tempdir().unwrap();
+    let mut tag = id3::Tag::new();
+    tag.set_title("702\"Fire\"");
+    tag.set_text("TIT1", "Metro");
+    std::fs::write(
+        old.path().join("20190301_130000_b.mp3"),
+        common::tagged(&tag, 100),
+    )
+    .unwrap();
+    let folder = old.path().to_str().unwrap();
+    let app = app(&pool);
+    let ask = Some(json!({"name": "Old", "folder": folder}));
+    let review = "/api/admin/storage/import/review";
+    assert_eq!(
+        send(&app, "POST", review, &[], ask.clone()).await.status,
+        401
+    );
+    admin(&pool, "ann", PASSWORD).await;
+    let (cookie, csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let run = || async {
+        let context = scannerpulse::jobs::Context::new(None);
+        while scannerpulse::jobs::step(&pool, "host-a", &context)
+            .await
+            .unwrap()
+            .is_some()
+        {}
+    };
+    // Reviewed first: the review writes nothing.
+    let started = send(&app, "POST", review, &h, ask).await;
+    assert_eq!(started.status, 201, "{:?}", started.body);
+    let job = started.body["job"].as_i64().unwrap();
+    run().await;
+    let found = send(&app, "GET", &format!("{review}/{job}"), &h, None).await;
+    assert_eq!(found.status, 200, "{:?}", found.body);
+    assert_eq!(
+        (found.body["files"].clone(), found.body["new"].clone()),
+        (json!(1), json!(1))
+    );
+    // Imported with an offset, typed as ±HH:MM.
+    let import = |offset: &str| Some(json!({"name": "Old", "folder": folder, "offset": offset}));
+    let wrong = send(&app, "POST", "/api/admin/storage/import", &h, import("1h")).await;
+    assert_eq!(wrong.status, 400);
+    assert!(
+        wrong.body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("not an offset"),
+        "{:?}",
+        wrong.body
+    );
+    let imported = send(
+        &app,
+        "POST",
+        "/api/admin/storage/import",
+        &h,
+        import("+01:00"),
+    )
+    .await;
+    assert_eq!(imported.status, 201, "{:?}", imported.body);
+    assert_eq!(imported.body["offset"], 60);
+    assert_eq!(imported.body["again"], false);
+    run().await;
+    // Its card says it is read-only and with which offset, and counts its call.
+    let listed = send(&app, "GET", "/api/admin/storage", &h, None).await;
+    let card = &listed.body["locations"][1];
+    assert_eq!(
+        (
+            &card["name"],
+            &card["mode"],
+            &card["offset_minutes"],
+            &card["calls"]
+        ),
+        (&json!("Old"), &json!("readonly"), &json!(60), &json!(1))
+    );
+    // Consolidated only once counted and with move typed.
+    let counted = send(
+        &app,
+        "GET",
+        "/api/admin/storage/consolidate?name=Old",
+        &h,
+        None,
+    )
+    .await;
+    assert_eq!(counted.status, 200, "{:?}", counted.body);
+    assert_eq!(
+        (&counted.body["calls"], &counted.body["refused"]),
+        (&json!(1), &serde_json::Value::Null)
+    );
+    let body = |confirm: &str| Some(json!({"name": "Old", "confirm": confirm}));
+    let wrong = send(
+        &app,
+        "POST",
+        "/api/admin/storage/consolidate",
+        &h,
+        body("yes"),
+    )
+    .await;
+    assert_eq!(wrong.status, 400);
+    assert_eq!(wrong.body["detail"], "type move to confirm");
+    let started = send(
+        &app,
+        "POST",
+        "/api/admin/storage/consolidate",
+        &h,
+        body("move"),
+    )
+    .await;
+    assert_eq!(started.status, 201, "{:?}", started.body);
+    assert_eq!(started.body["calls"], 1);
+    let job = started.body["job"].as_i64().unwrap();
+    let kind: String = sqlx::query_scalar("SELECT kind FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kind, "consolidate");
+}

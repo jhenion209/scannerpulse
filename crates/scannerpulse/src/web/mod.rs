@@ -346,6 +346,19 @@ pub fn router(state: AppState) -> Router {
             get(storage::purge_preview).post(storage::purge_start),
         )
         .route(
+            "/api/admin/storage/import/review",
+            post(storage::import_review_start),
+        )
+        .route(
+            "/api/admin/storage/import/review/{job}",
+            get(storage::import_review),
+        )
+        .route("/api/admin/storage/import", post(storage::import_start))
+        .route(
+            "/api/admin/storage/consolidate",
+            get(storage::consolidate_preview).post(storage::consolidate_start),
+        )
+        .route(
             "/api/admin/storage/{id}",
             axum::routing::delete(storage::remove),
         )

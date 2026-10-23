@@ -61,6 +61,8 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse storage remove NAME
        scannerpulse storage move FROM TO LOCATION [--confirm move]
        scannerpulse storage purge-before DAY [--confirm DAY]
+       scannerpulse storage import NAME FOLDER [--review | --offset ±HH:MM]
+       scannerpulse storage consolidate NAME [--confirm move]
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
        scannerpulse talkgroup rename SYSTEM/NUMBER NAME
@@ -437,6 +439,17 @@ enum StorageCommand {
         before: chrono::NaiveDate,
         confirm: Option<String>,
     },
+    /// Imports an older archive where it is; `review` reviews it only.
+    Import {
+        name: String,
+        folder: PathBuf,
+        review: bool,
+        offset: Option<i32>,
+    },
+    Consolidate {
+        name: String,
+        confirm: Option<String>,
+    },
 }
 
 /// What waits for the administrator: talkgroup name proposals and unknown
@@ -757,6 +770,29 @@ fn parse(args: &[&str]) -> Option<Command> {
             let found = flags(rest, &[], &["--confirm"], &[])?;
             Some(Command::Storage(StorageCommand::PurgeBefore {
                 before: before.parse().ok()?,
+                confirm: found.get("--confirm").map(|c| c.to_string()),
+            }))
+        }
+        ["storage", "import", name, folder, rest @ ..] => {
+            let found = flags(rest, &[], &["--offset"], &["--review"])?;
+            let review = found.contains_key("--review");
+            let offset = match found.get("--offset") {
+                // The review counts the copies at every offset itself.
+                Some(_) if review => return None,
+                Some(text) => Some(scannerpulse::imports::parse_offset(text).ok()?),
+                None => None,
+            };
+            Some(Command::Storage(StorageCommand::Import {
+                name: name.to_string(),
+                folder: PathBuf::from(folder),
+                review,
+                offset,
+            }))
+        }
+        ["storage", "consolidate", name, rest @ ..] => {
+            let found = flags(rest, &[], &["--confirm"], &[])?;
+            Some(Command::Storage(StorageCommand::Consolidate {
+                name: name.to_string(),
                 confirm: found.get("--confirm").map(|c| c.to_string()),
             }))
         }
@@ -1985,6 +2021,28 @@ fn typed(given: Option<String>, question: &str) -> std::io::Result<String> {
     Ok(answer.trim_end_matches(['\n', '\r']).to_string())
 }
 
+/// Waits for the job to end, printing its message as it changes. It runs
+/// where ingest runs; an interrupt ends the wait, not the job.
+async fn follow(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<scannerpulse::jobs::Job, Box<dyn std::error::Error>> {
+    let mut said = String::new();
+    loop {
+        let job = scannerpulse::jobs::get(&mut *conn, id)
+            .await?
+            .ok_or("the job is gone")?;
+        if job.message != said {
+            println!("  {}", job.message);
+            said.clone_from(&job.message);
+        }
+        if !matches!(job.state.as_str(), "queued" | "running") {
+            return Ok(job);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
 async fn storage_command(command: StorageCommand) -> CommandResult {
     use scannerpulse::setup::folders::size;
     use scannerpulse::{moves, storage};
@@ -2146,6 +2204,76 @@ async fn storage_command(command: StorageCommand) -> CommandResult {
             .await?;
             println!(
                 "job {job} is started: purge {} calls before {before}; `scannerpulse jobs show {job}` follows it",
+                preview.calls
+            );
+        }
+        StorageCommand::Import {
+            name,
+            folder,
+            review: true,
+            ..
+        } => {
+            use scannerpulse::imports;
+            let job =
+                imports::start_review(&mut conn, &name, &folder, &command_line_user()).await?;
+            println!(
+                "job {job} reviews {} where ingest runs; it writes nothing",
+                folder.display()
+            );
+            let ended = follow(&mut conn, job).await?;
+            if ended.state != "done" {
+                return Err(ended.message.into());
+            }
+            let review = imports::review(&mut conn, job)
+                .await?
+                .ok_or("the review has no answer")?;
+            print!("{}", imports::review_text(&review));
+        }
+        StorageCommand::Import {
+            name,
+            folder,
+            offset,
+            ..
+        } => {
+            use scannerpulse::imports;
+            let (job, started) =
+                imports::start(&mut conn, &name, &folder, offset, &command_line_user()).await?;
+            println!(
+                "job {job} is started: import {} as {name}{}, its times moved by {}; `scannerpulse jobs show {job}` follows it",
+                folder.display(),
+                if started.again {
+                    " again, taking only the files it has not taken"
+                } else {
+                    ""
+                },
+                imports::offset_text(started.offset)
+            );
+        }
+        StorageCommand::Consolidate { name, confirm } => {
+            use scannerpulse::consolidate;
+            let preview = consolidate::preview(&mut conn, &name).await?;
+            println!(
+                "{} calls of {name} would be copied into the main archive{}{}; {name}'s own files stay as they are",
+                preview.calls,
+                preview
+                    .bytes_about
+                    .map_or(String::new(), |b| format!(", about {}", size(b as u64))),
+                preview.free_bytes.map_or(String::new(), |f| format!(
+                    "; the main archive has {} free",
+                    size(f as u64)
+                ))
+            );
+            if let Some(why) = preview.refused {
+                return Err(why.into());
+            }
+            let confirm = typed(
+                confirm,
+                &format!("type {} to start: ", consolidate::CONFIRM),
+            )?;
+            let (job, preview) =
+                consolidate::start(&mut conn, &name, &confirm, &command_line_user()).await?;
+            println!(
+                "job {job} is started: copy {} calls of {name} into the main archive; `scannerpulse jobs show {job}` follows it",
                 preview.calls
             );
         }
@@ -3441,6 +3569,41 @@ mod tests {
             }))
         );
         assert_eq!(parse(&["storage", "purge-before", "January"]), None);
+        assert_eq!(
+            parse(&["storage", "import", "Old", "/srv/old", "--review"]),
+            Some(Command::Storage(StorageCommand::Import {
+                name: "Old".into(),
+                folder: PathBuf::from("/srv/old"),
+                review: true,
+                offset: None,
+            }))
+        );
+        assert_eq!(
+            parse(&["storage", "import", "Old", "/srv/old", "--offset", "-01:00"]),
+            Some(Command::Storage(StorageCommand::Import {
+                name: "Old".into(),
+                folder: PathBuf::from("/srv/old"),
+                review: false,
+                offset: Some(-60),
+            }))
+        );
+        assert_eq!(
+            parse(&["storage", "import", "Old", "/srv/old", "--offset", "1h"]),
+            None
+        );
+        assert_eq!(
+            parse(&[
+                "storage", "import", "Old", "/srv/old", "--review", "--offset", "+01:00"
+            ]),
+            None
+        );
+        assert_eq!(
+            parse(&["storage", "consolidate", "Old", "--confirm", "move"]),
+            Some(Command::Storage(StorageCommand::Consolidate {
+                name: "Old".into(),
+                confirm: Some("move".into()),
+            }))
+        );
         assert_eq!(
             parse(&["recorder", "list"]),
             Some(Command::Recorder(RecorderCommand::List))

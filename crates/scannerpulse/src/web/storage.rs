@@ -63,7 +63,8 @@ fn job_refused(error: JobError) -> ApiError {
 /// ended since `at`: the counts made then are out of date.
 async fn moved_since(pool: &sqlx::PgPool, at: DateTime<Utc>) -> sqlx::Result<bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM jobs WHERE kind IN ('move', 'purge', 'purge_before') AND finished_at > $1)",
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE kind IN ('move', 'purge', 'purge_before', 'import', 'consolidate') \
+                          AND finished_at > $1)",
     )
     .bind(at)
     .fetch_one(pool)
@@ -318,6 +319,146 @@ pub async fn move_start(
         format!(
             "started job {job}: move the {} calls of {} to {} into {}",
             preview.calls, body.from, body.until, body.to
+        ),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"job": job, "calls": preview.calls})),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportAsk {
+    pub name: String,
+    pub folder: String,
+}
+
+/// `POST /api/admin/storage/import/review`: starts the review of an older
+/// archive's folder, which writes nothing.
+pub async fn import_review_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Json(body): Json<ImportAsk>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let job = crate::imports::start_review(
+        &mut conn,
+        &body.name,
+        &PathBuf::from(&body.folder),
+        &admin.0.login,
+    )
+    .await
+    .map_err(job_refused)?;
+    record(
+        &admin,
+        format!("started job {job}: review {} for an import", body.folder),
+    );
+    Ok((StatusCode::CREATED, Json(json!({"job": job}))))
+}
+
+/// `GET /api/admin/storage/import/review/<job>`: what the review found, once
+/// it has walked the folder.
+pub async fn import_review(
+    _: Admin,
+    State(state): State<AppState>,
+    Path(job): Path<i64>,
+) -> Result<Json<crate::imports::Review>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    crate::imports::review(&mut conn, job)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::Missing(format!("review {job} has not walked its folder yet")))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportStart {
+    pub name: String,
+    pub folder: String,
+    /// `±HH:MM`; none: the offset the import keeps, or none at all.
+    pub offset: Option<String>,
+}
+
+/// `POST /api/admin/storage/import`: starts importing an older archive where
+/// it is, as a read-only location.
+pub async fn import_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Json(body): Json<ImportStart>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let offset = body
+        .offset
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .map(crate::imports::parse_offset)
+        .transpose()
+        .map_err(ApiError::BadRequest)?;
+    let mut conn = state.pool.acquire().await?;
+    let (job, started) = crate::imports::start(
+        &mut conn,
+        &body.name,
+        &PathBuf::from(&body.folder),
+        offset,
+        &admin.0.login,
+    )
+    .await
+    .map_err(job_refused)?;
+    *state.storage_counts.lock().await = None;
+    record(
+        &admin,
+        format!(
+            "started job {job}: import {} as {} (offset {})",
+            body.folder,
+            body.name,
+            crate::imports::offset_text(started.offset)
+        ),
+    );
+    let mut answer = json!(started);
+    answer["job"] = json!(job);
+    Ok((StatusCode::CREATED, Json(answer)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConsolidateAsk {
+    pub name: String,
+}
+
+/// `GET /api/admin/storage/consolidate?name=`: what consolidating the import
+/// would do. It changes nothing.
+pub async fn consolidate_preview(
+    _: Admin,
+    State(state): State<AppState>,
+    Query(ask): Query<ConsolidateAsk>,
+) -> Result<Json<crate::consolidate::ConsolidatePreview>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    crate::consolidate::preview(&mut conn, &ask.name)
+        .await
+        .map(Json)
+        .map_err(job_refused)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConsolidateStart {
+    pub name: String,
+    pub confirm: String,
+}
+
+/// `POST /api/admin/storage/consolidate`: starts the consolidation, with
+/// `move` typed.
+pub async fn consolidate_start(
+    admin: Admin,
+    State(state): State<AppState>,
+    Json(body): Json<ConsolidateStart>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let (job, preview) =
+        crate::consolidate::start(&mut conn, &body.name, &body.confirm, &admin.0.login)
+            .await
+            .map_err(job_refused)?;
+    record(
+        &admin,
+        format!(
+            "started job {job}: consolidate the {} calls of {} into the main archive",
+            preview.calls, body.name
         ),
     );
     Ok((
