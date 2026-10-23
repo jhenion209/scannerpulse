@@ -2,8 +2,8 @@
   import { callTime } from '../format';
   import { tell } from '../notice.svelte';
   import { siteZone } from '../status.svelte';
-  import { admin, why } from './session.svelte';
-  import { parseValue, showValue, type Setting } from './settings';
+  import { admin, can, isSuper, why } from './session.svelte';
+  import { parseValue, settingFunction, showValue, type Setting } from './settings';
 
   let { setting, onchanged }: {
     setting: Setting;
@@ -17,6 +17,11 @@
   let refusal = $state<string | null>(null);
   let busy = $state(false);
   const id = $derived(`setting-${setting.key.replaceAll('.', '-')}`);
+  /** Whether this admin may change it: otherwise it is only shown. */
+  const mine = $derived.by(() => {
+    const fn = settingFunction(setting.key);
+    return fn === null ? isSuper() : can(fn);
+  });
 
   async function change(remove: boolean) {
     refusal = null;
@@ -49,9 +54,9 @@
     {:else}Not set{/if}
   </p>
   <div class="row">
-    <input {id} bind:value={text} disabled={!setting.known} aria-describedby={refusal ? `${id}-refusal` : undefined} />
-    {#if setting.known}<button type="submit" disabled={busy}>Save</button>{/if}
-    {#if stored}<button type="button" disabled={busy} onclick={() => change(true)}>Remove</button>{/if}
+    <input {id} bind:value={text} disabled={!setting.known || !mine} aria-describedby={refusal ? `${id}-refusal` : undefined} />
+    {#if setting.known && mine}<button type="submit" disabled={busy}>Save</button>{/if}
+    {#if stored && mine}<button type="button" disabled={busy} onclick={() => change(true)}>Remove</button>{/if}
   </div>
   {#if refusal}<p class="problem" role="alert" id={`${id}-refusal`}>Not saved: {refusal}</p>{/if}
 </form>

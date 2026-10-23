@@ -12,7 +12,7 @@ test('the admins are listed with how they sign in', async ({ page }) => {
   await signIn(page, '#accounts');
   const me = card(page, 'e2e-admin');
   await expect(me.getByRole('heading')).toHaveText('e2e-admin (you)');
-  await expect(me).toContainText('Signs in with a password · enabled');
+  await expect(me).toContainText('super admin · signs in with a password · enabled');
   await expect(me.getByRole('button', { name: 'Disable e2e-admin (signs you out)' })).toBeVisible();
 });
 

@@ -4,7 +4,7 @@
   import { callTime, counted } from '../format';
   import { tell } from '../notice.svelte';
   import { siteZone } from '../status.svelte';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
   import { werText, type AsrReport, type AsrSet } from './improvement';
 
   let sets = $state<AsrSet[] | null>(null);
@@ -117,6 +117,7 @@
     </table>
   {/if}
 
+  {#if can('evaluation')}
   <h3>Run a candidate on {report.set}</h3>
   <form class="candidate" onsubmit={run}>
     <label for="candidate-server">Server</label>
@@ -132,6 +133,7 @@
     <div class="row"><button type="submit" class="primary" disabled={busy}>Start the run</button></div>
     {#if refusal}<p class="problem" role="alert">Not started: {refusal}</p>{/if}
   </form>
+  {/if}
 {/if}
 
 <style>

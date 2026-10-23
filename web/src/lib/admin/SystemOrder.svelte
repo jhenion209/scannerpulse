@@ -3,7 +3,7 @@
   // setting web.system_order, set by moving the systems up and down.
   import { onMount } from 'svelte';
   import { fetchFilterChoices } from '../api';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
   import { moved } from './settings';
 
   let { onsaved }: { onsaved: () => void } = $props();
@@ -60,12 +60,16 @@
     {#each order as name, index (name)}
       <li>
         <span class="name">{name}</span>
-        <button type="button" aria-label={`Move ${name} up`} disabled={index === 0} onclick={() => move(index, -1)}>Up</button>
-        <button type="button" aria-label={`Move ${name} down`} disabled={index === order.length - 1} onclick={() => move(index, 1)}>Down</button>
+        {#if can('settings')}
+          <button type="button" aria-label={`Move ${name} up`} disabled={index === 0} onclick={() => move(index, -1)}>Up</button>
+          <button type="button" aria-label={`Move ${name} down`} disabled={index === order.length - 1} onclick={() => move(index, 1)}>Down</button>
+        {/if}
       </li>
     {/each}
   </ol>
-  <div class="row"><button type="button" class="primary" disabled={!changed || busy} onclick={save}>Save the order</button></div>
+  {#if can('settings')}
+    <div class="row"><button type="button" class="primary" disabled={!changed || busy} onclick={save}>Save the order</button></div>
+  {/if}
   {#if answer}
     {#if answer.ok}<p role="status">{answer.text}</p>{:else}<p class="problem" role="alert">{answer.text}</p>{/if}
   {/if}

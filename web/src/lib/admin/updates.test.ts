@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canAsk, helperText, latestText, newestText, requestState, type HelperRequest, type UpdatesInfo } from './updates';
+import { canAsk, helperFunction, helperText, latestText, newestText, requestState, type HelperRequest, type UpdatesInfo } from './updates';
 
 const info = (over: Partial<UpdatesInfo> = {}): UpdatesInfo => ({
   running: '0.9.0',
@@ -23,6 +23,16 @@ const request = (over: Partial<HelperRequest> = {}): HelperRequest => ({
   ok: null,
   said: '',
   ...over,
+});
+
+describe('what asking the helper needs', () => {
+  it('is its own function for an update or a switchover, and convert for every step of the conversion', () => {
+    expect(helperFunction('update')).toBe('update');
+    expect(helperFunction('switchover')).toBe('switchover');
+    for (const kind of ['archive_check', 'archive_switch', 'db_move', 'db_switch', 'db_retire', 'second'] as const) {
+      expect(helperFunction(kind)).toBe('convert');
+    }
+  });
 });
 
 describe('updates in words', () => {

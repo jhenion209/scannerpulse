@@ -4,12 +4,15 @@ import { expect, type Page } from '@playwright/test';
 // signing in as them.
 
 export const ADMIN = { login: 'e2e-admin', password: 'e2e admin password' };
+/** An associate who may only move a date range. */
+export const ASSOCIATE = { login: 'e2e-associate', password: 'e2e associate password' };
 
-/** Opens the admin page (at `hash`, such as `#status`) and signs in. */
-export async function signIn(page: Page, hash = '') {
+/** Opens the admin page (at `hash`, such as `#status`) and signs in, as the
+ * super admin unless told otherwise. */
+export async function signIn(page: Page, hash = '', who = ADMIN) {
   await page.goto(`/admin${hash}`);
-  await page.getByLabel('Name').fill(ADMIN.login);
-  await page.getByLabel('Password').fill(ADMIN.password);
+  await page.getByLabel('Name').fill(who.login);
+  await page.getByLabel('Password').fill(who.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('navigation', { name: 'Admin areas', includeHidden: true })).toBeAttached();
 }

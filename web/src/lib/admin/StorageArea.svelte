@@ -4,7 +4,7 @@
   import { tell } from '../notice.svelte';
   import { siteZone } from '../status.svelte';
   import { STATUS_EVERY_MS } from './health';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
   import type { Job } from './jobs';
   import {
     CONFIRM,
@@ -328,15 +328,17 @@
             <dd>{seen.filter((s) => s.ok).map((s) => s.text).join(', ') || '—'}</dd>
           </dl>
           {#each seen.filter((s) => !s.ok) as trouble (trouble.host)}<p class="problem">{trouble.text}</p>{/each}
-          {#if l.mode === 'readonly' && l.offset_minutes !== null}
+          {#if l.mode === 'readonly' && l.offset_minutes !== null && (can('import') || can('consolidate'))}
             <div class="row">
-              <button type="button" aria-label={`Import again… ${l.name}`} onclick={() => importAgain(l)}>Import again…</button>
-              {#if l.calls > 0}
+              {#if can('import')}
+                <button type="button" aria-label={`Import again… ${l.name}`} onclick={() => importAgain(l)}>Import again…</button>
+              {/if}
+              {#if l.calls > 0 && can('consolidate')}
                 <button type="button" aria-label={`Consolidate… ${l.name}`} onclick={() => countConsolidate(l)}>Consolidate…</button>
               {/if}
             </div>
           {/if}
-          {#if !l.primary && l.calls === 0}
+          {#if !l.primary && l.calls === 0 && can('locations')}
             {#if removing === l.id}
               <p>Remove {l.name}? It holds no call; its folder is left as it is.</p>
               <div class="row">
@@ -355,11 +357,11 @@
   {/if}
 
   <div class="row actions">
-    <button type="button" aria-expanded={open === 'add'} onclick={() => show('add')}>Add a storage path…</button>
-    <button type="button" aria-expanded={open === 'move'} onclick={() => show('move')}>Move a date range…</button>
-    <button type="button" aria-expanded={open === 'import'} onclick={() => show('import')}>Import an older archive…</button>
+    {#if can('locations')}<button type="button" aria-expanded={open === 'add'} onclick={() => show('add')}>Add a storage path…</button>{/if}
+    {#if can('move')}<button type="button" aria-expanded={open === 'move'} onclick={() => show('move')}>Move a date range…</button>{/if}
+    {#if can('import')}<button type="button" aria-expanded={open === 'import'} onclick={() => show('import')}>Import an older archive…</button>{/if}
     <!-- Red and apart, far from the others: it deletes for good. -->
-    <button type="button" class="danger apart" aria-expanded={open === 'purge'} onclick={() => show('purge')}>Purge older than…</button>
+    {#if can('purge')}<button type="button" class="danger apart" aria-expanded={open === 'purge'} onclick={() => show('purge')}>Purge older than…</button>{/if}
   </div>
 
   {#if open === 'add'}

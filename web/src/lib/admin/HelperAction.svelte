@@ -5,8 +5,8 @@
   // helper said, read again every 2 s while it is open. Through an update's
   // restarts a read fails for a moment: the last one stays on screen.
   import { onMount } from 'svelte';
-  import { admin, why } from './session.svelte';
-  import { canAsk, latestText, requestState, type HelperKind, type UpdatesInfo } from './updates';
+  import { admin, can, why } from './session.svelte';
+  import { canAsk, helperFunction, latestText, requestState, type HelperKind, type UpdatesInfo } from './updates';
 
   let {
     kind,
@@ -60,7 +60,7 @@
   });
 </script>
 
-{#if info && allowed}
+{#if info && allowed && can(helperFunction(kind))}
   {#if asking}
     <div class="confirm" role="group" aria-label={label}>
       <p>{question}</p>

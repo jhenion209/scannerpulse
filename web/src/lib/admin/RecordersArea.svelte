@@ -27,7 +27,7 @@
     type SystemDecision,
     type Unknown,
   } from './recorders';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
   import TypedConfirm from './TypedConfirm.svelte';
   import { readWaiting, waiting } from './waiting.svelte';
 
@@ -182,7 +182,7 @@
               <button type="button" aria-label={`Preview ${r.name}`} disabled={previewing === r.id} onclick={() => preview(r)}>
                 Preview
               </button>
-              {#each changes(r) as change (change)}
+              {#each can('recorders') ? changes(r) : [] as change (change)}
                 <button type="button" aria-label={`${CHANGE_LABEL[change]} ${r.name}`}
                   onclick={() => (change === 'remove' ? (removing = r.id) : apply(r, change))}>
                   {CHANGE_LABEL[change]}
@@ -228,6 +228,7 @@
     </ul>
   {/if}
 
+  {#if can('recorders')}
   <h2>Add a recorder</h2>
   <p>
     Mount the recorder's share on every ScannerPulse machine first, where ScannerPulse can read it and delete the
@@ -247,6 +248,7 @@
     <div class="row"><button type="submit" class="primary" disabled={adding}>Add the recorder</button></div>
     {#if addRefusal}<p class="problem" role="alert">Not added: {addRefusal}</p>{/if}
   </form>
+  {/if}
 
   <h2>Waiting for you</h2>
   {#if waiting.error}<p class="problem" role="alert">What waits could not be read: {waiting.error}</p>{/if}
@@ -273,7 +275,7 @@
               <p>Discard {u.system}? Its {counted(u.files, 'staged file')} are deleted, and it stays unknown.</p>
               <TypedConfirm name={u.system} action="Discard its files" start={(confirm) => decideSystem(u, 'discard', { confirm })} />
               <div class="row"><button type="button" onclick={() => (discarding = null)}>Keep its files</button></div>
-            {:else}
+            {:else if can('names')}
               <div class="row">
                 <button type="button" aria-label={`New system ${u.system}`} onclick={() => decideSystem(u, 'new-system')}>New system</button>
                 <label class="same">Same as
@@ -307,10 +309,12 @@
               <dt>Calls</dt><dd>{p.calls.toLocaleString('en-US')}</dd>
               <dt>First / last seen</dt><dd>{seenText(p.first_seen, p.last_seen, now, siteZone())}</dd>
             </dl>
-            <div class="row">
-              <button type="button" aria-label={`Approve ${p.proposed}`} onclick={() => decideName(p, 'approve')}>Approve</button>
-              <button type="button" aria-label={`Dismiss ${p.proposed}`} onclick={() => decideName(p, 'dismiss')}>Dismiss</button>
-            </div>
+            {#if can('names')}
+              <div class="row">
+                <button type="button" aria-label={`Approve ${p.proposed}`} onclick={() => decideName(p, 'approve')}>Approve</button>
+                <button type="button" aria-label={`Dismiss ${p.proposed}`} onclick={() => decideName(p, 'dismiss')}>Dismiss</button>
+              </div>
+            {/if}
             {#if nameRefusals[proposalKey(p)]}<p class="problem" role="alert">Not decided: {nameRefusals[proposalKey(p)]}</p>{/if}
           </li>
         {/each}

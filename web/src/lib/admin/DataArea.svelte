@@ -3,7 +3,7 @@
   import { ApiError } from '../api';
   import { counted } from '../format';
   import { tell } from '../notice.svelte';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
   import {
     correctText, mergeText, purgeText, takenBy,
     type CorrectPreview, type MergePreview, type PurgePreview, type Started, type Uncorrected,
@@ -239,6 +239,7 @@
   </p>
   {#if problem}<p class="problem" role="alert">The talkgroups could not be read: {problem}</p>{/if}
 
+  {#if can('rename')}
   <h2>Rename</h2>
   <p>
     Calls show the new name at once; their files keep the old one until they are corrected. A recorder that still
@@ -256,9 +257,10 @@
     {#if renamed}<p role="status">{renamed}</p>{/if}
     {#if renameRefusal}
       <p class="problem" role="alert">Not renamed: {renameRefusal}</p>
-      {#if taken}<div class="row"><button type="button" onclick={mergeIntoTaken}>Merge into it</button></div>{/if}
+      {#if taken && can('merge')}<div class="row"><button type="button" onclick={mergeIntoTaken}>Merge into it</button></div>{/if}
     {/if}
   </form>
+  {/if}
 
   <h2 tabindex="-1" bind:this={correctHeading}>Files not yet corrected</h2>
   <p>
@@ -281,7 +283,7 @@
             <td>{t.system} {t.number}</td>
             <td class="long">{t.files_name ?? '—'}</td>
             <td class="num">{t.calls.toLocaleString('en-US')}</td>
-            <td><button type="button" aria-label={`Correct the files of ${t.name} (${t.system} ${t.number})`} onclick={() => countCorrect(t.id)}>Correct</button></td>
+            <td>{#if can('correct')}<button type="button" aria-label={`Correct the files of ${t.name} (${t.system} ${t.number})`} onclick={() => countCorrect(t.id)}>Correct</button>{/if}</td>
           </tr>
         {/each}
       </tbody>
@@ -293,6 +295,7 @@
   {/if}
   {#if correctRefusal}<p class="problem" role="alert">Not corrected: {correctRefusal}</p>{/if}
 
+  {#if can('merge')}
   <h2>Merge</h2>
   <p>The calls of one talkgroup go to another of the same system, and their files are corrected; the first talkgroup goes.</p>
   <form class="grid" onsubmit={(event) => { event.preventDefault(); void countMerge(); }}>
@@ -313,7 +316,9 @@
     {#key mergePreview}<TypedConfirm name={mergePreview.from.name} action="Merge" start={startMerge} />{/key}
   {/if}
   {#if mergeRefusal}<p class="problem" role="alert">Not merged: {mergeRefusal}</p>{/if}
+  {/if}
 
+  {#if can('purge-talkgroup')}
   <h2>Purge</h2>
   <p>
     A purge deletes a talkgroup's calls; their files go to the holding folder, the setting
@@ -338,6 +343,7 @@
     {/if}
   {/if}
   {#if purgeRefusal}<p class="problem" role="alert">Not purged: {purgeRefusal}</p>{/if}
+  {/if}
 </section>
 
 <style>

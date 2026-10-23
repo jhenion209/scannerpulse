@@ -4,7 +4,7 @@
   import { tell } from '../notice.svelte';
   import FavoriteEditor from './FavoriteEditor.svelte';
   import { talkgroupNames } from './favorites';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
 
   let favorites = $state<Favorite[] | null>(null);
   let groups = $state<TalkgroupGroup[]>([]);
@@ -63,7 +63,7 @@
           {#if editing === favorite.name}
             <FavoriteEditor id={`edit-${favorite.id}`} name={favorite.name} chosen={favorite.talkgroups} {groups}
               onsave={save} oncancel={() => (editing = null)} />
-          {:else}
+          {:else if can('favorites')}
             <div class="row">
               <button type="button" onclick={() => (editing = favorite.name)}>Edit {favorite.name}</button>
               {#if deleting === favorite.name}
@@ -80,8 +80,10 @@
     </ul>
   {/if}
 
-  <h2>A new list</h2>
-  <FavoriteEditor id="new-list" {groups} taken={favorites?.map((f) => f.name) ?? null} onsave={save} />
+  {#if can('favorites')}
+    <h2>A new list</h2>
+    <FavoriteEditor id="new-list" {groups} taken={favorites?.map((f) => f.name) ?? null} onsave={save} />
+  {/if}
 </section>
 
 <style>

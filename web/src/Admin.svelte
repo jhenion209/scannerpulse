@@ -97,7 +97,7 @@
       </button>
       <span class="name"><Logo />ScannerPulse · Admin</span>
       <span class="spacer"></span>
-      <span class="who">{session.login}</span>
+      <span class="who">{session.login}{session.role === 'associate' ? ' · associate' : ''}</span>
       <button type="button" class="out" onclick={leave}>Sign out</button>
       <ThemeSwitch bind:theme={prefs.theme} />
       <a class="calls" href="/">Calls</a>

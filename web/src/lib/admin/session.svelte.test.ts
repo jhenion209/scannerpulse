@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { admin, checkSession, session, signIn, signOut } from './session.svelte';
+import { admin, can, checkSession, isSuper, session, signIn, signOut } from './session.svelte';
 
 const answer = (status: number, body?: unknown) =>
   new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -8,7 +8,7 @@ const fetched = vi.fn<typeof fetch>();
 beforeEach(() => {
   vi.stubGlobal('fetch', fetched);
   fetched.mockReset();
-  Object.assign(session, { checked: false, login: null, csrf: '', ended: false });
+  Object.assign(session, { checked: false, login: null, csrf: '', ended: false, role: 'associate', functions: [] });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -42,6 +42,15 @@ describe('signing in', () => {
     await signIn('ann', 'right password');
     expect(sent(1)).toMatchObject({ path: '/api/auth/login', method: 'POST', body: JSON.stringify({ login: 'ann', password: 'right password' }) });
     expect(session).toMatchObject({ login: 'ann', csrf: 't2' });
+  });
+
+  it('knows what the admin may change: an associate what is on, a super admin everything', async () => {
+    fetched.mockResolvedValueOnce(answer(200, { login: 'cy', csrf: 't1', role: 'associate', functions: ['move'] }));
+    await checkSession();
+    expect([isSuper(), can('move'), can('purge')]).toEqual([false, true, false]);
+    fetched.mockResolvedValueOnce(answer(200, { login: 'ann', csrf: 't2', role: 'super', functions: ['move', 'purge'] }));
+    await signIn('ann', 'right password');
+    expect([isSuper(), can('move'), can('purge')]).toEqual([true, true, true]);
   });
 
   it('forgets the session on signing out', async () => {
@@ -102,6 +111,17 @@ describe('an admin request', () => {
     expect(fetched).toHaveBeenCalledTimes(2);
     // The page does not take the other admin's place: a change is never made in their name.
     expect(session).toMatchObject({ login: 'ann', csrf: 'tok' });
+  });
+
+  it('learns from a refused change that a function is off, and stops offering it', async () => {
+    Object.assign(session, { role: 'associate', functions: ['rescan', 'move'] });
+    fetched
+      .mockResolvedValueOnce(answer(403, { error: 'forbidden', detail: '"Rescan" is off for ann: a super admin can turn it on in Accounts' }))
+      .mockResolvedValueOnce(answer(200, { login: 'ann', csrf: 'tok', role: 'associate', functions: ['move'] }));
+    await expect(admin('POST', '/api/admin/rescan')).rejects.toThrow('"Rescan" is off for ann');
+    expect(fetched).toHaveBeenCalledTimes(2);
+    expect(can('rescan')).toBe(false);
+    expect(can('move')).toBe(true);
   });
 
   it('gives a refusal that is not about the token in the server words, without trying again', async () => {

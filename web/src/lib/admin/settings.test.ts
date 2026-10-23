@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { moved, parseValue, showValue, withPrefix, type Setting } from './settings';
+import { moved, parseValue, settingFunction, showValue, withPrefix, type Setting } from './settings';
 
 describe('a typed value', () => {
   it('is JSON when it reads as JSON', () => {
@@ -39,6 +39,14 @@ describe('a group of settings', () => {
   it('is the settings under one prefix', () => {
     const rows: Setting[] = ['oidc.issuer', 'oidc.client_id', 'time_zone'].map((key) => ({ key, value: null, updated_at: null, known: true }));
     expect(withPrefix(rows, 'oidc.').map((s) => s.key)).toEqual(['oidc.issuer', 'oidc.client_id']);
+  });
+});
+
+describe('who may change a setting', () => {
+  it('is a super admin for the sign-in settings, Maintenance for maintenance, Settings for the rest', () => {
+    for (const key of ['auth.password_signin', 'oidc.issuer', 'web.trusted_proxies']) expect(settingFunction(key)).toBeNull();
+    expect(settingFunction('maintenance.enabled')).toBe('maintenance');
+    expect(settingFunction('web.system_order')).toBe('settings');
   });
 });
 

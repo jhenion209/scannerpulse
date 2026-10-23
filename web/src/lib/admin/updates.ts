@@ -17,6 +17,10 @@ export const HELPER_KINDS = {
 
 export type HelperKind = keyof typeof HELPER_KINDS;
 
+/** The function an admin needs to ask for it: every step of the conversion
+ * is `convert`. */
+export const helperFunction = (kind: HelperKind) => (kind === 'update' || kind === 'switchover' ? kind : 'convert');
+
 export interface HelperRequest {
   id: number;
   kind: HelperKind;

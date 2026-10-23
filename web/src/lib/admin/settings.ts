@@ -37,6 +37,13 @@ export const showValue = (value: unknown) =>
     : JSON.stringify(value);
 
 /** The settings whose key starts with `prefix`. */
+/** The function a change of the setting needs; `null` for a setting that
+ * decides who signs in, which only a super admin changes. */
+export function settingFunction(key: string): string | null {
+  if (key.startsWith('oidc.') || key === 'auth.password_signin' || key === 'web.trusted_proxies') return null;
+  return key === 'maintenance.enabled' ? 'maintenance' : 'settings';
+}
+
 export const withPrefix = (settings: Setting[], prefix: string) => settings.filter((s) => s.key.startsWith(prefix));
 
 /** The list with the item at `index` swapped with its neighbour `by` away;

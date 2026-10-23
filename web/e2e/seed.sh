@@ -10,6 +10,9 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -o /dev/null -v archive="$archive" -f
 # The admin the admin page's tests sign in as (e2e/admin.ts); the password is
 # made up for the tests.
 printf 'e2e admin password\ne2e admin password\n' | "$binary" admin add e2e-admin >/dev/null
+# An associate who may only move a date range (e2e/roles.spec.ts).
+printf 'e2e associate password\ne2e associate password\n' | "$binary" admin add e2e-associate --associate >/dev/null
+"$binary" admin allow e2e-associate move >/dev/null
 # 56 silent MPEG-2 layer III frames (16 kHz mono, 36 ms each): about 2 s.
 python3 - "$archive/e2e" <<'PY'
 import sys

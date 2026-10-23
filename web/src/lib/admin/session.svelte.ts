@@ -11,15 +11,36 @@ export const session = $state({
   csrf: '',
   /** The session ended while the page was open (it expired, or was ended elsewhere). */
   ended: false,
+  /** `super` may change everything; an `associate` only the functions on. */
+  role: 'associate' as 'super' | 'associate',
+  /** The functions the admin may use, by name: every one for a super admin. */
+  functions: [] as string[],
 });
+
+/** Who the server says is signed in, and what they may change. */
+export interface Me {
+  login: string;
+  csrf: string;
+  role?: 'super' | 'associate';
+  functions?: string[];
+}
 
 const JSON_ONLY = { accept: 'application/json' };
 
-function signedIn(me: { login: string; csrf: string }) {
+function signedIn(me: Me) {
   session.login = me.login;
   session.csrf = me.csrf;
   session.ended = false;
+  session.role = me.role ?? 'associate';
+  session.functions = me.functions ?? [];
 }
+
+/** Whether the signed-in admin may use the function (`move`, `purge`…):
+ * the page shows a change only to an admin the server would let make it. */
+export const can = (fn: string) => session.functions.includes(fn);
+
+/** Whether the signed-in admin is a super admin. */
+export const isSuper = () => session.role === 'super';
 
 /** Reads who is signed in; throws only when the server cannot say. */
 export async function checkSession(): Promise<void> {
@@ -46,6 +67,7 @@ export async function signOut(): Promise<void> {
   if (!response.ok) throw await apiError(response);
   session.login = null;
   session.csrf = '';
+  session.functions = [];
 }
 
 /** An admin request, JSON both ways; the answer's body, or undefined when it
@@ -69,11 +91,13 @@ export async function admin<T = undefined>(
   if (response.status === 403 && method !== 'GET') {
     const me = await fetch('/api/auth/me', { headers: JSON_ONLY });
     if (me.ok) {
-      const fresh = await me.json();
+      const fresh: Me = await me.json();
       // Another admin signed in on this browser: the change is not made in their name.
       if (fresh.login !== session.login) throw new Error('another admin signed in on this browser; sign in again');
+      // A refusal may come from a function a super admin turned off: the
+      // page then stops offering it.
+      signedIn(fresh);
       if (fresh.csrf !== headers['x-csrf-token']) {
-        signedIn(fresh);
         headers['x-csrf-token'] = fresh.csrf;
         response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
       }

@@ -3,7 +3,7 @@
   import { counted } from '../format';
   import { tell } from '../notice.svelte';
   import ImprovementSection from './ImprovementSection.svelte';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
   import {
     matchTalkgroups, previewText, queueBody, queueQuery, retriedText, type AdminTalkgroup, type QueueFields,
   } from './transcription';
@@ -136,7 +136,7 @@
             <td class="long">{talkgroup.name}</td>
             <td>
               <input type="checkbox" aria-label={`Transcribe ${talkgroup.name} (${talkgroup.system} ${talkgroup.number})`}
-                checked={talkgroup.transcribe} onchange={(event) => setSwitch(talkgroup, event.currentTarget)} />
+                checked={talkgroup.transcribe} disabled={!can('transcribe')} onchange={(event) => setSwitch(talkgroup, event.currentTarget)} />
               {#if refusals[talkgroup.id]}<p class="problem" role="alert">Not changed: {refusals[talkgroup.id]}</p>{/if}
             </td>
           </tr>
@@ -145,6 +145,7 @@
     </table>
   {/if}
 
+  {#if can('queue')}
   <h2>Queue past calls</h2>
   <form class="queue" onsubmit={count}>
     <label for="queue-talkgroup">Talkgroup</label>
@@ -174,6 +175,7 @@
   <button type="button" disabled={retrying} onclick={retry}>Try the failed calls again</button>
   {#if retried}<p role="status">{retried}</p>{/if}
   {#if retryRefusal}<p class="problem" role="alert">The failed calls were not put back: {retryRefusal}</p>{/if}
+  {/if}
 
   <ImprovementSection />
 </section>

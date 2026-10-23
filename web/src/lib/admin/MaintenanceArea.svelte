@@ -5,7 +5,7 @@
   import { etaText } from '../status';
   import { drainedPercent } from './drain';
   import { STATUS_EVERY_MS } from './health';
-  import { admin, why } from './session.svelte';
+  import { admin, can, why } from './session.svelte';
 
   let data = $state<Status | null>(null);
   let problem = $state<string | null>(null);
@@ -70,18 +70,22 @@
   <h2>Maintenance</h2>
   {#if data}
     <p>Maintenance is <b>{data.maintenance ? 'on' : 'off'}</b>.</p>
-    <button type="button" class="primary" disabled={busy} onclick={() => setMaintenance(!data!.maintenance)}>
-      {data.maintenance ? 'Turn maintenance off' : 'Turn maintenance on'}
-    </button>
+    {#if can('maintenance')}
+      <button type="button" class="primary" disabled={busy} onclick={() => setMaintenance(!data!.maintenance)}>
+        {data.maintenance ? 'Turn maintenance off' : 'Turn maintenance on'}
+      </button>
+    {/if}
     {#if refusal}<p class="problem" role="alert">Maintenance was not changed: {refusal}</p>{/if}
   {:else}
     <p class="empty">Reading…</p>
   {/if}
 
-  <h2>Rescan the sources</h2>
-  <p>Ingest lists its sources every few seconds; this asks every running ingest to list them at once.</p>
-  <button type="button" onclick={rescan}>Rescan now</button>
-  {#if rescanRefusal}<p class="problem" role="alert">The rescan was not asked for: {rescanRefusal}</p>{/if}
+  {#if can('rescan')}
+    <h2>Rescan the sources</h2>
+    <p>Ingest lists its sources every few seconds; this asks every running ingest to list them at once.</p>
+    <button type="button" onclick={rescan}>Rescan now</button>
+    {#if rescanRefusal}<p class="problem" role="alert">The rescan was not asked for: {rescanRefusal}</p>{/if}
+  {/if}
 
   <h2>Transcription queue</h2>
   {#if data}

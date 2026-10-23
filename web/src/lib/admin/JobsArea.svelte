@@ -3,7 +3,7 @@
   import { siteZone } from '../status.svelte';
   import { canStop, kindName, percent, progressText, stateText, waitingFor, type Job } from './jobs';
   import { jobs, readJobs } from './jobs.svelte';
-  import { admin, why } from './session.svelte';
+  import { admin, can, session, why } from './session.svelte';
 
   // A refusal or an answer beside the job whose Stop asked for it.
   let answers = $state<Record<number, { text: string; refused: boolean }>>({});
@@ -60,7 +60,7 @@
             {#if job.finished_at}<dt>Ended</dt><dd>{when(job.finished_at)}</dd>
             {:else if job.updated_at}<dt>Last step</dt><dd>{when(job.updated_at)}</dd>{/if}
           </dl>
-          {#if canStop(job)}
+          {#if canStop(job) && (can('stop-jobs') || job.started_by === session.login)}
             <button type="button" disabled={stopping === job.id} onclick={() => stop(job)}>Stop job #{job.id}</button>
           {/if}
           {#if answers[job.id]}
