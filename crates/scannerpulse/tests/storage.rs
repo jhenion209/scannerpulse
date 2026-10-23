@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
 use common::{insert_call, seed_places};
-use scannerpulse::storage::{self, Refused};
+use scannerpulse::storage::{self, Mounted, Refused};
 use sqlx::PgPool;
 
 /// A check that accepts any folder as it is written.
@@ -188,8 +188,8 @@ async fn each_host_says_whether_it_can_use_each_location(pool: PgPool) {
     assert_eq!(
         storage::to_check(&pool).await.unwrap(),
         [
-            (places.0, PathBuf::from("/srv/archive"), false),
-            (cold, PathBuf::from("/srv/cold"), true),
+            (places.0, PathBuf::from("/srv/archive"), Mounted::Always),
+            (cold, PathBuf::from("/srv/cold"), Mounted::Marker),
         ]
     );
     let why = storage::unusable(&mut conn, cold, "Cold")
@@ -293,6 +293,45 @@ async fn a_host_checks_every_location_and_one_not_mounted_is_unusable(pool: PgPo
     let listed = storage::list(&mut conn).await.unwrap();
     assert!(listed[1].hosts[0].ok && listed[1].hosts[0].free_bytes.unwrap() > 0);
     assert!(!listed[2].hosts[0].ok);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_read_only_location_is_checked_by_its_files_and_never_written(pool: PgPool) {
+    let (archive, old, bare) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    seed_places(&pool, archive.path(), Path::new("/srv/in/live")).await;
+    std::fs::create_dir(old.path().join("2019-03-01")).unwrap();
+    std::fs::write(old.path().join("2019-03-01/20190301_120000.mp3"), b"x").unwrap();
+    for (name, root) in [("Old", old.path()), ("Bare", bare.path())] {
+        sqlx::query("INSERT INTO locations (name, root, mode) VALUES ($1, $2, 'readonly')")
+            .bind(name)
+            .bind(root.display().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let before = std::fs::metadata(old.path()).unwrap().modified().unwrap();
+    let mut hung = scannerpulse::watcher::Hung::default();
+    let found = storage::check_all(
+        storage::to_check(&pool).await.unwrap(),
+        "host-a",
+        &mut hung,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    // An older archive imported where it is holds no marker, and nothing is
+    // written in it: its files show that it is mounted.
+    assert!(found[1].1.is_ok(), "{:?}", found[1].1);
+    assert_eq!(
+        std::fs::metadata(old.path()).unwrap().modified().unwrap(),
+        before
+    );
+    // An empty folder is a mount point with nothing mounted on it.
+    let why = found[2].1.as_ref().unwrap_err();
+    assert!(why.contains("not mounted"), "{why}");
 }
 
 #[sqlx::test(migrations = "./migrations")]

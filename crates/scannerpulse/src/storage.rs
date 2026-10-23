@@ -144,23 +144,55 @@ pub fn check_here(folder: &Path, name: &str) -> Result<PathBuf, String> {
 /// use it.
 pub type Found = Result<(u64, u64), String>;
 
-/// What `host` finds in a location now: the free and the total bytes of its
-/// disk, once it has listed the folder, found its marker (`marked`: every
-/// location but the main archive has one) and written and removed a file
-/// there; or why it cannot use it.
-pub fn probe(root: &Path, marked: bool, host: &str) -> Found {
-    std::fs::read_dir(root)
-        .map_err(|error| format!("{} cannot be listed: {error}", root.display()))?;
-    if marked && !root.join(MARKER).is_file() {
-        return Err(format!(
-            "{} has no {MARKER} file: the disk or share is not mounted there",
-            root.display()
-        ));
+/// What shows that a location's disk or share is mounted: nothing for the
+/// main archive, its marker for a location an administrator added, and its
+/// files for an older archive imported where it is, in which nothing is
+/// ever written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mounted {
+    Always,
+    Marker,
+    Files,
+}
+
+impl Mounted {
+    fn of(primary: bool, mode: &str) -> Mounted {
+        match (primary, mode) {
+            (true, _) => Mounted::Always,
+            (false, "readonly") => Mounted::Files,
+            (false, _) => Mounted::Marker,
+        }
     }
-    let reach = root.join(format!(".scannerpulse-reach-{host}"));
-    std::fs::write(&reach, b"")
-        .and_then(|()| std::fs::remove_file(&reach))
-        .map_err(|error| format!("{} cannot be written: {error}", root.display()))?;
+}
+
+/// What `host` finds in a location now: the free and the total bytes of its
+/// disk, once it has listed the folder, found it mounted (`mounted`) and,
+/// unless it is read-only, written and removed a file there; or why it
+/// cannot use it.
+pub fn probe(root: &Path, mounted: Mounted, host: &str) -> Found {
+    let mut entries = std::fs::read_dir(root)
+        .map_err(|error| format!("{} cannot be listed: {error}", root.display()))?;
+    match mounted {
+        Mounted::Marker if !root.join(MARKER).is_file() => {
+            return Err(format!(
+                "{} has no {MARKER} file: the disk or share is not mounted there",
+                root.display()
+            ));
+        }
+        Mounted::Files if entries.next().is_none() => {
+            return Err(format!(
+                "{} is empty: the disk or share is not mounted there",
+                root.display()
+            ));
+        }
+        _ => {}
+    }
+    if mounted != Mounted::Files {
+        let reach = root.join(format!(".scannerpulse-reach-{host}"));
+        std::fs::write(&reach, b"")
+            .and_then(|()| std::fs::remove_file(&reach))
+            .map_err(|error| format!("{} cannot be written: {error}", root.display()))?;
+    }
     let stats =
         rustix::fs::statvfs(root).map_err(|error| format!("{}: {error}", root.display()))?;
     Ok((
@@ -173,7 +205,7 @@ pub fn probe(root: &Path, marked: bool, host: &str) -> Found {
 /// its own for `limit` at most: a hung share holds up no other location, and
 /// is not read again until its read has ended.
 pub async fn check_all(
-    locations: Vec<(i16, PathBuf, bool)>,
+    locations: Vec<(i16, PathBuf, Mounted)>,
     host: &str,
     hung: &mut crate::watcher::Hung,
     limit: Duration,
@@ -181,10 +213,10 @@ pub async fn check_all(
     let ids: Vec<i16> = locations.iter().map(|(id, ..)| *id).collect();
     let jobs = locations
         .into_iter()
-        .map(|(_, root, marked)| {
+        .map(|(_, root, mounted)| {
             let (path, host) = (root.clone(), host.to_string());
             let work: crate::watcher::Job<Found> =
-                Box::new(move || Ok(probe(&path, marked, &host)));
+                Box::new(move || Ok(probe(&path, mounted, &host)));
             (root, work)
         })
         .collect();
@@ -550,16 +582,16 @@ pub async fn record_health(
     Ok(())
 }
 
-/// The locations each host's ingest checks: id, root and whether it holds a
-/// marker.
-pub async fn to_check(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<(i16, PathBuf, bool)>> {
-    let rows: Vec<(i16, String, bool)> =
-        sqlx::query_as("SELECT id, root, NOT is_primary FROM locations ORDER BY id")
+/// The locations each host's ingest checks: id, root and what shows it is
+/// mounted.
+pub async fn to_check(db: impl PgExecutor<'_>) -> sqlx::Result<Vec<(i16, PathBuf, Mounted)>> {
+    let rows: Vec<(i16, String, bool, String)> =
+        sqlx::query_as("SELECT id, root, is_primary, mode FROM locations ORDER BY id")
             .fetch_all(db)
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, root, marked)| (id, root.into(), marked))
+        .map(|(id, root, primary, mode)| (id, root.into(), Mounted::of(primary, &mode)))
         .collect())
 }
 
@@ -653,7 +685,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let real = check_here(dir.path(), "Cold").unwrap();
         assert!(real.join(MARKER).is_file());
-        let (free, total) = probe(&real, true, "host-a").unwrap();
+        let (free, total) = probe(&real, Mounted::Marker, "host-a").unwrap();
         assert!(free > 0 && total >= free);
         assert!(!real.join(".scannerpulse-reach-host-a").exists());
         assert!(
@@ -672,12 +704,12 @@ mod tests {
     fn a_location_without_its_marker_is_not_mounted() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            probe(dir.path(), true, "host-a")
+            probe(dir.path(), Mounted::Marker, "host-a")
                 .unwrap_err()
                 .contains("not mounted")
         );
         // The main archive has no marker.
-        assert!(probe(dir.path(), false, "host-a").is_ok());
+        assert!(probe(dir.path(), Mounted::Always, "host-a").is_ok());
     }
 
     #[test]
