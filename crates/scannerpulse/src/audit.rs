@@ -5,6 +5,8 @@
 //! limit. It is read in the terminal (`scannerpulse audit`), not on the
 //! admin page.
 
+use std::path::Path;
+
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
@@ -28,7 +30,22 @@ pub async fn keep(
 /// The entry's line in the journal.
 pub fn journal(actor: &str, address: Option<&str>, what: &str) {
     let from = address.map(|a| format!(" from {a}")).unwrap_or_default();
-    crate::log::info(format!("audit: {actor}{from}: {what}"));
+    crate::log::info(shown(&format!("audit: {actor}{from}: {what}")));
+}
+
+/// Text as it is shown, in a terminal or the journal: a control character,
+/// which an admin may have typed into what an entry quotes, written out
+/// (`\u{1b}`), never sent as itself. The entry keeps the text as it was.
+fn shown(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Records a change already made: its line in the journal, then its entry.
@@ -41,18 +58,38 @@ pub async fn record(db: impl sqlx::PgExecutor<'_>, actor: &str, address: Option<
     }
 }
 
-/// Records a command's change, run on this machine: its entry, then its
-/// line in this machine's journal through the system's log socket (a
-/// command's own error output is the terminal).
-pub async fn record_command(db: impl sqlx::PgExecutor<'_>, what: &str) -> sqlx::Result<()> {
+/// The system's log socket: a command's lines reach this machine's journal
+/// through it (a command's own error output is the terminal).
+pub const LOG_SOCKET: &str = "/dev/log";
+
+/// Records a command's change, run on this machine: its line in this
+/// machine's journal through the log socket `socket`, then its entry in `db`
+/// (the database, or why it did not answer). A lost entry is a line in the
+/// journal too, as `record` writes one.
+pub async fn record_command(
+    socket: &Path,
+    db: Result<&mut sqlx::PgConnection, String>,
+    what: &str,
+) -> Result<(), String> {
     let actor = command_actor();
-    keep(db, &actor, None, what).await?;
-    if let Ok(socket) = std::os::unix::net::UnixDatagram::unbound() {
-        // user.info, as syslog(3) would send it.
-        let line = format!("<14>scannerpulse: audit: {actor}: {what}");
-        let _ = socket.send_to(line.as_bytes(), "/dev/log");
+    let send = |priority: u8, line: String| {
+        if let Ok(log) = std::os::unix::net::UnixDatagram::unbound() {
+            let line = format!("<{priority}>scannerpulse: {}", shown(&line));
+            let _ = log.send_to(line.as_bytes(), socket);
+        }
+    };
+    // user.info and user.err, as syslog(3) would send them.
+    send(14, format!("audit: {actor}: {what}"));
+    let kept = match db {
+        Ok(conn) => keep(conn, &actor, None, what)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(why) => Err(why),
+    };
+    if let Err(why) = &kept {
+        send(11, format!("audit: the entry above was not kept: {why}"));
     }
-    Ok(())
+    kept
 }
 
 /// Who runs a command on this machine: "<account> on <machine>".
@@ -125,7 +162,7 @@ pub fn line(entry: &Entry, zone: Tz) -> String {
         .as_deref()
         .map(|a| format!(" from {a}"))
         .unwrap_or_default();
-    format!("{at}  {}{from}: {}", entry.actor, entry.what)
+    shown(&format!("{at}  {}{from}: {}", entry.actor, entry.what))
 }
 
 #[cfg(test)]
@@ -152,6 +189,57 @@ mod tests {
             ..entry
         };
         assert!(line(&command, zone).starts_with("2026-10-23 14:05:12  root on sp-a: "));
+    }
+
+    #[test]
+    fn a_control_character_is_shown_escaped_never_sent_to_the_terminal() {
+        // A model name an associate typed, holding a terminal's sequences.
+        let entry = Entry {
+            id: 1,
+            at: "2026-10-23T19:05:12Z".parse().unwrap(),
+            actor: "cy".into(),
+            address: Some("198.51.100.7".into()),
+            what: "started an evaluation run of x\r\u{1b}[2K\u{1b}]52;c;aGk=\u{7}\nroot: y".into(),
+        };
+        let zone: Tz = "America/Chicago".parse().unwrap();
+        let shown = line(&entry, zone);
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(
+            shown.ends_with(r"run of x\r\u{1b}[2K\u{1b}]52;c;aGk=\u{7}\nroot: y"),
+            "{shown:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_commands_line_reaches_the_journal_first_and_a_lost_entry_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let journal = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        journal
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let kept = record_command(
+            &path,
+            Err("the database does not answer".into()),
+            "ran `scannerpulse settings set a b`",
+        )
+        .await;
+        assert_eq!(kept, Err("the database does not answer".into()));
+        let mut buffer = [0u8; 512];
+        let mut next = || {
+            let n = journal.recv(&mut buffer).expect("a line in the journal");
+            String::from_utf8_lossy(&buffer[..n]).into_owned()
+        };
+        let first = next();
+        assert!(first.starts_with("<14>scannerpulse: audit: "), "{first}");
+        assert!(
+            first.ends_with(": ran `scannerpulse settings set a b`"),
+            "{first}"
+        );
+        assert_eq!(
+            next(),
+            "<11>scannerpulse: audit: the entry above was not kept: the database does not answer"
+        );
     }
 
     #[test]

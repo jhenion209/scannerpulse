@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use scannerpulse::setup::change::Change;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
@@ -1089,12 +1090,26 @@ async fn run() -> ExitCode {
         .collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let command = parse(&args);
-    let audited = command.as_ref().is_some_and(changes_something);
+    let has_database = std::env::var_os("DATABASE_URL").is_some();
+    let audited = command
+        .as_ref()
+        .is_some_and(|command| records(command, has_database));
     let code = execute(command).await;
-    if audited && code == ExitCode::SUCCESS {
+    if code == ExitCode::SUCCESS && (audited || WENT_AHEAD.load(Ordering::Relaxed)) {
         record_command(&args).await;
     }
     code
+}
+
+/// Set when a command that asks before it changes anything goes ahead:
+/// `run` then records it.
+static WENT_AHEAD: AtomicBool = AtomicBool::new(false);
+
+/// Whether a command is recorded when it succeeds: it changes the site,
+/// and is not the first setup, which made the site's database (there was
+/// none to record in) and whose own commands recorded themselves.
+fn records(command: &Command, has_database: bool) -> bool {
+    changes_something(command) && (has_database || !matches!(command, Command::Setup { .. }))
 }
 
 /// Whether a command changes the site: when it succeeds, the audit log
@@ -1133,17 +1148,15 @@ fn changes_something(command: &Command) -> bool {
         Command::Admin(admin) => !matches!(admin, Admin::List),
         Command::Settings(settings) => !matches!(settings, Settings::List),
         Command::Favorites(favorites) => !matches!(favorites, Favorites::List),
-        Command::Data(
-            Data::Correct { confirm, .. }
-            | Data::Merge { confirm, .. }
-            | Data::Purge { confirm, .. },
-        )
+        // Asked to type a name or a word (`--confirm` gives it): each
+        // succeeds only once it was typed, and the change is made.
+        Command::Data(Data::Correct { .. } | Data::Merge { .. } | Data::Purge { .. })
         | Command::Storage(
-            StorageCommand::Move { confirm, .. }
-            | StorageCommand::PurgeBefore { confirm, .. }
-            | StorageCommand::Consolidate { confirm, .. },
+            StorageCommand::Move { .. }
+            | StorageCommand::PurgeBefore { .. }
+            | StorageCommand::Consolidate { .. },
         )
-        | Command::Waiting(Waiting::Discard { confirm, .. }) => confirm.is_some(),
+        | Command::Waiting(Waiting::Discard { .. }) => true,
         _ => false,
     }
 }
@@ -1153,12 +1166,13 @@ fn changes_something(command: &Command) -> bool {
 /// from the terminal or standard input.
 async fn record_command(args: &[&str]) {
     let what = format!("ran `scannerpulse {}`", as_typed(args));
-    let recorded = match connect().await {
-        Ok(mut conn) => scannerpulse::audit::record_command(&mut conn, &what)
-            .await
-            .map_err(|error| error.to_string()),
-        Err(error) => Err(error.to_string()),
-    };
+    let mut conn = connect().await.map_err(|error| error.to_string());
+    let recorded = scannerpulse::audit::record_command(
+        Path::new(scannerpulse::audit::LOG_SOCKET),
+        conn.as_mut().map_err(|why| why.clone()),
+        &what,
+    )
+    .await;
     if let Err(error) = recorded {
         eprintln!("scannerpulse: the audit log did not record this command: {error}");
     }
@@ -2922,6 +2936,8 @@ async fn asr_sample(
         println!("nothing was drawn");
         return Ok(ExitCode::SUCCESS);
     }
+    // A new set is drawn without asking.
+    WENT_AHEAD.store(true, Ordering::Relaxed);
     let ask = Draw {
         set: set.to_string(),
         talkgroups,
@@ -3126,7 +3142,16 @@ fn confirm(question: &str) -> std::io::Result<bool> {
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
-    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+    Ok(answered_yes(&answer))
+}
+
+/// Whether an answer is yes: the command then goes ahead.
+fn answered_yes(answer: &str) -> bool {
+    let yes = matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
+    if yes {
+        WENT_AHEAD.store(true, Ordering::Relaxed);
+    }
+    yes
 }
 
 /// After a backup of `kind` succeeds: its time for the admin page, and its
@@ -3223,12 +3248,13 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 mod tests {
     use super::{
         Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
-        RecorderCommand, Settings, StorageCommand, Waiting, as_typed, changes_something, parse,
-        recorders, run_to_end, talkgroup_list,
+        RecorderCommand, Settings, StorageCommand, WENT_AHEAD, Waiting, answered_yes, as_typed,
+        changes_something, parse, recorders, records, run_to_end, talkgroup_list,
     };
     use scannerpulse::roles::Role;
     use std::path::PathBuf;
     use std::process::ExitCode;
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -3772,7 +3798,7 @@ mod tests {
         for args in [
             &["settings", "list"][..],
             &["admin", "list"],
-            &["storage", "move", "2026-01-01", "2026-01-31", "Shelf"],
+            &["talkgroups", "uncorrected"],
             &["jobs", "list"],
             &["status"],
             &["audit", "--follow"],
@@ -3781,6 +3807,35 @@ mod tests {
             let command = parse(args).unwrap_or_else(|| panic!("{args:?}"));
             assert!(!changes_something(&command), "{args:?}");
         }
+    }
+
+    #[test]
+    fn a_command_that_asks_first_is_recorded_once_it_goes_ahead() {
+        // Asked to type a name or a word: it succeeds only once it was typed,
+        // and the change is made.
+        for args in [
+            &["talkgroup", "purge", "SYSB/31"][..],
+            &["storage", "move", "2026-01-01", "2026-01-31", "Shelf"],
+            &["storage", "purge-before", "2025-01-01"],
+            &["staging", "discard", "SYSB"],
+        ] {
+            let command = parse(args).unwrap_or_else(|| panic!("{args:?}"));
+            assert!(changes_something(&command), "{args:?}");
+        }
+        // Asked yes or no: a yes lets it go ahead.
+        assert!(!answered_yes("n\n"));
+        assert!(!WENT_AHEAD.load(Ordering::Relaxed));
+        assert!(answered_yes("Y\n"));
+        assert!(WENT_AHEAD.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_first_setup_is_not_recorded_the_commands_it_ran_are() {
+        let setup = parse(&["setup"]).unwrap();
+        assert!(!records(&setup, false));
+        assert!(records(&setup, true));
+        let set = parse(&["settings", "set", "web.system_order", "[\"B\"]"]).unwrap();
+        assert!(records(&set, false));
     }
 
     #[test]
