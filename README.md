@@ -780,8 +780,9 @@ already set in the environment wins. So far:
   same over their restricted key. A machine is named when its clock is not
   synchronized (its time service off or not: a container's is its host's,
   so off alone is not named), is a second or more from the database's,
-  cannot be checked, or was last checked over 30 minutes ago. A recorder is
-  measured from its newest 200 files of the last day (5 at least; never an
+  cannot be checked, or was last checked over 30 minutes ago; one that
+  left the install is forgotten (a ScannerPulse machine after a week, as
+  in the Layout area). A recorder is measured from its newest 200 files of the last day (5 at least; never an
   import; a recorder taken in when asked only by its copies). A file is
   seen once it has been still for 2 s after its call ended; counting from
   then, a recorder is named when one in ten of its files is seen more than

@@ -226,17 +226,47 @@ async fn check_nodes(pool: &PgPool) -> sqlx::Result<()> {
     let nodes = crate::primary::from_env().unwrap_or_default();
     let referee = crate::layout::Layout::read(std::path::Path::new(crate::layout::PATH))
         .and_then(|layout| layout.referee);
-    if nodes.is_empty() && referee.is_none() {
+    let asking = to_ask(&nodes, referee);
+    let hosts: Vec<String> = asking.iter().map(|(host, _)| host.clone()).collect();
+    forget_gone(pool, &hosts).await?;
+    if asking.is_empty() {
         return Ok(());
     }
     let mine = from_database(pool).await?;
-    let asked_of = nodes
-        .iter()
-        .map(|node| (node.host.clone(), "database"))
-        .chain(referee.map(|host| (host, "referee")));
-    for (host, role) in asked_of {
+    for (host, role) in asking {
         record(pool, &asked(&host, role, mine).await).await?;
     }
+    Ok(())
+}
+
+/// The database machines and the referee to ask, with their roles: never
+/// this machine itself, which the settings name "localhost" during a
+/// referee move; its ingest checks its own clock.
+pub fn to_ask(
+    nodes: &[crate::primary::Node],
+    referee: Option<String>,
+) -> Vec<(String, &'static str)> {
+    nodes
+        .iter()
+        .map(|node| (node.host.clone(), "database"))
+        .chain(referee.map(|host| (host, "referee")))
+        .filter(|(host, _)| !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+        .collect()
+}
+
+/// Forgets the machines no longer in the install: a database machine or
+/// referee not among `asked` (after a move, a cancelled one or a retirement),
+/// and a ScannerPulse machine not heard from for a week, as the Layout area
+/// forgets it.
+pub async fn forget_gone(db: &PgPool, asked: &[String]) -> sqlx::Result<()> {
+    sqlx::query(
+        "DELETE FROM clock_checks \
+         WHERE (role IN ('database', 'referee') AND NOT host = ANY($1)) \
+            OR (role = 'scannerpulse' AND checked_at < now() - interval '7 days')",
+    )
+    .bind(asked)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

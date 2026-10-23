@@ -374,3 +374,56 @@ async fn a_recorder_an_hour_behind_is_named(pool: PgPool) {
         ]
     );
 }
+
+#[test]
+fn this_machine_is_never_asked_its_clock_over_ssh() {
+    // During a referee move, the settings name the first machine's own
+    // database "localhost"; its ingest checks its clock.
+    let nodes = [
+        scannerpulse::primary::Node {
+            host: "localhost".into(),
+            port: 5432,
+        },
+        scannerpulse::primary::Node {
+            host: "db1.example.org".into(),
+            port: 5432,
+        },
+    ];
+    assert_eq!(
+        clocks::to_ask(&nodes, Some("192.0.2.9".into())),
+        [
+            ("db1.example.org".to_string(), "database"),
+            ("192.0.2.9".to_string(), "referee")
+        ]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn machines_no_longer_in_the_install_are_forgotten(pool: PgPool) {
+    for row in [
+        checked("db1.example.org", "database"),
+        checked("localhost", "database"),
+        checked("192.0.2.9", "referee"),
+        checked("web-a", "scannerpulse"),
+        checked("web-old", "scannerpulse"),
+    ] {
+        clocks::record(&pool, &row).await.unwrap();
+    }
+    // A ScannerPulse machine not heard from for a week is gone, as the
+    // Layout area forgets it.
+    sqlx::query(
+        "UPDATE clock_checks SET checked_at = now() - interval '8 days' WHERE host = 'web-old'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // db1 left with a cancelled move; the referee stays.
+    clocks::forget_gone(&pool, &["db2.example.org".into(), "192.0.2.9".into()])
+        .await
+        .unwrap();
+    let left: Vec<String> = sqlx::query_scalar("SELECT host FROM clock_checks ORDER BY host")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, ["192.0.2.9", "web-a"]);
+}
