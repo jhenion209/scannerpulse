@@ -352,7 +352,7 @@ async fn an_import_files_its_new_calls_where_they_are(pool: PgPool) {
     assert_eq!(
         message,
         "2 calls imported into Old; 1 copy of a call already in the archive skipped; \
-         1 file waits until its system is named; 2 files skipped: they cannot be read as calls"
+         1 file waits until its system is named and the import runs again; 2 files skipped: they cannot be read as calls"
     );
     // Its new calls are in Old, at their paths in its folder, from the
     // import, and none is queued for transcription.
@@ -682,4 +682,29 @@ async fn a_talkgroup_with_imported_calls_is_corrected_all_the_same(pool: PgPool)
     // its name there; the talkgroup is corrected all the same.
     assert!(correct().await);
     assert!(old.path().join("20190301_130000_b.mp3").exists());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_review_counts_the_files_whose_system_was_named_since(pool: PgPool) {
+    site(&pool).await;
+    let old = older_archive();
+    let mut conn = pool.acquire().await.unwrap();
+    imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    // County's file waits; once County is named, the next run takes it, and
+    // the review counts it among the files left, not the files taken.
+    scannerpulse::names::new_system(&mut conn, "County")
+        .await
+        .unwrap();
+    let job = imports::start_review(&mut conn, "Old", old.path(), "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let review = imports::review(&mut conn, job).await.unwrap().unwrap();
+    assert_eq!(
+        (review.taken, review.left, review.read, review.new),
+        (4, 1, 1, 1)
+    );
 }

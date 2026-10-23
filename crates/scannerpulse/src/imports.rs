@@ -437,7 +437,7 @@ pub async fn review(conn: &mut PgConnection, job: i64) -> sqlx::Result<Option<Re
 }
 
 /// Of `paths`, those the import `source_id` has taken: every row it has but
-/// one still listed.
+/// one its next run takes (listed, or staged with its system named since).
 async fn taken_paths(
     conn: &mut PgConnection,
     source_id: i16,
@@ -445,10 +445,10 @@ async fn taken_paths(
 ) -> sqlx::Result<HashSet<String>> {
     let mut taken = HashSet::new();
     for chunk in paths.chunks(10_000) {
-        let found: Vec<String> = sqlx::query_scalar(
-            "SELECT rel_path FROM ingest_files \
-             WHERE source_id = $1 AND rel_path = ANY($2) AND state <> 'listed'",
-        )
+        let found: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT rel_path FROM ingest_files f \
+             WHERE source_id = $1 AND rel_path = ANY($2) AND NOT {TO_TAKE}"
+        ))
         .bind(source_id)
         .bind(chunk)
         .fetch_all(&mut *conn)
@@ -915,9 +915,12 @@ impl ImportWork {
         }
         if self.staged > 0 {
             parts.push(if self.staged == 1 {
-                "1 file waits until its system is named".to_string()
+                "1 file waits until its system is named and the import runs again".to_string()
             } else {
-                format!("{} files wait until their systems are named", self.staged)
+                format!(
+                    "{} files wait until their systems are named and the import runs again",
+                    self.staged
+                )
             });
         }
         if self.rejected > 0 {
