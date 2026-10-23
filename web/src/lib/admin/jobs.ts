@@ -1,6 +1,8 @@
 // The long jobs (`/api/admin/jobs`) as the Jobs area shows them: what each
 // is, how far it has come, why it waits, and whether it can be stopped.
 
+import { HELPER_KINDS, type HelperRequest } from './updates';
+
 export interface Job {
   id: number;
   kind: string;
@@ -61,3 +63,47 @@ export const waitingFor = (job: Job) => (job.message.startsWith('waiting: ') ? j
 
 /** A job can be asked to stop until it ends, once. */
 export const canStop = (job: Job) => underWay(job) && !job.stop_requested;
+
+/** One row of what runs now, on Status: a job, or a request of the root
+ * helper (an update, a switchover, a step of the conversion). */
+export interface Running {
+  key: string;
+  label: string;
+  what: string;
+  progress: string;
+  by: string;
+  /** When it started, or was asked for while it waits. */
+  at: string;
+  /** The area that shows it. */
+  href: string;
+}
+
+/** What runs now: the running jobs, then those waiting, in their line's
+ * order; then the helper's requests that have not ended. */
+export function runningNow(jobs: Job[], requests: (HelperRequest | null | undefined)[]): Running[] {
+  const running = jobs.filter((job) => job.state === 'running');
+  const waiting = jobs.filter((job) => job.state === 'queued');
+  const byLine = (a: Job, b: Job) => a.id - b.id;
+  const rows: Running[] = [...running.sort(byLine), ...waiting.sort(byLine)].map((job) => ({
+    key: `job-${job.id}`,
+    label: `Job ${job.id}`,
+    what: kindName(job.kind),
+    progress: job.state === 'queued' ? 'waiting' : progressText(job),
+    by: job.started_by,
+    at: job.started_at ?? job.created_at,
+    href: '#jobs',
+  }));
+  for (const request of requests) {
+    if (!request || request.finished_at !== null) continue;
+    rows.push({
+      key: `request-${request.id}`,
+      label: `Request ${request.id}`,
+      what: HELPER_KINDS[request.kind],
+      progress: request.started_at === null ? 'waiting' : 'running',
+      by: request.requested_by,
+      at: request.started_at ?? request.requested_at,
+      href: request.kind === 'update' ? '#updates' : '#layout',
+    });
+  }
+  return rows;
+}

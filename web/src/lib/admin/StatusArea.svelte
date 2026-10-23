@@ -4,9 +4,16 @@
   import { durationText } from '../status';
   import { siteZone } from '../status.svelte';
   import { about, clockWarnings, failoverChecks, leaseText, locationWarnings, refereeWarning, STATUS_EVERY_MS, transcriptState, type AdminStatus } from './health';
+  import { runningNow } from './jobs';
+  import { jobs } from './jobs.svelte';
   import { admin, why } from './session.svelte';
+  import type { UpdatesInfo } from './updates';
 
   let data = $state<AdminStatus | null>(null);
+  /** The root helper's newest requests, for what runs now. */
+  let helper = $state<UpdatesInfo | null>(null);
+  let helperProblem = $state<string | null>(null);
+  const running = $derived(runningNow(jobs.list ?? [], Object.values(helper?.requests ?? {})));
   let readAt = $state<Date | null>(null);
   let problem = $state<string | null>(null);
   let reading = false;
@@ -28,9 +35,29 @@
     }
   }
 
+  /** Reads the root helper's requests, apart from the status: a slow one
+   * never holds the status's own reads back. */
+  let helperReading = false;
+  async function readHelper(poll = false) {
+    if (helperReading) return;
+    helperReading = true;
+    try {
+      helper = await admin<UpdatesInfo>('GET', '/api/admin/updates', undefined, { poll });
+      helperProblem = null;
+    } catch (error) {
+      helperProblem = why(error);
+    } finally {
+      helperReading = false;
+    }
+  }
+
   onMount(() => {
     void read();
-    const timer = setInterval(() => void read(true), STATUS_EVERY_MS);
+    void readHelper();
+    const timer = setInterval(() => {
+      void read(true);
+      void readHelper(true);
+    }, STATUS_EVERY_MS);
     return () => clearInterval(timer);
   });
 
@@ -45,9 +72,35 @@
     <span>
       {#if readAt}Read at {callTime(readAt.toISOString(), new Date(), siteZone())}; read again every 15 s.{:else}Reading…{/if}
     </span>
-    <button type="button" onclick={() => read()}>Read now</button>
+    <button type="button" onclick={() => { void read(); void readHelper(); }}>Read now</button>
   </div>
   {#if problem}<p class="problem" role="alert">The status could not be read: {problem}</p>{/if}
+
+  <h2>Running now</h2>
+  {#if jobs.list === null}
+    <p class="empty">Reading…</p>
+  {:else if running.length === 0}
+    <p class="empty">Nothing runs or waits: no job, and no request of the root helper.</p>
+  {:else}
+    <table>
+      <caption class="visually-hidden">The jobs and the root helper's requests that run or wait</caption>
+      <thead>
+        <tr><th scope="col">Job</th><th scope="col">What</th><th scope="col">Progress</th><th scope="col">Started by</th><th scope="col">Started</th></tr>
+      </thead>
+      <tbody>
+        {#each running as row (row.key)}
+          <tr>
+            <td><a href={row.href}>{row.label}</a></td>
+            <td class="long">{row.what}</td>
+            <td>{row.progress}</td>
+            <td class="long">{row.by}</td>
+            <td>{when(row.at)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+  {#if helperProblem}<p class="problem" role="alert">The root helper's requests could not be read: {helperProblem}</p>{/if}
 
   {#if data}
     {@const warning = refereeWarning(data.referee)}

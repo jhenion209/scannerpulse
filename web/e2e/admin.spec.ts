@@ -181,6 +181,13 @@ const longValues = {
 test("a table's headings and short values break between words, never inside one, at 360, 375 and 1280 px", async ({ page }) => {
   await page.route('**/api/admin/status', (route) => route.fulfill({ json: longValues.status }));
   await page.route('**/api/admin/viewers', (route) => route.fulfill({ json: longValues.viewers }));
+  // A job that runs, so Status shows its table of what runs now.
+  await page.route('**/api/admin/jobs', (route) =>
+    route.fulfill({
+      json: [{ id: 12, kind: 'purge_before', params: {}, state: 'running', done: 1200, total: 3400, message: '', started_by: 'root on scannerpulse-a',
+        created_at: '2026-10-16T13:00:00Z', started_at: '2026-10-16T13:00:05Z', finished_at: null, updated_at: '2026-10-16T13:05:00Z', host: 'scannerpulse-a', stop_requested: false }],
+    }),
+  );
   await signIn(page);
   // Per table: its words that the browser breaks across lines, in a heading or in a cell without the `long` class
   // (a hyphen is a place to break between words), and the smallest text size of its cells.
@@ -207,7 +214,7 @@ test("a table's headings and short values break between words, never inside one,
     });
   for (const width of [360, 375, 1280]) {
     await page.setViewportSize({ width, height: 800 });
-    for (const [area, tables] of [['status', 6], ['viewers', 1]] as const) {
+    for (const [area, tables] of [['status', 7], ['viewers', 1]] as const) {
       await page.evaluate((h) => (location.hash = h), `#${area}`);
       await expect(page.getByRole('heading', { name: area === 'status' ? 'Newest calls' : 'Viewers' })).toBeVisible();
       if (area === 'viewers') await expect(page.getByRole('table', { name: 'The open pages' })).toBeVisible();
