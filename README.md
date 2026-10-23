@@ -783,11 +783,12 @@ already set in the environment wins. So far:
   cannot be checked, or was last checked over 30 minutes ago. A recorder is
   measured from its newest 200 files of the last day (5 at least; never an
   import, nor a file first seen over an hour after the time its name gives,
-  a backlog): named when its files are seen more than a
-  second before the times their names give (its clock is ahead), or more
-  than a minute after their calls end (behind, or slow to arrive), or when
-  its copies of another recorder's calls are named a second or more apart
-  from them, which can keep one short call as two.
+  a backlog; a recorder taken in when asked only by its copies): named when
+  its files are seen more than a second before the times their names give
+  (its clock is ahead), or more than a minute after their calls end
+  (behind, or slow to arrive), or when its copies of another recorder's
+  calls are named a second or more apart from them, which can keep one
+  short call as two.
 - `talkgroups` lists the talkgroups and their transcription switches;
   `talkgroup transcribe SYSTEM/NUMBER on|off` sets one (new calls only:
   `jobs queue --talkgroup` queues the past ones); `queue retry-failed` puts

@@ -310,7 +310,8 @@ pub async fn machine_warnings(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec
 
 /// The recorders whose clocks need a look, measured from their newest files
 /// of the last day ([`SAMPLE`] at most, [`FEWEST`] at least; an import or a
-/// [`BACKLOG`] is never measured). Names give whole seconds, so a recorder is named when:
+/// [`BACKLOG`] is never measured). A recorder taken in when asked brings its
+/// files in late: only its copies are compared. Names give whole seconds, so a recorder is named when:
 /// its files are seen, by the database's clock, more than [`LIMIT_MS`] before
 /// the times their names give (its clock is ahead); they are seen more than
 /// [`LATE_MS`] after their calls end; or its copies of other recorders' calls
@@ -334,7 +335,7 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
              ORDER BY f.first_seen DESC LIMIT $1) f \
          LEFT JOIN calls c ON f.state = 'done' AND c.id = f.call_id \
                AND c.started_at = f.call_started_at AND c.source_id = s.id \
-         WHERE s.removed_at IS NULL \
+         WHERE s.removed_at IS NULL AND s.intake <> 'asked' \
            AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
          GROUP BY s.name",
     )

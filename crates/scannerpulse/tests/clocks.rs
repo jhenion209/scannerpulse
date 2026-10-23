@@ -243,10 +243,21 @@ async fn a_recorder_whose_files_are_seen_before_their_names_say_is_ahead(pool: P
 
 #[sqlx::test(migrations = "./migrations")]
 async fn a_recorder_whose_files_are_seen_long_after_their_calls_end_is_named(pool: PgPool) {
-    let north = recorder(&pool, "north").await;
+    let (north, asked) = (
+        recorder(&pool, "north").await,
+        recorder(&pool, "asked").await,
+    );
+    // A recorder taken in when asked brings its files in late: it has no
+    // such measure.
+    sqlx::query("UPDATE sources SET intake = 'asked' WHERE id = $1")
+        .bind(asked)
+        .execute(&pool)
+        .await
+        .unwrap();
     for minute in 2..=7 {
         let seen = ago(minute * 60);
         filed(&pool, north, seen - Duration::seconds(95), 5_000, seen).await;
+        filed(&pool, asked, seen - Duration::seconds(95), 5_000, seen).await;
     }
     assert_eq!(
         recorder_warnings(&pool).await,
