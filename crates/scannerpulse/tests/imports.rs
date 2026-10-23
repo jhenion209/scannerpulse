@@ -487,12 +487,13 @@ async fn an_import_run_again_takes_only_the_files_it_has_not(pool: PgPool) {
 }
 
 /// Several recorders filed into one older folder (6B3's M5; the owner: "Keep
-/// first arrived"): of an import's copies of a call, the one whose file
-/// arrived first, by its time, is the call, in whichever order the import
-/// takes them; the others are copies, as is every copy of a call the archive
-/// already holds.
+/// first arrived", then, at 6B5's review, "Longer, then first arrived"): of
+/// an import's copies of a call, the longer is the call, and at equal length
+/// the one whose file arrived first, by its time, in whichever order the
+/// import takes them; the others are copies, as is every copy of a call the
+/// archive already holds, even a longer one.
 #[sqlx::test(migrations = "./migrations")]
-async fn an_import_keeps_the_copy_that_arrived_first(pool: PgPool) {
+async fn an_import_keeps_the_longer_copy_then_the_first_arrived(pool: PgPool) {
     let (_archive, places) = site(&pool).await;
     let old = tempfile::tempdir().unwrap();
     let start = SystemTime::now() - Duration::from_secs(86_400);
@@ -506,21 +507,28 @@ async fn an_import_keeps_the_copy_that_arrived_first(pool: PgPool) {
             .set_modified(start + Duration::from_secs(after))
             .unwrap();
     };
-    // First, a copy of the archive's call of 12:00, and the copy of 13:00
-    // that arrived last.
+    // First, a copy of the archive's call of 12:00, the longer copy of 13:00,
+    // which arrived last, and the shorter copy of 16:00, which arrived first;
+    // at 15:00, of two copies as long, the one that arrived last.
     put("20190301_120000_a.mp3", 10, 0);
     put("20190301_130001_b.mp3", 6, 3605);
+    put("20190301_150001_b.mp3", 4, 10805);
+    put("20190301_160000_a.mp3", 4, 14404);
     let mut conn = pool.acquire().await.unwrap();
     let (_, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
-    // Then the copy of 13:00 that arrived first, another copy of 12:00, and
-    // both copies of 14:00.
-    put("20190301_120001_b.mp3", 10, 1);
+    // Then a longer copy of 12:00, the shorter copy of 13:00, which arrived
+    // first, both copies of 14:00 (the longer arrived last), the copy of
+    // 15:00 that arrived first, and the longer copy of 16:00, arrived last.
+    put("20190301_120001_b.mp3", 12, 1);
     put("20190301_130000_a.mp3", 4, 3604);
-    put("20190301_140000_a.mp3", 4, 7204);
-    put("20190301_140001_b.mp3", 6, 7203);
+    put("20190301_140000_a.mp3", 6, 7204);
+    put("20190301_140001_b.mp3", 4, 7203);
+    put("20190301_150000_a.mp3", 4, 10804);
+    put("20190301_160001_b.mp3", 6, 14405);
+    let before = snapshot(old.path());
     let (job, _) = imports::start(&mut conn, "Old", old.path(), None, "admin")
         .await
         .unwrap();
@@ -532,15 +540,28 @@ async fn an_import_keeps_the_copy_that_arrived_first(pool: PgPool) {
         .unwrap();
     assert_eq!(
         message,
-        "1 call imported into Old; 3 copies of calls already in the archive skipped"
+        "1 call imported into Old; 5 copies of calls already in the archive skipped"
     );
-    let paths: Vec<String> =
-        sqlx::query_scalar("SELECT rel_path FROM calls WHERE location_id = $1 ORDER BY started_at")
-            .bind(started.location)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(paths, ["20190301_130000_a.mp3", "20190301_140001_b.mp3"]);
+    let calls: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT rel_path, started_at FROM calls WHERE location_id = $1 ORDER BY started_at",
+    )
+    .bind(started.location)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let paths: Vec<&str> = calls.iter().map(|(path, _)| path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "20190301_130001_b.mp3",
+            "20190301_140000_a.mp3",
+            "20190301_150000_a.mp3",
+            "20190301_160001_b.mp3",
+        ]
+    );
+    // A call taken over keeps its start.
+    assert_eq!(calls[2].1, at(15, 0) + TimeDelta::seconds(1));
+    assert_eq!(calls[3].1, at(16, 0));
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT rel_path, state FROM ingest_files WHERE source_id = $1 ORDER BY rel_path",
     )
@@ -554,10 +575,14 @@ async fn an_import_keeps_the_copy_that_arrived_first(pool: PgPool) {
         [
             row("20190301_120000_a.mp3", "duplicate"),
             row("20190301_120001_b.mp3", "duplicate"),
-            row("20190301_130000_a.mp3", "done"),
-            row("20190301_130001_b.mp3", "duplicate"),
-            row("20190301_140000_a.mp3", "duplicate"),
-            row("20190301_140001_b.mp3", "done"),
+            row("20190301_130000_a.mp3", "duplicate"),
+            row("20190301_130001_b.mp3", "done"),
+            row("20190301_140000_a.mp3", "done"),
+            row("20190301_140001_b.mp3", "duplicate"),
+            row("20190301_150000_a.mp3", "done"),
+            row("20190301_150001_b.mp3", "duplicate"),
+            row("20190301_160000_a.mp3", "duplicate"),
+            row("20190301_160001_b.mp3", "done"),
         ]
     );
     let copies: Option<Vec<i16>> =
@@ -567,6 +592,8 @@ async fn an_import_keeps_the_copy_that_arrived_first(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(copies, Some(vec![started.source]));
+    // Nothing in its folder changed.
+    assert_eq!(snapshot(old.path()), before);
 }
 
 #[sqlx::test(migrations = "./migrations")]

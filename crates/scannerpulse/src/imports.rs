@@ -14,8 +14,9 @@
 //! state no filer takes (`listed`: a filer deletes the files it files); each
 //! later step files a batch: a copy of a call is skipped, never replacing
 //! the archive's recording, except that of the import's own copies of a call
-//! the one whose file arrived first is the call (the owner, 6B3's M5); a
-//! file of an unknown system waits in the folder
+//! the longer is the call, and at equal length the one whose file arrived
+//! first (the owner, 6B3's M5 and 6B5's review); a file of an unknown system
+//! waits in the folder
 //! until its system is named and the import runs again; any other file is a
 //! call of the location at its path in the folder, timed by its name and the
 //! offset, its talkgroup names going through the approval, and queued for no
@@ -1312,12 +1313,16 @@ pub(crate) async fn import_step(
                     rel_path: &row.rel_path,
                     transcribe_from_ms: None,
                 };
-                // Of the import's own copies of a call, the one whose file
-                // arrived first is the call (the owner, 6B3's M5).
-                let first = same.source_id == params.source
+                // Of the import's own copies of a call, the longer is the
+                // call, and at equal length the one whose file arrived first
+                // (the owner, 6B3's M5 and 6B5's review).
+                let longer = call.duration_ms > same.duration_ms;
+                let takes_over = same.source_id == params.source
                     && same.location_id == place.location_id
-                    && same.file_mtime.is_some_and(|kept| call.file_mtime < kept);
-                if first && store::replace_in(conn, row.id, &same, &new, size).await? {
+                    && (longer
+                        || (call.duration_ms == same.duration_ms
+                            && same.file_mtime.is_some_and(|kept| call.file_mtime < kept)));
+                if takes_over && store::replace_in(conn, row.id, &same, &new, size).await? {
                     sqlx::query(
                         "UPDATE ingest_files SET state = 'duplicate', reason = $3 \
                          WHERE source_id = $1 AND rel_path = $2 AND state = 'done'",
@@ -1325,8 +1330,10 @@ pub(crate) async fn import_step(
                     .bind(params.source)
                     .bind(&same.rel_path)
                     .bind(format!(
-                        "a copy of call {}: {} arrived first",
-                        same.id, row.rel_path
+                        "a copy of call {}: {} {}",
+                        same.id,
+                        row.rel_path,
+                        if longer { "is longer" } else { "arrived first" }
                     ))
                     .execute(&mut *conn)
                     .await?;

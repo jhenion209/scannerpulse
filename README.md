@@ -502,26 +502,30 @@ whole-hour offset it tries:
 - the talkgroups the files name otherwise.
 
 It compares the files with the archive only: the folder's own copies of a
-call count there as new calls. It shows some of each. It also counts the copies at each whole-hour offset
-from −2 h to +2 h, and suggests the offset at which clearly more files are
-copies: the older install's clock or time zone was off.
+call count there as new calls. It shows some of each. It also counts the
+copies at each whole-hour offset from −2 h to +2 h, and suggests the offset
+at which clearly more files are copies: the older install's clock or time
+zone was off.
 
 The import then runs as a job with that offset (`--offset ±HH:MM`). The
 offset moves the times the file names give; the names stay as they are, and
 a file's modification time never times a call. Each file becomes a call of
 NAME, at its path in the folder, except:
-- a copy of a call already in the archive is skipped, and never replaces
-  its recording;
+- a copy of a call a recorder or another import filed is skipped, and
+  never replaces its recording;
 - of the folder's own copies of a call (several recorders filed into one
-  folder), the one whose file arrived first, by its modification time, is
-  the call, in whichever order they are taken; the others are skipped;
+  folder), the longer is the call, and at equal length the one whose file
+  arrived first, by its modification time, in whichever order they are
+  taken; the others are skipped. A call a person worked on keeps its
+  recording, as does one consolidated since;
 - a file of a system not named yet waits in the folder, until the system is
   named on the Recorders area and the import runs again.
 
 A talkgroup name a file gives otherwise waits for approval, as a recorder's
 does. Imported calls are not announced to listeners, and not queued for
 transcription: `scannerpulse transcribe --talkgroup … --from … --to …`
-queues them. Run again, an import takes only the files it has not taken,
+queues them. A call transcribed once is transcribed again when a longer copy
+takes it over. Run again, an import takes only the files it has not taken,
 with the offset it keeps, and skips the files from before a day it was
 purged before.
 
