@@ -11,3 +11,10 @@ CREATE TABLE imports (
         CONSTRAINT imports_offset CHECK (offset_minutes BETWEEN -1440 AND 1440),
     created_at     timestamptz NOT NULL DEFAULT now()
 );
+
+-- An import's files are listed, not waiting: the filer of every version takes
+-- the waiting files and deletes each from its folder once filed, and an
+-- older version's filer does not know the imports above.
+ALTER TABLE ingest_files DROP CONSTRAINT ingest_files_state;
+ALTER TABLE ingest_files ADD CONSTRAINT ingest_files_state
+    CHECK (state IN ('waiting', 'done', 'rejected', 'staged', 'duplicate', 'listed'));

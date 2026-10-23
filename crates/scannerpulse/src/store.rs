@@ -288,7 +288,7 @@ pub async fn waiting(
 pub async fn reject(db: impl PgExecutor<'_>, id: i64, reason: &str) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE ingest_files SET state = 'rejected', reason = $2 \
-         WHERE id = $1 AND state IN ('waiting', 'staged')",
+         WHERE id = $1 AND state IN ('waiting', 'staged', 'listed')",
     )
     .bind(id)
     .bind(reason)
@@ -307,7 +307,7 @@ pub async fn stage(
 ) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE ingest_files SET state = 'staged', staged_system = $2, staged_talkgroup = $3, \
-         reason = NULL WHERE id = $1 AND state = 'waiting'",
+         reason = NULL WHERE id = $1 AND state IN ('waiting', 'listed')",
     )
     .bind(id)
     .bind(system)
@@ -856,7 +856,7 @@ pub async fn duplicate_in(
     sqlx::query(
         "UPDATE ingest_files SET state = 'duplicate', reason = $2, call_id = $3, \
          call_started_at = $4, size = $5, file_mtime = $6 \
-         WHERE id = $1 AND state IN ('waiting', 'staged')",
+         WHERE id = $1 AND state IN ('waiting', 'staged', 'listed')",
     )
     .bind(row_id)
     .bind(reason)

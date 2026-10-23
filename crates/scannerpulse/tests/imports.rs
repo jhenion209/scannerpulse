@@ -624,3 +624,26 @@ async fn a_consolidation_copies_an_imports_calls_into_the_archive(pool: PgPool) 
         .unwrap();
     assert_eq!(message, "0 calls imported into Old");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_imports_files_are_listed_where_no_filer_takes_them(pool: PgPool) {
+    site(&pool).await;
+    let old = older_archive();
+    let mut conn = pool.acquire().await.unwrap();
+    imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    // The first step lists the folder.
+    let context = scannerpulse::jobs::Context::new(None);
+    scannerpulse::jobs::step(&pool, "host-a", &context)
+        .await
+        .unwrap();
+    // The filer of every version takes the waiting files, and deletes each
+    // from its folder once filed: an import's files are listed instead.
+    let states: Vec<(String, i64)> =
+        sqlx::query_as("SELECT state, count(*) FROM ingest_files GROUP BY state")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(states, [("listed".to_string(), 6)]);
+}

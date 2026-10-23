@@ -10,8 +10,9 @@
 //!
 //! The import is a job too. Its location, its source (which its calls name,
 //! and whose ingest rows are its register) and its offset are made when it
-//! starts. Its first step lists every file it has not taken as a waiting row;
-//! each later step files a batch: a copy of a call is skipped, never replacing
+//! starts. Its first step lists every file it has not taken, as a row in a
+//! state no filer takes (`listed`: a filer deletes the files it files); each
+//! later step files a batch: a copy of a call is skipped, never replacing
 //! the archive's recording; a file of an unknown system waits in the folder
 //! until its system is named and the import runs again; any other file is a
 //! call of the location at its path in the folder, timed by its name and the
@@ -436,7 +437,7 @@ pub async fn review(conn: &mut PgConnection, job: i64) -> sqlx::Result<Option<Re
 }
 
 /// Of `paths`, those the import `source_id` has taken: every row it has but
-/// a waiting one.
+/// one still listed.
 async fn taken_paths(
     conn: &mut PgConnection,
     source_id: i16,
@@ -446,7 +447,7 @@ async fn taken_paths(
     for chunk in paths.chunks(10_000) {
         let found: Vec<String> = sqlx::query_scalar(
             "SELECT rel_path FROM ingest_files \
-             WHERE source_id = $1 AND rel_path = ANY($2) AND state <> 'waiting'",
+             WHERE source_id = $1 AND rel_path = ANY($2) AND state <> 'listed'",
         )
         .bind(source_id)
         .bind(chunk)
@@ -973,9 +974,9 @@ fn hung(what: &str, work: &ImportWork, name: &str) -> Outcome {
     ))
 }
 
-/// The rows an import takes: those waiting, and those staged whose system
+/// The rows an import takes: those listed, and those staged whose system
 /// has been named since.
-const TO_TAKE: &str = "(f.state = 'waiting' OR (f.state = 'staged' \
+const TO_TAKE: &str = "(f.state = 'listed' OR (f.state = 'staged' \
      AND (EXISTS (SELECT 1 FROM systems y WHERE y.name = f.staged_system) \
           OR EXISTS (SELECT 1 FROM system_spellings y WHERE y.name = f.staged_system))))";
 
@@ -1047,7 +1048,7 @@ pub(crate) async fn import_step(
             let mtimes: Vec<DateTime<Utc>> = chunk.iter().map(|f| f.mtime.into()).collect();
             sqlx::query(
                 "INSERT INTO ingest_files (source_id, rel_path, size, file_mtime, first_seen, seen_at, state) \
-                 SELECT $1, u.rel_path, u.size, u.file_mtime, now(), now(), 'waiting' \
+                 SELECT $1, u.rel_path, u.size, u.file_mtime, now(), now(), 'listed' \
                  FROM unnest($2::text[], $3::bigint[], $4::timestamptz[]) AS u (rel_path, size, file_mtime) \
                  ON CONFLICT (source_id, rel_path) DO NOTHING",
             )
