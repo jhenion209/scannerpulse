@@ -22,7 +22,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeDelta, Utc};
 use chrono_tz::Tz;
@@ -49,8 +49,16 @@ pub const OFFSETS: [i32; 5] = [-120, -60, 0, 60, 120];
 /// The files of each kind a review shows.
 pub const SHOWN: usize = 5;
 
-/// How long a listing of the folder may take: less than a step may stay idle.
-const WALK_LIMIT: Duration = jobs::REQUEST_LIMIT;
+/// How long one folder's listing may take: a folder is listed whole, and a
+/// step must end well within what a job's step may take.
+const FOLDER_LIMIT: Duration = Duration::from_secs(240);
+
+/// The files one step of a walk finds at most, folder by folder: a large
+/// archive is walked over many steps, and no step holds its whole listing.
+const WALK_FILES: usize = 20_000;
+
+/// The time one step of a walk takes at most, between two folders.
+const WALK_BUDGET: Duration = Duration::from_secs(20);
 
 /// How long the web service's look at the folder may take.
 const LOOK_LIMIT: Duration = Duration::from_secs(10);
@@ -301,20 +309,21 @@ async fn classify(
     ))
 }
 
-/// The file's call, timed by its name and the offset; or why it cannot be
-/// read as a call (`Ok(Err)`); Err when its folder did not answer.
+/// The file's call, timed by its name and the offset, and its size; or why
+/// it cannot be read as a call (`Ok(Err)`); Err when its folder did not
+/// answer.
 async fn read_call(
     root: &Path,
     rel_path: &str,
     offset: i32,
     zone: Tz,
     limit: Duration,
-) -> io::Result<Result<FileCall, String>> {
+) -> io::Result<Result<(FileCall, i64), String>> {
     let path = root.join(rel_path);
     match bounded(limit, move || Ok(reader::read_path(&path, zone))).await? {
-        Ok((mut call, _)) => {
+        Ok((mut call, data)) => {
             call.started_at = started_at(call.local_start, offset, zone);
-            Ok(Ok(call))
+            Ok(Ok((call, data.len() as i64)))
         }
         Err(ReadError::Rejected(why)) => Ok(Err(why)),
         Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -387,6 +396,12 @@ pub struct Review {
     sample: Vec<String>,
     #[serde(default)]
     walked: bool,
+    /// The folders still to list, once the walk has begun.
+    #[serde(default)]
+    pending: Option<Vec<String>>,
+    /// The sample's draw, a fixed sequence: a review is the same each time.
+    #[serde(default)]
+    draw: u64,
 }
 
 /// The offset to suggest: the one at which the most files are copies, when it
@@ -472,13 +487,110 @@ async fn zone(conn: &mut PgConnection) -> sqlx::Result<Result<Tz, String>> {
     })
 }
 
-/// The walk of a folder, for [`WALK_LIMIT`] at most: its mp3 files and the
-/// number of names that are not UTF-8; Err with the reason it failed.
-async fn walk(folder: &Path) -> Result<(Vec<crate::watcher::Found>, i64), String> {
-    let root = folder.to_path_buf();
-    match bounded(WALK_LIMIT, move || crate::watcher::list_folder(&root)).await {
-        Ok(listing) => Ok((listing.found, listing.bad_names.len() as i64)),
-        Err(error) => Err(format!("{} {error}", folder.display())),
+/// What one step of a walk found.
+#[derive(Debug)]
+struct Walked {
+    /// The mp3 files found, by their paths inside the root.
+    files: Vec<String>,
+    /// The names that are not UTF-8, which cannot be stored.
+    bad_names: i64,
+    /// The folders still to list, by their paths inside the root.
+    pending: Vec<String>,
+}
+
+/// One step of a walk: lists the folders of `pending` (paths inside `root`;
+/// "" is the root), each whole, until `most` files are found or `budget` is
+/// spent. Names only: a file's size and time are read when it is taken.
+/// Hidden files and folders are left out, and links are not followed, as the
+/// watcher does. Err when the root itself cannot be listed.
+fn walk_some(
+    root: &Path,
+    mut pending: Vec<String>,
+    most: usize,
+    budget: Duration,
+) -> io::Result<Walked> {
+    let started = Instant::now();
+    let (mut files, mut bad_names) = (Vec::new(), 0);
+    while let Some(rel) = pending.pop() {
+        let folder = if rel.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&rel)
+        };
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if rel.is_empty() => return Err(error),
+            // A folder inside it may vanish.
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                bad_names += 1;
+                continue;
+            };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() && crate::watcher::is_audio(Path::new(&name)) {
+                files.push(path);
+            }
+        }
+        if files.len() >= most || started.elapsed() >= budget {
+            break;
+        }
+    }
+    Ok(Walked {
+        files,
+        bad_names,
+        pending,
+    })
+}
+
+/// One step of the walk of `root` ([`walk_some`]), in a thread of its own for
+/// [`FOLDER_LIMIT`] at most; Err with the reason it failed.
+async fn walk_step(root: &Path, pending: Vec<String>) -> Result<Walked, String> {
+    let at = root.to_path_buf();
+    match bounded(FOLDER_LIMIT, move || {
+        walk_some(&at, pending, WALK_FILES, WALK_BUDGET)
+    })
+    .await
+    {
+        Ok(walked) => Ok(walked),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(format!(
+            "{}: a folder of it was not listed within {} s: its share stopped answering, or the folder holds too many files to list in one step",
+            root.display(),
+            FOLDER_LIMIT.as_secs()
+        )),
+        Err(error) => Err(format!("{} cannot be listed: {error}", root.display())),
+    }
+}
+
+/// Keeps `path` in the review's sample with the chance that leaves every file
+/// left the same chance (reservoir sampling), `work.left` counting it.
+fn sample_one(work: &mut Review, path: String) {
+    if work.sample.len() < REVIEW_SAMPLE {
+        work.sample.push(path);
+        return;
+    }
+    // xorshift64: a fixed sequence from a fixed start.
+    let mut x = work.draw.max(1);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    work.draw = x;
+    let j = (x % work.left as u64) as usize;
+    if j < REVIEW_SAMPLE {
+        work.sample[j] = path;
     }
 }
 
@@ -507,42 +619,48 @@ pub(crate) async fn review_step(
         .map_or((-1, None), |k| (k.source_id, k.purged_before));
     let root = PathBuf::from(&params.folder);
     if !work.walked {
-        let (found, bad_names) = match walk(&root).await {
-            Ok(found) => found,
+        let pending = match work.pending.take() {
+            Some(pending) => pending,
+            None => {
+                work.name = params.name.clone();
+                work.folder = params.folder.clone();
+                work.kept_offset = kept.as_ref().map(|k| k.offset_minutes);
+                work.copies_at = vec![0; OFFSETS.len()];
+                work.new_at = vec![0; OFFSETS.len()];
+                work.draw = 0x9E37_79B9_7F4A_7C15;
+                vec![String::new()]
+            }
+        };
+        let walked = match walk_step(&root, pending).await {
+            Ok(walked) => walked,
             Err(why) => return Ok(Outcome::Failed(why)),
         };
-        work.name = params.name.clone();
-        work.folder = params.folder.clone();
-        work.kept_offset = kept.as_ref().map(|k| k.offset_minutes);
-        work.files = found.len() as i64;
-        work.bad_names = bad_names;
+        work.files += walked.files.len() as i64;
+        work.bad_names += walked.bad_names;
         let mut dated = Vec::new();
-        for file in found {
-            let name = file.rel_path.rsplit('/').next().unwrap_or_default();
+        for path in walked.files {
+            let name = path.rsplit('/').next().unwrap_or_default();
             if reader::start_time(name).is_none() {
                 work.no_date += 1;
-                shown(&mut work.examples.no_date, file.rel_path);
+                shown(&mut work.examples.no_date, path);
             } else {
-                dated.push(file.rel_path);
+                dated.push(path);
             }
         }
         let taken = taken_paths(conn, source_id, &dated).await?;
-        work.taken = taken.len() as i64;
-        let mut left: Vec<String> = dated
-            .into_iter()
-            .filter(|path| !taken.contains(path))
-            .collect();
-        left.sort();
-        work.left = left.len() as i64;
-        // Spread over the whole folder, which its names order by time.
-        let wanted = left.len().min(REVIEW_SAMPLE);
-        work.sample = (0..wanted)
-            .map(|i| left[i * left.len() / wanted].clone())
-            .collect();
-        work.copies_at = vec![0; OFFSETS.len()];
-        work.new_at = vec![0; OFFSETS.len()];
-        work.walked = true;
-        work.done = work.sample.is_empty();
+        work.taken += taken.len() as i64;
+        for path in dated.into_iter().filter(|path| !taken.contains(path)) {
+            work.left += 1;
+            sample_one(&mut work, path);
+        }
+        if walked.pending.is_empty() {
+            // Read in the order of their names, which begin with their times.
+            work.sample.sort();
+            work.walked = true;
+            work.done = work.sample.is_empty();
+        } else {
+            work.pending = Some(walked.pending);
+        }
         return Ok(more_review(&work));
     }
     let batch: Vec<String> = work
@@ -552,7 +670,7 @@ pub(crate) async fn review_step(
     let own = work.kept_offset.unwrap_or(0);
     for rel in batch {
         let call = match read_call(&root, &rel, own, zone, limit).await {
-            Ok(Ok(call)) => call,
+            Ok(Ok((call, _))) => call,
             Ok(Err(why)) => {
                 work.read += 1;
                 work.unreadable += 1;
@@ -621,6 +739,18 @@ pub(crate) async fn review_step(
 }
 
 fn more_review(work: &Review) -> Outcome {
+    if !work.walked {
+        return Outcome::More {
+            done: 0,
+            total: None,
+            work: serde_json::to_value(work).expect("plain data"),
+            message: format!(
+                "listing {}: {} found so far",
+                work.folder,
+                counted(work.files, "file", "files")
+            ),
+        };
+    }
     let total = work.read + work.sample.len() as i64;
     Outcome::More {
         done: work.read,
@@ -903,6 +1033,12 @@ async fn new_location(conn: &mut PgConnection, name: &str, folder: &Path) -> sql
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ImportWork {
     walked: bool,
+    /// The folders still to list, once the walk has begun.
+    #[serde(default)]
+    pending: Option<Vec<String>>,
+    /// The files the walk found.
+    #[serde(default)]
+    found: i64,
     /// The last row taken.
     after: i64,
     imported: i64,
@@ -968,7 +1104,6 @@ impl ImportWork {
 struct Row {
     id: i64,
     rel_path: String,
-    size: Option<i64>,
 }
 
 /// The import's location now, its offset, and the day it was purged before.
@@ -1053,26 +1188,40 @@ pub(crate) async fn import_step(
         Err(error) => return Ok(Outcome::Failed(error.to_string())),
     };
     if !work.walked {
-        let (found, _) = match walk(&root).await {
-            Ok(found) => found,
-            Err(why) => return Ok(hung(&why, &work, &params.name)),
+        let pending = work.pending.take().unwrap_or_else(|| vec![String::new()]);
+        let walked = match walk_step(&root, pending).await {
+            Ok(walked) => walked,
+            Err(why) => {
+                return Ok(Outcome::Failed(format!(
+                    "{why}; {}",
+                    work.message(&params.name)
+                )));
+            }
         };
-        for chunk in found.chunks(5_000) {
-            let paths: Vec<&str> = chunk.iter().map(|f| f.rel_path.as_str()).collect();
-            let sizes: Vec<i64> = chunk.iter().map(|f| f.size as i64).collect();
-            let mtimes: Vec<DateTime<Utc>> = chunk.iter().map(|f| f.mtime.into()).collect();
+        work.found += walked.files.len() as i64;
+        for chunk in walked.files.chunks(5_000) {
             sqlx::query(
-                "INSERT INTO ingest_files (source_id, rel_path, size, file_mtime, first_seen, seen_at, state) \
-                 SELECT $1, u.rel_path, u.size, u.file_mtime, now(), now(), 'listed' \
-                 FROM unnest($2::text[], $3::bigint[], $4::timestamptz[]) AS u (rel_path, size, file_mtime) \
+                "INSERT INTO ingest_files (source_id, rel_path, first_seen, seen_at, state) \
+                 SELECT $1, u.rel_path, now(), now(), 'listed' FROM unnest($2::text[]) AS u (rel_path) \
                  ON CONFLICT (source_id, rel_path) DO NOTHING",
             )
             .bind(params.source)
-            .bind(paths)
-            .bind(sizes)
-            .bind(mtimes)
+            .bind(chunk)
             .execute(&mut *conn)
             .await?;
+        }
+        if !walked.pending.is_empty() {
+            work.pending = Some(walked.pending);
+            return Ok(Outcome::More {
+                done: 0,
+                total: None,
+                message: format!(
+                    "listing {}: {} found so far",
+                    root.display(),
+                    counted(work.found, "file", "files")
+                ),
+                work: serde_json::to_value(&work).expect("plain data"),
+            });
         }
         let total: i64 = sqlx::query_scalar(&format!(
             "SELECT count(*) FROM ingest_files f WHERE source_id = $1 AND {TO_TAKE}"
@@ -1086,14 +1235,14 @@ pub(crate) async fn import_step(
             total: Some(total),
             message: format!(
                 "{} in {}: {total} to take",
-                counted(found.len() as i64, "file", "files"),
+                counted(work.found, "file", "files"),
                 root.display()
             ),
             work: serde_json::to_value(&work).expect("plain data"),
         });
     }
     let batch: Vec<Row> = sqlx::query_as(&format!(
-        "SELECT id, rel_path, size FROM ingest_files f \
+        "SELECT id, rel_path FROM ingest_files f \
          WHERE source_id = $1 AND id > $2 AND {TO_TAKE} ORDER BY id LIMIT $3"
     ))
     .bind(params.source)
@@ -1120,23 +1269,24 @@ pub(crate) async fn import_step(
         store::ensure_partition(pool, noon.and_utc()).await?;
     }
     for row in &batch {
-        let call = match read_call(&root, &row.rel_path, place.offset_minutes, zone, limit).await {
-            Ok(Ok(call)) => call,
-            Ok(Err(why)) => {
-                store::reject(&mut *conn, row.id, &why).await?;
-                work.rejected += 1;
-                work.after = row.id;
-                continue;
-            }
-            Err(error) => {
-                unchanged(std::slice::from_ref(&root), &before, limit).await?;
-                return Ok(hung(
-                    &format!("{} {error}", root.display()),
-                    &work,
-                    &params.name,
-                ));
-            }
-        };
+        let (call, size) =
+            match read_call(&root, &row.rel_path, place.offset_minutes, zone, limit).await {
+                Ok(Ok(read)) => read,
+                Ok(Err(why)) => {
+                    store::reject(&mut *conn, row.id, &why).await?;
+                    work.rejected += 1;
+                    work.after = row.id;
+                    continue;
+                }
+                Err(error) => {
+                    unchanged(std::slice::from_ref(&root), &before, limit).await?;
+                    return Ok(hung(
+                        &format!("{} {error}", root.display()),
+                        &work,
+                        &params.name,
+                    ));
+                }
+            };
         match classify(conn, params.source, &call, place.purged_before, zone).await? {
             Class::BeforePurge(day) => {
                 let why = format!("from before {day}, before which {} was purged", params.name);
@@ -1157,7 +1307,7 @@ pub(crate) async fn import_step(
                     "a copy of call {} from {}: the call keeps its recording",
                     same.id, same.recorder
                 );
-                let file = (row.size.unwrap_or(0), call.file_mtime);
+                let file = (size, call.file_mtime);
                 store::duplicate_in(conn, row.id, &same, params.source, file, &why).await?;
                 work.copies += 1;
             }
@@ -1202,6 +1352,52 @@ mod tests {
         assert_eq!(suggest(&[0, 0, 4, 7, 0]), None);
         assert_eq!(suggest(&[0, 0, 0, 4, 0]), None);
         assert_eq!(suggest(&[0, 0, 9, 6, 0]), None);
+    }
+
+    #[test]
+    fn a_walk_lists_whole_folders_until_its_share_and_goes_on_at_the_next_step() {
+        let dir = tempfile::tempdir().unwrap();
+        for folder in ["a", "b", "c"] {
+            std::fs::create_dir_all(dir.path().join(folder).join("deep")).unwrap();
+            for n in 1..=3 {
+                std::fs::write(
+                    dir.path()
+                        .join(folder)
+                        .join(format!("2019030{n}_120000.mp3")),
+                    b"x",
+                )
+                .unwrap();
+            }
+            std::fs::write(
+                dir.path().join(folder).join("deep/20190301_130000.mp3"),
+                b"x",
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join(".hidden.mp3"), b"x").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let (mut pending, mut found, mut steps) = (vec![String::new()], Vec::new(), 0);
+        while !pending.is_empty() {
+            let walked = walk_some(dir.path(), pending, 4, Duration::from_secs(60)).unwrap();
+            // A folder is listed whole: a step finds its share and one folder more at most.
+            assert!(walked.files.len() <= 4 + 3, "{:?}", walked.files);
+            found.extend(walked.files);
+            pending = walked.pending;
+            steps += 1;
+        }
+        found.sort();
+        assert_eq!(found.len(), 12);
+        assert!(found.contains(&"a/deep/20190301_130000.mp3".to_string()));
+        assert!(steps >= 3, "{steps}");
+        assert!(
+            walk_some(
+                &dir.path().join("none"),
+                vec![String::new()],
+                4,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
     }
 
     #[test]

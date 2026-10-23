@@ -484,11 +484,15 @@ older archive… on the Storage area) takes in an older install's folder of
 recordings, such as another machine's SDRTrunk or TrunkingRecorder, where it
 is: the folder, mounted on every ScannerPulse machine, becomes the read-only
 location NAME, and nothing in it is ever written, renamed or deleted. Each
-machine checks it by listing it; an empty folder counts as not mounted.
+machine checks it by listing it; an empty folder counts as not mounted. A
+large folder is listed over many steps, about 20,000 files a step; a single
+folder is listed whole, within 4 minutes.
 
 A review comes first and writes nothing (`--review`). It counts the mp3
 files, and those whose names hold no date and time, which are skipped. It
-reads up to 1,000 of the others, spread over the folder, and counts:
+reads up to 1,000 of the others, drawn at random over the folder, and
+counts, at the offset the import keeps (none for a new one) and at each
+whole-hour offset it tries:
 - the new calls;
 - the copies of calls already in the archive: the same talkgroup,
   overlapping by more than a second and by at least half the shorter, the

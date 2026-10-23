@@ -536,7 +536,7 @@ fn push(batches: &mut Vec<Batch>, key: &(i16, String), sighting: &Sighting) {
 }
 
 /// An mp3 file by its name: `.mp3` in any case, not hidden.
-fn is_audio(path: &Path) -> bool {
+pub(crate) fn is_audio(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
