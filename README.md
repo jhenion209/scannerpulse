@@ -501,15 +501,20 @@ whole-hour offset it tries:
 - the files of a system not named yet;
 - the talkgroups the files name otherwise.
 
-It shows some of each. It also counts the copies at each whole-hour offset
+It compares the files with the archive only: the folder's own copies of a
+call count there as new calls. It shows some of each. It also counts the copies at each whole-hour offset
 from −2 h to +2 h, and suggests the offset at which clearly more files are
 copies: the older install's clock or time zone was off.
 
 The import then runs as a job with that offset (`--offset ±HH:MM`). The
 offset moves the times the file names give; the names stay as they are, and
-a file's modification time is never used. Each file becomes a call of NAME,
-at its path in the folder, except:
-- a copy of a call is skipped, and never replaces the archive's recording;
+a file's modification time never times a call. Each file becomes a call of
+NAME, at its path in the folder, except:
+- a copy of a call already in the archive is skipped, and never replaces
+  its recording;
+- of the folder's own copies of a call (several recorders filed into one
+  folder), the one whose file arrived first, by its modification time, is
+  the call, in whichever order they are taken; the others are skipped;
 - a file of a system not named yet waits in the folder, until the system is
   named on the Recorders area and the import runs again.
 

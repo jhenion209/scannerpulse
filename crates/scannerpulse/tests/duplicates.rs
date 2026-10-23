@@ -177,7 +177,7 @@ impl Site {
             .await
             .unwrap()
             .unwrap();
-        let same = store::same_call(&self.pool, talkgroup, &call, self.south_id)
+        let same = store::same_call(&self.pool, talkgroup, &call, Some(self.south_id))
             .await
             .unwrap()
             .unwrap();

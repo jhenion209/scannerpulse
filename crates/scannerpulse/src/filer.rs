@@ -460,7 +460,7 @@ impl Filer {
         };
         limited(
             self.db_limit,
-            store::same_call(&self.pool, talkgroup, call, row.source_id),
+            store::same_call(&self.pool, talkgroup, call, Some(row.source_id)),
         )
         .await
     }

@@ -251,7 +251,7 @@ async fn verdict(
         return Ok(Verdict::Filed);
     };
     if let Some(id) = store::talkgroup_of(&mut *conn, system, talkgroup.number).await?
-        && let Some(same) = store::same_call(&mut *conn, id, call, source_id).await?
+        && let Some(same) = store::same_call(&mut *conn, id, call, Some(source_id)).await?
     {
         let (call_id, recorder) = (same.id, same.recorder.clone());
         return Ok(if same.replaced_by(call.duration_ms) {

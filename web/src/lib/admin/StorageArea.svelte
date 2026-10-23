@@ -413,8 +413,8 @@
     <p>
       An older install's folder of recordings, mounted on every ScannerPulse machine, becomes a read-only location: nothing
       in it is ever written, renamed or deleted. A review comes first and changes nothing. Copies of calls already in the
-      archive are skipped; files of a system not named yet wait in the folder until it is named on the Recorders area
-      and the import runs again.
+      archive are skipped; of the folder's own copies of a call, the one that arrived first is imported; files of a
+      system not named yet wait in the folder until it is named on the Recorders area and the import runs again.
     </p>
     <form class="grid" onsubmit={startReview}>
       <label for="import-name">Name</label>

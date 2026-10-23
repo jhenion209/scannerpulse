@@ -762,6 +762,8 @@ pub struct SameCall {
     pub talkgroup_id: i32,
     pub location_id: i16,
     pub rel_path: String,
+    /// When its file arrived, by the file's time.
+    pub file_mtime: Option<DateTime<Utc>>,
     /// A person worked on it; it keeps its recording.
     pub kept: bool,
 }
@@ -796,18 +798,21 @@ pub async fn talkgroup_of(
 /// `source_id` is a copy of, if any: of the calls another recorder filed
 /// whose recordings overlap the file's as copies do ([`SameCall`]), the one
 /// that overlaps it most. A recorder never sends two copies of one call, so
-/// a call that has, or had, a copy from `source_id` is not one. A call longer
-/// than an hour does not occur, which bounds the search.
+/// a call that has, or had, a copy from `source_id` is not one. An import's
+/// files (`None`) may be several recorders' copies of one call: every call
+/// is compared. A call longer than an hour does not occur, which bounds the
+/// search.
 pub async fn same_call(
     db: impl PgExecutor<'_>,
     talkgroup_id: i32,
     call: &FileCall,
-    source_id: i16,
+    source_id: Option<i16>,
 ) -> sqlx::Result<Option<SameCall>> {
     let least = i32::try_from(LEAST_OVERLAP.as_millis()).unwrap_or(i32::MAX);
     sqlx::query_as(&format!(
         "SELECT c.id, c.started_at, coalesce(c.duration_ms, 0) AS duration_ms, c.source_id, \
-                s.name AS recorder, c.talkgroup_id, c.location_id, c.rel_path, {KEPT} AS kept \
+                s.name AS recorder, c.talkgroup_id, c.location_id, c.rel_path, c.file_mtime, \
+                {KEPT} AS kept \
          FROM (SELECT c.*, \
                       least(c.started_at + coalesce(c.duration_ms, 0) * interval '1 millisecond', \
                             $2 + $3 * interval '1 millisecond') \
@@ -816,7 +821,8 @@ pub async fn same_call(
                WHERE c.talkgroup_id = $1 \
                  AND c.started_at > $2 - interval '1 hour' \
                  AND c.started_at < $2 + $3 * interval '1 millisecond' \
-                 AND c.source_id <> $4 AND NOT ($4 = ANY (coalesce(c.copies_from, '{{}}'))) \
+                 AND ($4::smallint IS NULL OR (c.source_id <> $4 \
+                      AND NOT ($4 = ANY (coalesce(c.copies_from, '{{}}'))))) \
                  AND ($6::bigint IS NULL OR c.radio_id IS NULL OR c.radio_id = $6)) c \
          JOIN sources s ON s.id = c.source_id \
          WHERE c.overlap > $5 * interval '1 millisecond' \
@@ -916,6 +922,22 @@ pub async fn replace(
     sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'"))
         .execute(&mut *tx)
         .await?;
+    let replaced = replace_in(&mut tx, row_id, same, new, size).await?;
+    if replaced {
+        tx.commit().await?;
+    }
+    Ok(replaced)
+}
+
+/// [`replace`] in the caller's transaction: a read-only location's
+/// recording replaced is forgotten, never deleted ([`Leftover`]).
+pub async fn replace_in(
+    tx: &mut PgConnection,
+    row_id: i64,
+    same: &SameCall,
+    new: &NewCall<'_>,
+    size: i64,
+) -> sqlx::Result<bool> {
     let now: Option<(String, i16, i16, i32, Option<i32>, bool)> = sqlx::query_as(&format!(
         "SELECT c.rel_path, c.location_id, c.source_id, coalesce(c.duration_ms, 0), \
                 c.talkgroup_id, {KEPT} \
@@ -937,7 +959,7 @@ pub async fn replace(
         return Ok(false);
     }
     let (talkgroup_id, site_id, mapped) =
-        lookups(&mut tx, &new.call.described, new.source_id).await?;
+        lookups(&mut *tx, &new.call.described, new.source_id).await?;
     if talkgroup_id != Some(same.talkgroup_id) {
         return Ok(false);
     }
@@ -1020,7 +1042,6 @@ pub async fn replace(
     .bind(call.started_at)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
     Ok(true)
 }
 

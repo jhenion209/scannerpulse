@@ -1,7 +1,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use common::seed_places;
@@ -484,6 +484,89 @@ async fn an_import_run_again_takes_only_the_files_it_has_not(pool: PgPool) {
     // A name another location or a recorder has is refused.
     let why = refusal(imports::start(&mut conn, "live", other.path(), None, "admin").await);
     assert!(why.contains("live"), "{why}");
+}
+
+/// Several recorders filed into one older folder (6B3's M5; the owner: "Keep
+/// first arrived"): of an import's copies of a call, the one whose file
+/// arrived first, by its time, is the call, in whichever order the import
+/// takes them; the others are copies, as is every copy of a call the archive
+/// already holds.
+#[sqlx::test(migrations = "./migrations")]
+async fn an_import_keeps_the_copy_that_arrived_first(pool: PgPool) {
+    let (_archive, places) = site(&pool).await;
+    let old = tempfile::tempdir().unwrap();
+    let start = SystemTime::now() - Duration::from_secs(86_400);
+    let put = |name: &str, seconds: usize, after: u64| {
+        let path = old.path().join(name);
+        std::fs::write(&path, recording("Metro", 702, "Fire", seconds)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(start + Duration::from_secs(after))
+            .unwrap();
+    };
+    // First, a copy of the archive's call of 12:00, and the copy of 13:00
+    // that arrived last.
+    put("20190301_120000_a.mp3", 10, 0);
+    put("20190301_130001_b.mp3", 6, 3605);
+    let mut conn = pool.acquire().await.unwrap();
+    let (_, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    // Then the copy of 13:00 that arrived first, another copy of 12:00, and
+    // both copies of 14:00.
+    put("20190301_120001_b.mp3", 10, 1);
+    put("20190301_130000_a.mp3", 4, 3604);
+    put("20190301_140000_a.mp3", 4, 7204);
+    put("20190301_140001_b.mp3", 6, 7203);
+    let (job, _) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let message: String = sqlx::query_scalar("SELECT message FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        message,
+        "1 call imported into Old; 3 copies of calls already in the archive skipped"
+    );
+    let paths: Vec<String> =
+        sqlx::query_scalar("SELECT rel_path FROM calls WHERE location_id = $1 ORDER BY started_at")
+            .bind(started.location)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(paths, ["20190301_130000_a.mp3", "20190301_140001_b.mp3"]);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT rel_path, state FROM ingest_files WHERE source_id = $1 ORDER BY rel_path",
+    )
+    .bind(started.source)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let row = |path: &str, state: &str| (path.to_string(), state.to_string());
+    assert_eq!(
+        rows,
+        [
+            row("20190301_120000_a.mp3", "duplicate"),
+            row("20190301_120001_b.mp3", "duplicate"),
+            row("20190301_130000_a.mp3", "done"),
+            row("20190301_130001_b.mp3", "duplicate"),
+            row("20190301_140000_a.mp3", "duplicate"),
+            row("20190301_140001_b.mp3", "done"),
+        ]
+    );
+    let copies: Option<Vec<i16>> =
+        sqlx::query_scalar("SELECT copies_from FROM calls WHERE location_id = $1")
+            .bind(places.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(copies, Some(vec![started.source]));
 }
 
 #[sqlx::test(migrations = "./migrations")]

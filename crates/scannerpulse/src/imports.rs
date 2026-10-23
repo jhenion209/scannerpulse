@@ -13,7 +13,9 @@
 //! starts. Its first step lists every file it has not taken, as a row in a
 //! state no filer takes (`listed`: a filer deletes the files it files); each
 //! later step files a batch: a copy of a call is skipped, never replacing
-//! the archive's recording; a file of an unknown system waits in the folder
+//! the archive's recording, except that of the import's own copies of a call
+//! the one whose file arrived first is the call (the owner, 6B3's M5); a
+//! file of an unknown system waits in the folder
 //! until its system is named and the import runs again; any other file is a
 //! call of the location at its path in the folder, timed by its name and the
 //! offset, its talkgroup names going through the approval, and queued for no
@@ -270,11 +272,11 @@ enum Class {
     New(Option<String>),
 }
 
-/// What the file's call `call` is, for the import `source_id` (-1 for none
-/// yet) purged before `purged_before`. It writes nothing.
+/// What the file's call `call` is, for an import purged before
+/// `purged_before`. A copy may be of a call the import took itself. It
+/// writes nothing.
 async fn classify(
     conn: &mut PgConnection,
-    source_id: i16,
     call: &FileCall,
     purged_before: Option<NaiveDate>,
     zone: Tz,
@@ -297,7 +299,7 @@ async fn classify(
     let Some(id) = store::talkgroup_of(&mut *conn, system, talkgroup.number).await? else {
         return Ok(Class::New(None));
     };
-    if let Some(same) = store::same_call(&mut *conn, id, call, source_id).await? {
+    if let Some(same) = store::same_call(&mut *conn, id, call, None).await? {
         return Ok(Class::Copy(same));
     }
     let stored: String = sqlx::query_scalar("SELECT name FROM talkgroups WHERE id = $1")
@@ -685,7 +687,7 @@ pub(crate) async fn review_step(
             }
         };
         work.read += 1;
-        match classify(conn, source_id, &call, purged_before, zone).await? {
+        match classify(conn, &call, purged_before, zone).await? {
             Class::BeforePurge(_) => work.before_purge += 1,
             Class::UnknownSystem(system) => {
                 work.unknown += 1;
@@ -724,7 +726,7 @@ pub(crate) async fn review_step(
                 started_at: started_at(call.local_start, *offset, zone),
                 ..call.clone()
             };
-            match classify(conn, source_id, &moved, purged_before, zone).await? {
+            match classify(conn, &moved, purged_before, zone).await? {
                 Class::Copy(_) => work.copies_at[i] += 1,
                 Class::New(_) => work.new_at[i] += 1,
                 Class::BeforePurge(_) | Class::UnknownSystem(_) => {}
@@ -1287,7 +1289,7 @@ pub(crate) async fn import_step(
                     ));
                 }
             };
-        match classify(conn, params.source, &call, place.purged_before, zone).await? {
+        match classify(conn, &call, place.purged_before, zone).await? {
             Class::BeforePurge(day) => {
                 let why = format!("from before {day}, before which {} was purged", params.name);
                 store::reject(&mut *conn, row.id, &why).await?;
@@ -1303,12 +1305,39 @@ pub(crate) async fn import_step(
                 work.staged += 1;
             }
             Class::Copy(same) => {
-                let why = format!(
-                    "a copy of call {} from {}: the call keeps its recording",
-                    same.id, same.recorder
-                );
-                let file = (size, &call);
-                store::duplicate_in(conn, row.id, &same, params.source, file, &why).await?;
+                let new = NewCall {
+                    call: &call,
+                    source_id: params.source,
+                    location_id: place.location_id,
+                    rel_path: &row.rel_path,
+                    transcribe_from_ms: None,
+                };
+                // Of the import's own copies of a call, the one whose file
+                // arrived first is the call (the owner, 6B3's M5).
+                let first = same.source_id == params.source
+                    && same.location_id == place.location_id
+                    && same.file_mtime.is_some_and(|kept| call.file_mtime < kept);
+                if first && store::replace_in(conn, row.id, &same, &new, size).await? {
+                    sqlx::query(
+                        "UPDATE ingest_files SET state = 'duplicate', reason = $3 \
+                         WHERE source_id = $1 AND rel_path = $2 AND state = 'done'",
+                    )
+                    .bind(params.source)
+                    .bind(&same.rel_path)
+                    .bind(format!(
+                        "a copy of call {}: {} arrived first",
+                        same.id, row.rel_path
+                    ))
+                    .execute(&mut *conn)
+                    .await?;
+                } else {
+                    let why = format!(
+                        "a copy of call {} from {}: the call keeps its recording",
+                        same.id, same.recorder
+                    );
+                    let file = (size, &call);
+                    store::duplicate_in(conn, row.id, &same, params.source, file, &why).await?;
+                }
                 work.copies += 1;
             }
             Class::New(_) => {
