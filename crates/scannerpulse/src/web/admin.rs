@@ -147,9 +147,18 @@ pub async fn accounts_password(
     Path(login): Path<String>,
     Json(body): Json<NewPassword>,
 ) -> Result<StatusCode, ApiError> {
-    // Anyone's own password; another's only a super admin's to set.
+    // Anyone's own password; another's only a super admin's to set. An
+    // associate who signs in only through the provider has no password to
+    // change: one would outlive their removal from the provider's group.
     if login != admin.0.login {
         admin.require_super()?;
+    } else if admin.0.grant.role != Role::Super {
+        let account = accounts::by_login(&state.pool, &login).await?;
+        if account.is_none_or(|(_, hash, _)| hash.is_empty()) {
+            return Err(ApiError::Forbidden(format!(
+                "{login} signs in through single sign-on and has no password; a super admin can give it one"
+            )));
+        }
     }
     let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;

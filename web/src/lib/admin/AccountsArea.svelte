@@ -135,7 +135,8 @@
             </div>
           {/if}
           <div class="row">
-            {#if you || isSuper()}
+            <!-- An associate signing in only through the provider has no password to change. -->
+            {#if (you && account.password) || isSuper()}
               <button type="button" onclick={() => (renewing = renewing === account.login ? null : account.login)}
                 aria-expanded={renewing === account.login}>New password for {account.login}</button>
             {/if}

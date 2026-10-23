@@ -442,3 +442,41 @@ async fn a_super_admin_adds_an_associate_by_default_and_a_super_admin_when_asked
     .await;
     assert_eq!(last.status, 409, "{:?}", last.body);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_associate_who_signs_in_through_oidc_cannot_give_themselves_a_password(pool: PgPool) {
+    admin(&pool, "ann", PASSWORD).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let (id, login, _) =
+        accounts::oidc_account(&mut conn, "https://id.example.org", "s-1", Some("sso"))
+            .await
+            .unwrap();
+    // Signed in through the provider: an associate with no password.
+    let (token, csrf) = scannerpulse::sessions::create(&mut conn, id, true)
+        .await
+        .unwrap();
+    let cookie = format!("scannerpulse_session={token}");
+    let h = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let app = app(&pool);
+    let path = format!("/api/admin/accounts/{login}/password");
+    let own = send(&app, "POST", &path, &h, Some(json!({"password": PASSWORD}))).await;
+    assert_eq!(own.status, 403, "{:?}", own.body);
+    let listed = accounts::list(&pool).await.unwrap();
+    let sso = listed.iter().find(|a| a.login == login).unwrap();
+    assert!(!sso.password, "the provider stays the only way in");
+    // A super admin may still give it one.
+    let (boss, boss_csrf) = sign_in(&app, "ann", PASSWORD).await;
+    let ann = [
+        ("cookie", boss.as_str()),
+        ("x-csrf-token", boss_csrf.as_str()),
+    ];
+    let given = send(
+        &app,
+        "POST",
+        &path,
+        &ann,
+        Some(json!({"password": PASSWORD})),
+    )
+    .await;
+    assert_eq!(given.status, 204, "{:?}", given.body);
+}
