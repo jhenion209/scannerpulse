@@ -618,10 +618,9 @@ pub async fn fenced<'c>(
     Ok(tx)
 }
 
-/// Step 3 of filing, in one fenced transaction: looks up the system, site and
-/// talkgroup, records the call, marks the ingest row `row_id` done, queues the
-/// call for transcription when `new` says so, and announces the call on
-/// `scannerpulse_calls`. Returns the call's id and start.
+/// Step 3 of filing, in one fenced transaction: records the call
+/// ([`record_in`]) and announces it on `scannerpulse_calls`. Returns the
+/// call's id and start.
 pub async fn record(
     conn: &mut PgConnection,
     holder: &str,
@@ -629,8 +628,25 @@ pub async fn record(
     new: &NewCall<'_>,
 ) -> Result<(i64, DateTime<Utc>), RecordError> {
     let mut tx = fenced(conn, holder).await?;
-    let (talkgroup_id, site_id, mapped) =
-        lookups(&mut tx, &new.call.described, new.source_id).await?;
+    let (id, started_at) = record_in(&mut tx, row_id, new).await?;
+    sqlx::query("SELECT pg_notify('scannerpulse_calls', $1)")
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok((id, started_at))
+}
+
+/// Records a call in the caller's transaction: looks up the system, site and
+/// talkgroup, records the call, marks the ingest row `row_id` done, and
+/// queues the call for transcription when `new` says so. An import's job
+/// calls it as is: its calls are old, and not announced.
+pub async fn record_in(
+    tx: &mut PgConnection,
+    row_id: i64,
+    new: &NewCall<'_>,
+) -> sqlx::Result<(i64, DateTime<Utc>)> {
+    let (talkgroup_id, site_id, mapped) = lookups(tx, &new.call.described, new.source_id).await?;
     let call = new.call;
     let d = &call.described;
     let id: i64 = sqlx::query_scalar(
@@ -677,11 +693,6 @@ pub async fn record(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("SELECT pg_notify('scannerpulse_calls', $1)")
-        .bind(id.to_string())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
     Ok((id, call.started_at))
 }
 
@@ -815,8 +826,7 @@ pub async fn same_call(
 
 /// Records, in one fenced transaction, that the waiting file `row_id` of the
 /// recorder `source_id` (`file`: its size and modification time) was a copy
-/// of `same` and was deleted: its row is a duplicate of the call, which
-/// remembers the recorder.
+/// of `same` and was deleted ([`duplicate_in`]).
 pub async fn duplicate(
     conn: &mut PgConnection,
     holder: &str,
@@ -827,6 +837,22 @@ pub async fn duplicate(
     reason: &str,
 ) -> Result<(), RecordError> {
     let mut tx = fenced(conn, holder).await?;
+    duplicate_in(&mut tx, row_id, same, source_id, file, reason).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Records in the caller's transaction that the file `row_id` of the source
+/// `source_id` was a copy of `same`, for the reason given: its row is a
+/// duplicate of the call, which remembers the source.
+pub async fn duplicate_in(
+    tx: &mut PgConnection,
+    row_id: i64,
+    same: &SameCall,
+    source_id: i16,
+    file: (i64, DateTime<Utc>),
+    reason: &str,
+) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE ingest_files SET state = 'duplicate', reason = $2, call_id = $3, \
          call_started_at = $4, size = $5, file_mtime = $6 \
@@ -850,7 +876,6 @@ pub async fn duplicate(
     .bind(source_id)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

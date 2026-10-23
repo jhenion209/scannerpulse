@@ -243,7 +243,7 @@ pub fn bytes_about(root: &Path, sample: &[String], calls: i64) -> Option<i64> {
 
 /// Every folder a new location must stay apart from: the locations, the
 /// recorders' folders, the purge's holding folder and `backups`.
-async fn taken(
+pub(crate) async fn taken(
     conn: &mut PgConnection,
     backups: Option<&Path>,
 ) -> sqlx::Result<Vec<(String, PathBuf)>> {

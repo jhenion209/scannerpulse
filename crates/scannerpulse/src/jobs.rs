@@ -29,6 +29,10 @@ pub enum Kind {
     Move,
     /// Deletes every call before a day, records first, files by the sweep.
     PurgeBefore,
+    /// Reviews an older archive's folder before its import; writes nothing.
+    ImportReview,
+    /// Imports an older archive where it is, as a read-only location.
+    Import,
 }
 
 impl Kind {
@@ -41,6 +45,8 @@ impl Kind {
             Kind::Purge => "purge",
             Kind::Move => "move",
             Kind::PurgeBefore => "purge_before",
+            Kind::ImportReview => "import_review",
+            Kind::Import => "import",
         }
     }
 
@@ -53,6 +59,8 @@ impl Kind {
             "purge" => Some(Kind::Purge),
             "move" => Some(Kind::Move),
             "purge_before" => Some(Kind::PurgeBefore),
+            "import_review" => Some(Kind::ImportReview),
+            "import" => Some(Kind::Import),
             _ => None,
         }
     }
@@ -391,6 +399,12 @@ pub async fn step(
             Some(Kind::Purge) => crate::data::purge_step(&mut tx, &job, context.file_limit).await?,
             Some(Kind::Move) => crate::moves::step(&mut tx, &job, context.file_limit).await?,
             Some(Kind::PurgeBefore) => crate::purges::step(&mut tx, &job).await?,
+            Some(Kind::ImportReview) => {
+                crate::imports::review_step(&mut tx, &job, context.file_limit).await?
+            }
+            Some(Kind::Import) => {
+                crate::imports::import_step(&mut tx, pool, &job, context.file_limit).await?
+            }
             None => Outcome::Failed(format!("no runner knows jobs of the kind {:?}", job.kind)),
         }
     };

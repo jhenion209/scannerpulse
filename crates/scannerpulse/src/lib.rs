@@ -17,6 +17,7 @@ pub mod favorites;
 pub mod filer;
 pub mod health;
 pub mod hostfile;
+pub mod imports;
 pub mod ingest;
 pub mod jobs;
 pub mod layout;
