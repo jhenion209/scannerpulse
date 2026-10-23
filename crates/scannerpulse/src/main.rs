@@ -76,6 +76,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse talkgroup purge SYSTEM/NUMBER [--confirm NAME]
        scannerpulse queue retry-failed
        scannerpulse status
+       scannerpulse audit [--since DAY] [--admin NAME] [--follow]
        scannerpulse report traffic
        scannerpulse jobs list
        scannerpulse jobs show|stop ID
@@ -380,6 +381,13 @@ enum Command {
     Waiting(Waiting),
     RetryFailed,
     Status,
+    /// `audit`: the audit log, oldest first; `follow` keeps printing new
+    /// entries.
+    Audit {
+        since: Option<NaiveDate>,
+        admin: Option<String>,
+        follow: bool,
+    },
     Traffic,
     Version,
     Help,
@@ -974,6 +982,18 @@ fn parse(args: &[&str]) -> Option<Command> {
         },
         ["queue", "retry-failed"] => Some(Command::RetryFailed),
         ["status"] => Some(Command::Status),
+        ["audit", rest @ ..] => {
+            let found = flags(rest, &[], &["--since", "--admin"], &["--follow"])?;
+            let since = match found.get("--since") {
+                Some(day) => Some(day.parse::<NaiveDate>().ok()?),
+                None => None,
+            };
+            Some(Command::Audit {
+                since,
+                admin: found.get("--admin").map(|name| name.to_string()),
+                follow: found.contains_key("--follow"),
+            })
+        }
         ["report", "traffic"] => Some(Command::Traffic),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
@@ -1067,7 +1087,128 @@ async fn run() -> ExitCode {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match parse(&args) {
+    let command = parse(&args);
+    let audited = command.as_ref().is_some_and(changes_something);
+    let code = execute(command).await;
+    if audited && code == ExitCode::SUCCESS {
+        record_command(&args).await;
+    }
+    code
+}
+
+/// Whether a command changes the site: when it succeeds, the audit log
+/// records it. A command that only counts (without its `--yes` or
+/// `--confirm`) changes nothing.
+fn changes_something(command: &Command) -> bool {
+    match command {
+        Command::DbUpdate { .. }
+        | Command::Rescan
+        | Command::Change(_)
+        | Command::Db(_)
+        | Command::DbMove(_)
+        | Command::ArchiveMove { .. }
+        | Command::TalkgroupSwitch { .. }
+        | Command::TalkgroupRename { .. }
+        | Command::RetryFailed
+        | Command::Asr(Asr::Run { .. })
+        | Command::Jobs(Jobs::Stop(_) | Jobs::AsrRun { .. })
+        | Command::Recorder(RecorderCommand::Add { .. } | RecorderCommand::Change { .. })
+        | Command::Storage(
+            StorageCommand::Add { .. }
+            | StorageCommand::Remove { .. }
+            | StorageCommand::Import { .. },
+        )
+        | Command::Waiting(
+            Waiting::Approve { .. }
+            | Waiting::Dismiss { .. }
+            | Waiting::NewSystem { .. }
+            | Waiting::Map { .. },
+        ) => true,
+        Command::Setup { dry_run, .. } => !dry_run,
+        Command::Update { check, .. } => !check,
+        Command::Transcribe { yes, .. }
+        | Command::Asr(Asr::Sample { yes, .. })
+        | Command::Jobs(Jobs::Queue { yes, .. }) => *yes,
+        Command::Admin(admin) => !matches!(admin, Admin::List),
+        Command::Settings(settings) => !matches!(settings, Settings::List),
+        Command::Favorites(favorites) => !matches!(favorites, Favorites::List),
+        Command::Data(
+            Data::Correct { confirm, .. }
+            | Data::Merge { confirm, .. }
+            | Data::Purge { confirm, .. },
+        )
+        | Command::Storage(
+            StorageCommand::Move { confirm, .. }
+            | StorageCommand::PurgeBefore { confirm, .. }
+            | StorageCommand::Consolidate { confirm, .. },
+        )
+        | Command::Waiting(Waiting::Discard { confirm, .. }) => confirm.is_some(),
+        _ => false,
+    }
+}
+
+/// The audit log's entry of a command that changed something: the command
+/// as typed. Its arguments hold no secret: passwords and tokens are read
+/// from the terminal or standard input.
+async fn record_command(args: &[&str]) {
+    let what = format!("ran `scannerpulse {}`", as_typed(args));
+    let recorded = match connect().await {
+        Ok(mut conn) => scannerpulse::audit::record_command(&mut conn, &what)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = recorded {
+        eprintln!("scannerpulse: the audit log did not record this command: {error}");
+    }
+}
+
+/// The arguments as a shell would take them back: each with a character a
+/// shell reads in single quotes.
+fn as_typed(args: &[&str]) -> String {
+    args.iter()
+        .map(|arg| {
+            let plain = !arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+            if plain {
+                arg.to_string()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `scannerpulse audit`: the entries, oldest first, each time in the site's
+/// zone; with `follow`, new entries as they come, read every 2 s.
+async fn audit_log(since: Option<NaiveDate>, admin: Option<String>, follow: bool) -> CommandResult {
+    use scannerpulse::audit;
+    let mut conn = connect().await?;
+    let zone = settings::load(&mut conn).await?.time_zone;
+    let since = since.map(|day| audit::day_start(day, zone));
+    let mut last = 0;
+    loop {
+        let entries = audit::list(&mut conn, last, since, admin.as_deref(), 1000).await?;
+        for entry in &entries {
+            println!("{}", audit::line(entry, zone));
+            last = entry.id;
+        }
+        std::io::stdout().flush()?;
+        if entries.len() == 1000 {
+            continue;
+        }
+        if !follow {
+            return Ok(ExitCode::SUCCESS);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn execute(command: Option<Command>) -> ExitCode {
+    match command {
         Some(Command::DbUpdate { quiet }) => match db_update(quiet).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -1200,6 +1341,17 @@ async fn run() -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("report: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Audit {
+            since,
+            admin,
+            follow,
+        }) => match audit_log(since, admin, follow).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("audit: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -2421,10 +2573,9 @@ async fn status_command() -> CommandResult {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Who started a job from the command line.
+/// Who started a job from the command line: "<account> on <machine>".
 fn command_line_user() -> String {
-    let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
-    format!("{user} on the command line")
+    scannerpulse::audit::command_actor()
 }
 
 fn job_line(job: &jobs::Job) -> String {
@@ -3016,8 +3167,8 @@ async fn applied(conn: &mut PgConnection) -> sqlx::Result<Vec<i64>> {
 mod tests {
     use super::{
         Admin, Asr, Change, Command, Data, DbCommand, DbMove, Favorites, Jobs, Joined, NodeCommand,
-        RecorderCommand, Settings, StorageCommand, Waiting, parse, recorders, run_to_end,
-        talkgroup_list,
+        RecorderCommand, Settings, StorageCommand, Waiting, as_typed, changes_something, parse,
+        recorders, run_to_end, talkgroup_list,
     };
     use scannerpulse::roles::Role;
     use std::path::PathBuf;
@@ -3509,6 +3660,83 @@ mod tests {
         let bad = talkgroup_list("SYSA/127\nAlpha Fire\n").unwrap_err();
         assert!(bad.contains("line 2"), "{bad}");
         assert!(talkgroup_list("# nothing\n").is_err());
+    }
+
+    #[test]
+    fn audit_takes_a_day_an_admin_and_follow() {
+        assert_eq!(
+            parse(&["audit"]),
+            Some(Command::Audit {
+                since: None,
+                admin: None,
+                follow: false
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "audit",
+                "--since",
+                "2026-10-23",
+                "--admin",
+                "ann",
+                "--follow"
+            ]),
+            Some(Command::Audit {
+                since: chrono::NaiveDate::from_ymd_opt(2026, 10, 23),
+                admin: Some("ann".into()),
+                follow: true
+            })
+        );
+        assert_eq!(parse(&["audit", "--since", "yesterday"]), None);
+        assert_eq!(parse(&["audit", "--admin"]), None);
+    }
+
+    #[test]
+    fn a_command_is_recorded_only_when_it_changes_something() {
+        for args in [
+            &["settings", "set", "web.system_order", "[\"B\"]"][..],
+            &["admin", "allow", "cy", "move"],
+            &[
+                "storage",
+                "move",
+                "2026-01-01",
+                "2026-01-31",
+                "Shelf",
+                "--confirm",
+                "move",
+            ],
+            &["jobs", "stop", "7"],
+            &["rescan"],
+            &["db", "switchover"],
+            &["update", "--yes"],
+        ] {
+            let command = parse(args).unwrap_or_else(|| panic!("{args:?}"));
+            assert!(changes_something(&command), "{args:?}");
+        }
+        for args in [
+            &["settings", "list"][..],
+            &["admin", "list"],
+            &["storage", "move", "2026-01-01", "2026-01-31", "Shelf"],
+            &["jobs", "list"],
+            &["status"],
+            &["audit", "--follow"],
+            &["update", "--check"],
+        ] {
+            let command = parse(args).unwrap_or_else(|| panic!("{args:?}"));
+            assert!(!changes_something(&command), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_recorded_command_reads_as_typed() {
+        assert_eq!(
+            as_typed(&["settings", "set", "web.system_order", "[\"B\", \"A\"]"]),
+            "settings set web.system_order '[\"B\", \"A\"]'"
+        );
+        assert_eq!(
+            as_typed(&["recorder", "add", "it's"]),
+            "recorder add 'it'\\''s'"
+        );
     }
 
     #[test]

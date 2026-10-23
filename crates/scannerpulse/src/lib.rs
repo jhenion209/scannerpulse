@@ -6,6 +6,7 @@ pub mod acme;
 pub mod agent;
 pub mod archive;
 pub mod asr;
+pub mod audit;
 pub mod backfill;
 pub mod backup;
 pub mod cert;

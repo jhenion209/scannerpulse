@@ -40,10 +40,6 @@ pub type Counts = Vec<(
 /// a time, and the counts.
 pub type KeptCounts = std::sync::Arc<tokio::sync::Mutex<Option<(Instant, DateTime<Utc>, Counts)>>>;
 
-fn record(admin: &Admin, what: String) {
-    crate::log::info(format!("admin {}: {what}", admin.0.login));
-}
-
 fn refused(error: Refused) -> ApiError {
     match error {
         Refused::Refused(why) => ApiError::BadRequest(why),
@@ -194,10 +190,12 @@ pub async fn add(
     .await
     .map_err(refused)?;
     *state.storage_counts.lock().await = None;
-    record(
-        &admin,
-        format!("added the location {} ({})", body.name, folder.display()),
-    );
+    admin
+        .record(
+            &state,
+            format!("added the location {} ({})", body.name, folder.display()),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(json!({"id": id}))))
 }
 
@@ -210,7 +208,9 @@ pub async fn remove(
     let mut conn = state.pool.acquire().await?;
     let name = storage::remove(&mut conn, id).await.map_err(refused)?;
     *state.storage_counts.lock().await = None;
-    record(&admin, format!("removed the location {name}"));
+    admin
+        .record(&state, format!("removed the location {name}"))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -252,13 +252,15 @@ pub async fn purge_start(
         crate::purges::start(&mut conn, body.before, zone, &body.confirm, &admin.0.login)
             .await
             .map_err(job_refused)?;
-    record(
-        &admin,
-        format!(
-            "started job {job}: purge the {} calls before {}",
-            preview.calls, body.before
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "started job {job}: purge the {} calls before {}",
+                preview.calls, body.before
+            ),
+        )
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({"job": job, "calls": preview.calls})),
@@ -314,13 +316,15 @@ pub async fn move_start(
     )
     .await
     .map_err(job_refused)?;
-    record(
-        &admin,
-        format!(
-            "started job {job}: move the {} calls of {} to {} into {}",
-            preview.calls, body.from, body.until, body.to
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "started job {job}: move the {} calls of {} to {} into {}",
+                preview.calls, body.from, body.until, body.to
+            ),
+        )
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({"job": job, "calls": preview.calls})),
@@ -349,10 +353,12 @@ pub async fn import_review_start(
     )
     .await
     .map_err(job_refused)?;
-    record(
-        &admin,
-        format!("started job {job}: review {} for an import", body.folder),
-    );
+    admin
+        .record(
+            &state,
+            format!("started job {job}: review {} for an import", body.folder),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(json!({"job": job}))))
 }
 
@@ -403,15 +409,17 @@ pub async fn import_start(
     .await
     .map_err(job_refused)?;
     *state.storage_counts.lock().await = None;
-    record(
-        &admin,
-        format!(
-            "started job {job}: import {} as {} (offset {})",
-            body.folder,
-            body.name,
-            crate::imports::offset_text(started.offset)
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "started job {job}: import {} as {} (offset {})",
+                body.folder,
+                body.name,
+                crate::imports::offset_text(started.offset)
+            ),
+        )
+        .await;
     let mut answer = json!(started);
     answer["job"] = json!(job);
     Ok((StatusCode::CREATED, Json(answer)))
@@ -454,13 +462,15 @@ pub async fn consolidate_start(
         crate::consolidate::start(&mut conn, &body.name, &body.confirm, &admin.0.login)
             .await
             .map_err(job_refused)?;
-    record(
-        &admin,
-        format!(
-            "started job {job}: consolidate the {} calls of {} into the main archive",
-            preview.calls, body.name
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "started job {job}: consolidate the {} calls of {} into the main archive",
+                preview.calls, body.name
+            ),
+        )
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({"job": job, "calls": preview.calls})),

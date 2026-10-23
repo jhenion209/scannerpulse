@@ -79,11 +79,18 @@ pub async fn session(
 }
 
 /// A signed-in admin; for a change, with the session's CSRF token, and
-/// allowed what the change needs.
+/// allowed what the change needs, and the address it came from (for the
+/// audit log; none for a read).
 #[derive(Debug, Clone)]
-pub struct Admin(pub Session);
+pub struct Admin(pub Session, pub Option<String>);
 
 impl Admin {
+    /// Records a change this admin made: the audit log's entry and its
+    /// journal line.
+    pub async fn record(&self, state: &AppState, what: impl AsRef<str>) {
+        crate::audit::record(&state.pool, &self.0.login, self.1.as_deref(), what.as_ref()).await;
+    }
+
     /// Refuses unless the admin holds `function`.
     pub fn require(&self, function: Function) -> Result<(), ApiError> {
         if self.0.grant.may(function) {
@@ -118,14 +125,15 @@ impl FromRequestParts<AppState> for Admin {
             .await?
             .ok_or_else(signed_out)?;
         if reads_only(&parts.method) {
-            return Ok(Admin(session));
+            return Ok(Admin(session, None));
         }
         if !csrf_ok(&parts.headers, &session) {
             return Err(ApiError::Forbidden(format!(
                 "a change needs the session's {CSRF_HEADER} header"
             )));
         }
-        let admin = Admin(session);
+        let Client(address) = Client::from_request_parts(parts, state).await?;
+        let admin = Admin(session, Some(address.to_string()));
         let path = parts
             .extensions
             .get::<MatchedPath>()
@@ -252,7 +260,13 @@ pub async fn login(
         .await?
         .ok_or_else(|| ApiError::Internal("the new session is missing".into()))?;
     tx.commit().await?;
-    crate::log::info(format!("admin {name} signed in from {address}"));
+    crate::audit::record(
+        &state.pool,
+        &name,
+        Some(&address),
+        "signed in with a password",
+    )
+    .await;
     Ok(signed_in(&token, &session))
 }
 
@@ -287,10 +301,16 @@ pub fn signed_in(token: &str, session: &Session) -> Response {
 /// `POST /api/auth/logout`: ends the session, if there is one.
 pub async fn logout(
     State(state): State<AppState>,
+    Client(address): Client,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(token) = token(&headers) {
+        let session = sessions::lookup(&state.pool, &token, false).await?;
         sessions::end(&state.pool, &token).await?;
+        if let Some(session) = session {
+            let address = address.to_string();
+            crate::audit::record(&state.pool, &session.login, Some(&address), "signed out").await;
+        }
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -304,7 +324,7 @@ pub async fn logout(
 
 /// `GET /api/auth/me`: the signed-in admin, the session's CSRF token, and
 /// what the admin may change.
-pub async fn me(Admin(session): Admin) -> Json<serde_json::Value> {
+pub async fn me(Admin(session, _): Admin) -> Json<serde_json::Value> {
     Json(whoami(&session))
 }
 

@@ -779,6 +779,24 @@ already set in the environment wins. So far:
   a function changed counts from the admin's next request. The last enabled
   super admin can be neither disabled nor made an associate. An admin made
   before roles existed is a super admin.
+- **The audit log.** Every change an admin makes is kept, naming the admin
+  and the address the request came from:
+  - signing in and out (a failed sign-in goes to the journal only);
+  - a job started, and how it ended (done, failed, or stopped, and by whom);
+  - accounts, roles, functions and passwords set (never the password);
+  - a setting, with its old and new values;
+  - locations, recorders, name and system decisions, transcription switches
+    and favorites;
+  - Update now, a switchover and each step of the conversion.
+
+  A command run on a machine that changes something is kept as typed, named
+  `<account> on <machine>` (a job it starts is started by that name too).
+  Each entry is also a line in the journal (`audit: …`). The database
+  refuses to change or delete an entry, a super admin's included, and keeps
+  them with no time limit. `audit [--since DAY] [--admin NAME] [--follow]`
+  prints them oldest first, each time in the site's zone; `--admin root`
+  takes root's commands on every machine, and `--follow` keeps printing new
+  entries as they come. The admin page does not show the log.
 - `settings list`, `settings set KEY JSON` and `settings unset KEY` show and
   change the administrator's settings, such as `settings set time_zone
   '"America/Chicago"'`. A change is checked as the part that reads the

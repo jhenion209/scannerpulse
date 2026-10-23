@@ -11,10 +11,6 @@ use super::auth::Admin;
 use super::{ApiError, AppState};
 use crate::talkgroups::{self, Renamed};
 
-fn record(admin: &Admin, what: String) {
-    crate::log::info(format!("admin {}: {what}", admin.0.login));
-}
-
 /// `GET /api/admin/data/uncorrected`: the talkgroups whose files are not yet
 /// corrected.
 pub async fn uncorrected(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -43,14 +39,16 @@ pub async fn rename(
         .await?;
     match talkgroups::rename(&mut conn, id, &body.name).await? {
         Renamed::Done { files_correct } => {
-            record(
-                &admin,
-                format!(
-                    "renamed talkgroup {id} from {:?} to {:?}",
-                    old.unwrap_or_default(),
-                    body.name
-                ),
-            );
+            admin
+                .record(
+                    &state,
+                    format!(
+                        "renamed talkgroup {id} from {:?} to {:?}",
+                        old.unwrap_or_default(),
+                        body.name
+                    ),
+                )
+                .await;
             Ok(Json(
                 json!({"id": id, "name": body.name, "files_correct": files_correct}),
             ))
@@ -95,10 +93,12 @@ pub async fn correct_start(
     let mut conn = state.pool.acquire().await?;
     let (job, count) =
         crate::data::start_correct(&mut conn, id, &body.confirm, &admin.0.login).await?;
-    record(
-        &admin,
-        format!("started job {job}: correct {count} files of talkgroup {id}"),
-    );
+    admin
+        .record(
+            &state,
+            format!("started job {job}: correct {count} files of talkgroup {id}"),
+        )
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({"id": job, "count": count})),
@@ -141,13 +141,15 @@ pub async fn merge_start(
     let mut conn = state.pool.acquire().await?;
     let (job, count) =
         crate::data::start_merge(&mut conn, id, body.into, &body.confirm, &admin.0.login).await?;
-    record(
-        &admin,
-        format!(
-            "started job {job}: merge talkgroup {id} into {} ({count} calls)",
-            body.into
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "started job {job}: merge talkgroup {id} into {} ({count} calls)",
+                body.into
+            ),
+        )
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({"id": job, "count": count})),
@@ -177,10 +179,12 @@ pub async fn purge_start(
     let mut conn = state.pool.acquire().await?;
     let (job, count) =
         crate::data::start_purge(&mut conn, id, &body.confirm, &admin.0.login).await?;
-    record(
-        &admin,
-        format!("started job {job}: purge talkgroup {id} ({count} calls)"),
-    );
+    admin
+        .record(
+            &state,
+            format!("started job {job}: purge talkgroup {id} ({count} calls)"),
+        )
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({"id": job, "count": count})),

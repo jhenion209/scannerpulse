@@ -27,10 +27,6 @@ impl From<JobError> for ApiError {
     }
 }
 
-fn record(admin: &Admin, what: String) {
-    crate::log::info(format!("admin {}: {what}", admin.0.login));
-}
-
 pub async fn list(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(jobs::list(&state.pool, LISTED).await?)))
 }
@@ -62,7 +58,9 @@ pub async fn stop(
         admin.require(crate::roles::Function::StopJobs)?;
     }
     let stopped = jobs::stop(&mut conn, id, &admin.0.login).await?;
-    record(&admin, format!("asked job {id} to stop"));
+    admin
+        .record(&state, format!("asked job {id} to stop"))
+        .await;
     Ok(Json(json!({
         "id": id,
         "stopped": match stopped {
@@ -103,7 +101,9 @@ pub async fn queue_start(
     let mut conn = state.pool.acquire().await?;
     let past = jobs::queue_plan(&mut conn, ask.talkgroup_id, ask.from, ask.to).await?;
     let (id, count) = jobs::start_queue(&mut conn, &past, &admin.0.login).await?;
-    record(&admin, format!("started job {id}: queue {count} calls"));
+    admin
+        .record(&state, format!("started job {id}: queue {count} calls"))
+        .await;
     Ok((StatusCode::CREATED, Json(json!({"id": id, "count": count}))))
 }
 
@@ -132,12 +132,14 @@ pub async fn asr_start(
         &admin.0.login,
     )
     .await?;
-    record(
-        &admin,
-        format!(
-            "started job {id}: the set {} with {} at {}",
-            ask.set, ask.model, ask.server
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "started job {id}: the set {} with {} at {}",
+                ask.set, ask.model, ask.server
+            ),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(json!({"id": id, "count": count}))))
 }

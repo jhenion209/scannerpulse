@@ -463,3 +463,62 @@ async fn a_candidate_run_keeps_the_calls_it_started_with(pool: PgPool) {
         .unwrap();
     assert_eq!((wer, calls), (0.0, 2));
 }
+
+/// The audit log's entries, oldest first: who, and what.
+async fn audited(pool: &PgPool) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT actor, what FROM audit_log ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_jobs_end_is_recorded_in_the_name_of_who_started_it(pool: PgPool) {
+    let talkgroup = calls(&pool, 7, false).await;
+    let mut conn = pool.acquire().await.unwrap();
+    // Stopped while it runs: the entry names who asked.
+    let (running, _) = jobs::start_queue(&mut conn, &past(Some(talkgroup)), "ann")
+        .await
+        .unwrap();
+    jobs::step(&pool, "host-a", &context(2)).await.unwrap();
+    jobs::stop(&mut conn, running, "bob").await.unwrap();
+    jobs::step(&pool, "host-a", &context(2)).await.unwrap();
+    // Done.
+    let other = calls(&pool, 8, false).await;
+    let (done, _) = jobs::start_queue(&mut conn, &past(Some(other)), "ann")
+        .await
+        .unwrap();
+    while jobs::step(&pool, "host-a", &context(1000))
+        .await
+        .unwrap()
+        .is_some()
+    {}
+    // Stopped before it started: its message says who asked.
+    let waiting = jobs::create(&mut *conn, Kind::Queue, &json!({}), None, "cy")
+        .await
+        .unwrap();
+    jobs::stop(&mut conn, waiting, "bob").await.unwrap();
+    let entries = audited(&pool).await;
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert_eq!(
+        entries[0],
+        (
+            "ann".to_string(),
+            format!("job {running} (queue) stopped by bob: stopped by request after 2 of 5")
+        )
+    );
+    assert_eq!(entries[1].0, "ann");
+    assert!(
+        entries[1]
+            .1
+            .starts_with(&format!("job {done} (queue) done: ")),
+        "{entries:?}"
+    );
+    assert_eq!(
+        entries[2],
+        (
+            "cy".to_string(),
+            format!("job {waiting} (queue) stopped: stopped by bob before it started")
+        )
+    );
+}

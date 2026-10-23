@@ -11,10 +11,6 @@ use serde_json::{Value, json};
 use super::auth::Admin;
 use super::{ApiError, AppState};
 
-fn record(admin: &Admin, what: String) {
-    crate::log::info(format!("admin {}: {what}", admin.0.login));
-}
-
 pub async fn talkgroups(_: Admin, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(crate::talkgroups::list(&state.pool).await?)))
 }
@@ -34,13 +30,15 @@ pub async fn transcribe(
     if !crate::talkgroups::set_transcribe(&state.pool, id, body.on).await? {
         return Err(ApiError::Missing(format!("there is no talkgroup {id}")));
     }
-    record(
-        &admin,
-        format!(
-            "turned transcription {} for talkgroup {id}",
-            if body.on { "on" } else { "off" }
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "turned transcription {} for talkgroup {id}",
+                if body.on { "on" } else { "off" }
+            ),
+        )
+        .await;
     Ok(Json(json!({"id": id, "transcribe": body.on})))
 }
 
@@ -50,10 +48,12 @@ pub async fn retry_failed(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let retried = crate::queue::retry_failed(&state.pool).await?;
-    record(
-        &admin,
-        format!("put {retried} failed calls back in the queue"),
-    );
+    admin
+        .record(
+            &state,
+            format!("put {retried} failed calls back in the queue"),
+        )
+        .await;
     Ok(Json(json!({"retried": retried})))
 }
 

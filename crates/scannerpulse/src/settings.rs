@@ -578,7 +578,7 @@ pub async fn change(
     conn: &mut sqlx::PgConnection,
     key: &str,
     value: Option<&Value>,
-) -> Result<(), SettingsError> {
+) -> Result<Option<Value>, SettingsError> {
     use sqlx::Connection;
     let mut tx = conn.begin().await.map_err(SettingsError::Database)?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('scannerpulse settings'))")
@@ -587,6 +587,7 @@ pub async fn change(
         .map_err(SettingsError::Database)?;
     let values = all(&mut *tx).await.map_err(SettingsError::Database)?;
     check(key, value, &values)?;
+    let old = values.get(key).cloned();
     match value {
         Some(value) => sqlx::query(
             "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, now()) \
@@ -600,5 +601,5 @@ pub async fn change(
     .await
     .map_err(SettingsError::Database)?;
     tx.commit().await.map_err(SettingsError::Database)?;
-    Ok(())
+    Ok(old)
 }

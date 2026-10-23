@@ -28,11 +28,6 @@ impl From<AccountError> for ApiError {
     }
 }
 
-/// Logs an admin's change with the admin's name.
-fn record(admin: &Admin, what: String) {
-    crate::log::info(format!("admin {}: {what}", admin.0.login));
-}
-
 /// The password's hash, made on the blocking threads.
 async fn hashed(password: String) -> Result<String, ApiError> {
     tokio::task::spawn_blocking(move || accounts::new_hash(&password))
@@ -80,10 +75,12 @@ pub async fn accounts_add(
     let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;
     accounts::add_hashed(&mut conn, &body.login, &hash, role).await?;
-    record(
-        &admin,
-        format!("added the admin {} ({})", body.login, role.name()),
-    );
+    admin
+        .record(
+            &state,
+            format!("added the admin {} ({})", body.login, role.name()),
+        )
+        .await;
     Ok(StatusCode::CREATED)
 }
 
@@ -101,7 +98,9 @@ pub async fn accounts_role(
     let role = role_named(&body.role)?;
     let mut conn = state.pool.acquire().await?;
     accounts::set_role(&mut conn, &login, role).await?;
-    record(&admin, format!("made {login} {}", role.name()));
+    admin
+        .record(&state, format!("made {login} {}", role.name()))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -117,7 +116,9 @@ pub async fn function_on(
 ) -> Result<StatusCode, ApiError> {
     let function = function_named(&function)?;
     accounts::switch(&state.pool, &login, &[function], true).await?;
-    record(&admin, format!("turned {} on for {login}", function.name()));
+    admin
+        .record(&state, format!("turned {} on for {login}", function.name()))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -129,10 +130,12 @@ pub async fn function_off(
 ) -> Result<StatusCode, ApiError> {
     let function = function_named(&function)?;
     accounts::switch(&state.pool, &login, &[function], false).await?;
-    record(
-        &admin,
-        format!("turned {} off for {login}", function.name()),
-    );
+    admin
+        .record(
+            &state,
+            format!("turned {} off for {login}", function.name()),
+        )
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -163,7 +166,9 @@ pub async fn accounts_password(
     let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;
     accounts::set_hash(&mut conn, &login, &hash).await?;
-    record(&admin, format!("gave {login} a new password"));
+    admin
+        .record(&state, format!("gave {login} a new password"))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -174,7 +179,7 @@ pub async fn accounts_disable(
 ) -> Result<StatusCode, ApiError> {
     let mut conn = state.pool.acquire().await?;
     accounts::disable(&mut conn, &login).await?;
-    record(&admin, format!("disabled {login}"));
+    admin.record(&state, format!("disabled {login}")).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -184,7 +189,7 @@ pub async fn accounts_enable(
     Path(login): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     accounts::enable(&state.pool, &login).await?;
-    record(&admin, format!("enabled {login}"));
+    admin.record(&state, format!("enabled {login}")).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -365,7 +370,9 @@ pub async fn traffic(_: Admin, State(state): State<AppState>) -> Result<Json<Val
 /// `POST /api/admin/rescan`: every running ingest lists its sources at once.
 pub async fn rescan(admin: Admin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     crate::ingest::request_rescan(&state.pool).await?;
-    record(&admin, "asked for a rescan of the sources".into());
+    admin
+        .record(&state, "asked for a rescan of the sources")
+        .await;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -407,10 +414,24 @@ pub async fn settings_set(
 ) -> Result<StatusCode, ApiError> {
     allowed_setting(&admin, &key)?;
     let mut conn = state.pool.acquire().await?;
-    crate::settings::change(&mut conn, &key, Some(&body.value)).await?;
-    record(&admin, format!("set {key} to {}", body.value));
+    let old = crate::settings::change(&mut conn, &key, Some(&body.value)).await?;
+    admin
+        .record(
+            &state,
+            setting_change(&key, old.as_ref(), Some(&body.value)),
+        )
+        .await;
     forget_choices(&state, &key).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A setting's change in the audit log's words, with its old and new values.
+pub(crate) fn setting_change(key: &str, old: Option<&Value>, new: Option<&Value>) -> String {
+    let shown = |value: Option<&Value>| value.map_or("nothing".to_string(), Value::to_string);
+    match new {
+        Some(_) => format!("set {key} from {} to {}", shown(old), shown(new)),
+        None => format!("removed {key} (it was {})", shown(old)),
+    }
 }
 
 /// A setting that decides who signs in is a super admin's to change;
@@ -437,8 +458,10 @@ pub async fn settings_unset(
 ) -> Result<StatusCode, ApiError> {
     allowed_setting(&admin, &key)?;
     let mut conn = state.pool.acquire().await?;
-    crate::settings::change(&mut conn, &key, None).await?;
-    record(&admin, format!("removed {key}"));
+    let old = crate::settings::change(&mut conn, &key, None).await?;
+    admin
+        .record(&state, setting_change(&key, old.as_ref(), None))
+        .await;
     forget_choices(&state, &key).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -468,13 +491,15 @@ pub async fn favorites_set(
 ) -> Result<StatusCode, ApiError> {
     let mut conn = state.pool.acquire().await?;
     crate::favorites::set(&mut conn, &name, &body.talkgroups).await?;
-    record(
-        &admin,
-        format!(
-            "set the favorites {name:?} to {} talkgroups",
-            body.talkgroups.len()
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "set the favorites {name:?} to {} talkgroups",
+                body.talkgroups.len()
+            ),
+        )
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -484,7 +509,9 @@ pub async fn favorites_remove(
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     crate::favorites::remove(&state.pool, &name).await?;
-    record(&admin, format!("removed the favorites {name:?}"));
+    admin
+        .record(&state, format!("removed the favorites {name:?}"))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -587,7 +614,7 @@ pub async fn helper(
     }
     match crate::agent::ask(&state.pool, kind, &admin.0.login).await {
         Ok(id) => {
-            record(&admin, format!("asked the root helper for request {id}: {}", kind.name()));
+            admin.record(&state, format!("asked the root helper for request {id}: {}", kind.name())).await;
             Ok((StatusCode::ACCEPTED, Json(json!({"id": id}))))
         }
         Err(Refused::Busy) => Err(ApiError::Conflict(

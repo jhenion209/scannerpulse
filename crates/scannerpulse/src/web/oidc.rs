@@ -334,9 +334,14 @@ pub async fn callback(
         return Err(ApiError::Forbidden("this account is disabled".into()));
     }
     let (token, _) = sessions::create(&mut conn, admin, true).await?;
-    crate::log::info(format!(
-        "admin {login} signed in through OIDC from {address}"
-    ));
+    let from = address.to_string();
+    crate::audit::record(
+        &mut *conn,
+        &login,
+        Some(&from),
+        "signed in through single sign-on",
+    )
+    .await;
     let ended =
         format!("{STATE_COOKIE}=; Path=/api/auth/oidc; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
     redirect("/admin", &[auth::session_cookie(&token), ended])

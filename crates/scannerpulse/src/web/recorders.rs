@@ -24,10 +24,6 @@ use crate::recorders::{self, Change, Refused};
 /// not hold the request.
 const CHECK_LIMIT: Duration = Duration::from_secs(5);
 
-fn record(admin: &Admin, what: String) {
-    crate::log::info(format!("admin {}: {what}", admin.0.login));
-}
-
 fn refused(error: Refused) -> ApiError {
     match error {
         Refused::Refused(why) => ApiError::BadRequest(why),
@@ -87,19 +83,21 @@ pub async fn add(
     let id = recorders::add(&mut conn, &body.name, &folder, body.when_asked, |_| checked)
         .await
         .map_err(refused)?;
-    record(
-        &admin,
-        format!(
-            "added the recorder {} ({}, {})",
-            body.name,
-            folder.display(),
-            if body.when_asked {
-                "taken in when asked"
-            } else {
-                "watched"
-            }
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "added the recorder {} ({}, {})",
+                body.name,
+                folder.display(),
+                if body.when_asked {
+                    "taken in when asked"
+                } else {
+                    "watched"
+                }
+            ),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(json!({"id": id}))))
 }
 
@@ -115,7 +113,9 @@ pub async fn change(
     recorders::change(&mut conn, id, change)
         .await
         .map_err(refused)?;
-    record(&admin, format!("recorder {id}: {change:?}"));
+    admin
+        .record(&state, format!("recorder {id}: {change:?}"))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -172,13 +172,15 @@ pub async fn decide_name(
         _ => return Err(ApiError::NotFound),
     }
     .map_err(refused)?;
-    record(
-        &admin,
-        format!(
-            "{decision} the name {:?} for talkgroup {}",
-            body.name, body.talkgroup_id
-        ),
-    );
+    admin
+        .record(
+            &state,
+            format!(
+                "{decision} the name {:?} for talkgroup {}",
+                body.name, body.talkgroup_id
+            ),
+        )
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -233,6 +235,6 @@ pub async fn decide_system(
         }
         _ => return Err(ApiError::NotFound),
     };
-    record(&admin, what);
+    admin.record(&state, what).await;
     Ok(answer)
 }

@@ -197,7 +197,7 @@ pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped,
         .await?;
     let row: Option<String> = sqlx::query_scalar(
         "UPDATE jobs SET \
-           stop_requested = true, \
+           stop_requested = true, stopped_by = $2, \
            state = CASE state WHEN 'queued' THEN 'stopped' ELSE state END, \
            finished_at = CASE state WHEN 'queued' THEN now() ELSE finished_at END, \
            message = CASE state WHEN 'queued' THEN 'stopped by ' || $2 || ' before it started' \
@@ -214,7 +214,10 @@ pub async fn stop(conn: &mut PgConnection, id: i64, by: &str) -> Result<Stopped,
         _ => JobError::Database(error),
     })?;
     let stopped = match row.as_deref() {
-        Some("stopped") => Stopped::Now,
+        Some("stopped") => {
+            ended(&mut tx, id).await?;
+            Stopped::Now
+        }
         Some(_) => Stopped::AfterStep,
         None => {
             return match get(&mut *tx, id).await? {
@@ -453,8 +456,31 @@ pub async fn step(
     .bind(host)
     .execute(&mut *tx)
     .await?;
+    if state != "running" {
+        ended(&mut tx, job.id).await?;
+    }
     tx.commit().await?;
     Ok(Some((job.id, state.to_string())))
+}
+
+/// The audit log's entry of a job's end, in the transaction that ends it,
+/// in the name of who started it: how it ended and, for a stop, who asked
+/// (a job stopped before it started says so in its message).
+async fn ended(tx: &mut PgConnection, id: i64) -> sqlx::Result<()> {
+    let (actor, what): (String, String) = sqlx::query_as(
+        "INSERT INTO audit_log (actor, what) \
+         SELECT started_by, 'job ' || id || ' (' || kind || ') ' || state \
+                || CASE WHEN state = 'stopped' AND started_at IS NOT NULL \
+                        THEN coalesce(' by ' || stopped_by, '') ELSE '' END \
+                || ': ' || message \
+         FROM jobs WHERE id = $1 \
+         RETURNING actor, what",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    crate::audit::journal(&actor, None, &what);
+    Ok(())
 }
 
 pub(crate) fn progress(done: i64, total: Option<i64>) -> String {
