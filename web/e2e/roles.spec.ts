@@ -39,3 +39,16 @@ test('a super admin turns a function on for an associate, and off again', async 
   await expect(page.getByRole('status').filter({ hasText: `Favorites is off for ${ASSOCIATE.login}.` })).toBeVisible();
   await expect(favorites).not.toBeChecked();
 });
+
+test("a refused switch shows the associate's function as it is stored", async ({ page }) => {
+  await page.route('**/api/admin/accounts/e2e-associate/functions/rescan', (route) =>
+    route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'conflict', detail: 'e2e-associate is a super admin: every function is on' }) }),
+  );
+  await signIn(page, '#accounts');
+  const row = card(page, ASSOCIATE.login);
+  const rescan = row.getByRole('checkbox', { name: `Rescan for ${ASSOCIATE.login}` });
+  await expect(rescan).not.toBeChecked();
+  await rescan.check({ force: true }).catch(() => {});
+  await expect(row.getByRole('alert')).toHaveText('Not changed: e2e-associate is a super admin: every function is on');
+  await expect(rescan).not.toBeChecked();
+});

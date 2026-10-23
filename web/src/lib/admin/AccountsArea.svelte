@@ -47,16 +47,17 @@
 
   const path = (login: string, action: string) => `/api/admin/accounts/${encodeURIComponent(login)}/${action}`;
 
-  /** A change of one account; a refusal shows beside it. */
+  /** A change of one account; a refusal shows beside it. Either way the
+   * accounts are read again. */
   async function change(account: Account, done: string, send: () => Promise<unknown>) {
     delete refusals[account.login];
     try {
       await send();
       tell(done);
-      await read();
     } catch (error) {
       refusals[account.login] = why(error);
     }
+    await read();
   }
 
   const setDisabled = (account: Account, disable: boolean) =>
@@ -67,9 +68,14 @@
     change(account, `${account.login} is ${role === 'super' ? 'a super admin' : 'an associate'}.`, () =>
       admin('PUT', path(account.login, 'role'), { role }));
 
-  const setFunction = (account: Account, fn: Fn, on: boolean) =>
-    change(account, `${fn.label} is ${on ? 'on' : 'off'} for ${account.login}.`, () =>
+  async function setFunction(account: Account, fn: Fn, box: HTMLInputElement) {
+    const on = box.checked;
+    await change(account, `${fn.label} is ${on ? 'on' : 'off'} for ${account.login}.`, () =>
       admin(on ? 'PUT' : 'DELETE', path(account.login, `functions/${fn.name}`)));
+    // `checked` is one-way: nothing writes the stored state back to a box the person toggled.
+    const stored = accounts?.find((a) => a.login === account.login);
+    if (stored) box.checked = stored.functions.includes(fn.name);
+  }
 
   async function renew(_login: string, password: string) {
     const login = renewing!;
@@ -125,7 +131,7 @@
                   {#each group.functions as fn (fn.name)}
                     <label>
                       <input type="checkbox" checked={account.functions.includes(fn.name)}
-                        onchange={(event) => setFunction(account, fn, event.currentTarget.checked)}
+                        onchange={(event) => setFunction(account, fn, event.currentTarget)}
                         aria-label={`${fn.label} for ${account.login}`} />
                       {fn.label}
                     </label>
