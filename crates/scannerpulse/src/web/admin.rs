@@ -11,13 +11,14 @@ use serde_json::{Value, json};
 use super::auth::Admin;
 use super::{ApiError, AppState};
 use crate::accounts::{self, AccountError};
+use crate::roles::{self, Function, Role};
 
 impl From<AccountError> for ApiError {
     fn from(error: AccountError) -> ApiError {
         match error {
             AccountError::Database(error) => ApiError::Database(error),
             AccountError::NoSuch(_) => ApiError::Missing(error.to_string()),
-            AccountError::Exists(_) | AccountError::LastAdmin => {
+            AccountError::Exists(_) | AccountError::LastAdmin | AccountError::Super(_) => {
                 ApiError::Conflict(error.to_string())
             }
             AccountError::BadName(_) | AccountError::BadPassword(_) => {
@@ -40,17 +41,33 @@ async fn hashed(password: String) -> Result<String, ApiError> {
         .map_err(ApiError::from)
 }
 
+/// The accounts, each with its role and functions, and every function the
+/// switches can turn on. An associate sees only their own account.
 pub async fn accounts_list(
-    _: Admin,
+    admin: Admin,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!(accounts::list(&state.pool).await?)))
+    let mut accounts = accounts::list(&state.pool).await?;
+    if admin.0.grant.role != Role::Super {
+        accounts.retain(|account| account.login == admin.0.login);
+    }
+    Ok(Json(
+        json!({"accounts": accounts, "functions": roles::catalog()}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct NewAccount {
     pub login: String,
     pub password: String,
+    /// `super` or `associate` (when left out), who starts with every
+    /// function off.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+fn role_named(text: &str) -> Result<Role, ApiError> {
+    Role::parse(text).ok_or_else(|| ApiError::BadRequest("the role is super or associate".into()))
 }
 
 pub async fn accounts_add(
@@ -59,11 +76,64 @@ pub async fn accounts_add(
     Json(body): Json<NewAccount>,
 ) -> Result<StatusCode, ApiError> {
     accounts::check_login(&body.login)?;
+    let role = role_named(body.role.as_deref().unwrap_or("associate"))?;
     let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;
-    accounts::add_hashed(&mut conn, &body.login, &hash).await?;
-    record(&admin, format!("added the admin {}", body.login));
+    accounts::add_hashed(&mut conn, &body.login, &hash, role).await?;
+    record(
+        &admin,
+        format!("added the admin {} ({})", body.login, role.name()),
+    );
     Ok(StatusCode::CREATED)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewRole {
+    pub role: String,
+}
+
+pub async fn accounts_role(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path(login): Path<String>,
+    Json(body): Json<NewRole>,
+) -> Result<StatusCode, ApiError> {
+    let role = role_named(&body.role)?;
+    let mut conn = state.pool.acquire().await?;
+    accounts::set_role(&mut conn, &login, role).await?;
+    record(&admin, format!("made {login} {}", role.name()));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn function_named(text: &str) -> Result<Function, ApiError> {
+    Function::parse(text).ok_or_else(|| ApiError::Missing(format!("there is no function {text}")))
+}
+
+/// Turns one of an associate's functions on.
+pub async fn function_on(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path((login, function)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let function = function_named(&function)?;
+    accounts::switch(&state.pool, &login, &[function], true).await?;
+    record(&admin, format!("turned {} on for {login}", function.name()));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Turns one of an associate's functions off.
+pub async fn function_off(
+    admin: Admin,
+    State(state): State<AppState>,
+    Path((login, function)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let function = function_named(&function)?;
+    accounts::switch(&state.pool, &login, &[function], false).await?;
+    record(
+        &admin,
+        format!("turned {} off for {login}", function.name()),
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +147,10 @@ pub async fn accounts_password(
     Path(login): Path<String>,
     Json(body): Json<NewPassword>,
 ) -> Result<StatusCode, ApiError> {
+    // Anyone's own password; another's only a super admin's to set.
+    if login != admin.0.login {
+        admin.require_super()?;
+    }
     let hash = hashed(body.password).await?;
     let mut conn = state.pool.acquire().await?;
     accounts::set_hash(&mut conn, &login, &hash).await?;
@@ -322,11 +396,21 @@ pub async fn settings_set(
     Path(key): Path<String>,
     Json(body): Json<NewValue>,
 ) -> Result<StatusCode, ApiError> {
+    allowed_setting(&admin, &key)?;
     let mut conn = state.pool.acquire().await?;
     crate::settings::change(&mut conn, &key, Some(&body.value)).await?;
     record(&admin, format!("set {key} to {}", body.value));
     forget_choices(&state, &key).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A setting that decides who signs in is a super admin's to change;
+/// maintenance needs its own function, every other setting Settings.
+fn allowed_setting(admin: &Admin, key: &str) -> Result<(), ApiError> {
+    match roles::setting_function(key) {
+        Some(function) => admin.require(function),
+        None => admin.require_super(),
+    }
 }
 
 /// A new system order shows in this host's filter choices at once; another
@@ -342,6 +426,7 @@ pub async fn settings_unset(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    allowed_setting(&admin, &key)?;
     let mut conn = state.pool.acquire().await?;
     crate::settings::change(&mut conn, &key, None).await?;
     record(&admin, format!("removed {key}"));
@@ -465,6 +550,11 @@ pub async fn helper(
             "ask for one of: {}",
             Kind::ALL.map(Kind::name).join(", ")
         ))
+    })?;
+    admin.require(match kind {
+        Kind::Update => Function::Update,
+        Kind::Switchover => Function::Switchover,
+        _ => Function::Convert,
     })?;
     if kind.converts() && convert_plan(&state).is_none() {
         return Err(ApiError::BadRequest(

@@ -38,6 +38,7 @@ pub mod reader;
 pub mod recorders;
 pub mod reports;
 pub mod retag;
+pub mod roles;
 pub mod search;
 pub mod servers;
 pub mod sessions;

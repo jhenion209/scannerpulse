@@ -66,7 +66,9 @@ async fn signing_in_sets_a_session_cookie(pool: PgPool) {
     let pair = format!("scannerpulse_session={token}");
     let me = send(&app, "GET", "/api/auth/me", &[("cookie", &pair)], None).await;
     assert_eq!(me.status, 200);
-    assert_eq!(me.body, json!({"login": "ann", "csrf": csrf}));
+    assert_eq!(me.body["login"], "ann");
+    assert_eq!(me.body["csrf"], csrf);
+    assert_eq!(me.body["role"], "super");
     let last: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT last_sign_in FROM admins")
             .fetch_one(&pool)
@@ -211,8 +213,7 @@ async fn an_admin_change_needs_the_sessions_csrf_token(pool: PgPool) {
     )
     .await;
     assert_eq!(list.status, 200);
-    let logins: Vec<&str> = list
-        .body
+    let logins: Vec<&str> = list.body["accounts"]
         .as_array()
         .unwrap()
         .iter()

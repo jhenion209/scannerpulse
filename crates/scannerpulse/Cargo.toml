@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 argon2 = "0.6"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "ws", "macros", "matched-path"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

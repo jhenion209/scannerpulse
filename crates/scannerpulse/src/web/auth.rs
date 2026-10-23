@@ -1,8 +1,9 @@
 //! Signing in and out, and what an admin route requires: a session in the
-//! cookie and, for a change, the session's CSRF token in a header.
+//! cookie and, for a change, the session's CSRF token in a header and what
+//! the change needs (`needs`): a function the admin holds, or a super admin.
 
 use axum::Json;
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{FromRequestParts, MatchedPath, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -10,8 +11,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::client::Client;
+use super::needs::{self, Need};
 use super::{ApiError, AppState};
 use crate::accounts;
+use crate::roles::{Function, Role};
 use crate::sessions::{self, Kind, Session};
 
 /// The cookie that holds the session's token.
@@ -75,9 +78,35 @@ pub async fn session(
     }
 }
 
-/// A signed-in admin; for a change, with the session's CSRF token.
+/// A signed-in admin; for a change, with the session's CSRF token, and
+/// allowed what the change needs.
 #[derive(Debug, Clone)]
 pub struct Admin(pub Session);
+
+impl Admin {
+    /// Refuses unless the admin holds `function`.
+    pub fn require(&self, function: Function) -> Result<(), ApiError> {
+        if self.0.grant.may(function) {
+            return Ok(());
+        }
+        Err(ApiError::Forbidden(format!(
+            "\"{}\" is off for {}: a super admin can turn it on in Accounts",
+            function.shown().1,
+            self.0.login
+        )))
+    }
+
+    /// Refuses unless the admin is a super admin.
+    pub fn require_super(&self) -> Result<(), ApiError> {
+        if self.0.grant.role == Role::Super {
+            return Ok(());
+        }
+        Err(ApiError::Forbidden(format!(
+            "only a super admin may do this; {} is an associate",
+            self.0.login
+        )))
+    }
+}
 
 impl FromRequestParts<AppState> for Admin {
     type Rejection = ApiError;
@@ -88,12 +117,25 @@ impl FromRequestParts<AppState> for Admin {
         let session = sessions::lookup(&state.pool, &token, !polled(parts))
             .await?
             .ok_or_else(signed_out)?;
-        if !reads_only(&parts.method) && !csrf_ok(&parts.headers, &session) {
+        if reads_only(&parts.method) {
+            return Ok(Admin(session));
+        }
+        if !csrf_ok(&parts.headers, &session) {
             return Err(ApiError::Forbidden(format!(
                 "a change needs the session's {CSRF_HEADER} header"
             )));
         }
-        Ok(Admin(session))
+        let admin = Admin(session);
+        let path = parts
+            .extensions
+            .get::<MatchedPath>()
+            .map_or("", MatchedPath::as_str);
+        match needs::need(parts.method.as_str(), path) {
+            Need::Function(function) => admin.require(function)?,
+            Need::Super => admin.require_super()?,
+            Need::Inside => {}
+        }
+        Ok(admin)
     }
 }
 
@@ -205,10 +247,13 @@ pub async fn login(
             "the name or the password is wrong".into(),
         ));
     };
-    let (token, csrf) = sessions::create(&mut tx, admin, false).await?;
+    let (token, _) = sessions::create(&mut tx, admin, false).await?;
+    let session = sessions::lookup(&mut *tx, &token, false)
+        .await?
+        .ok_or_else(|| ApiError::Internal("the new session is missing".into()))?;
     tx.commit().await?;
     crate::log::info(format!("admin {name} signed in from {address}"));
-    Ok(signed_in(&token, &name, &csrf))
+    Ok(signed_in(&token, &session))
 }
 
 /// The `Set-Cookie` value of a new session.
@@ -219,9 +264,20 @@ pub fn session_cookie(token: &str) -> String {
     )
 }
 
+/// Who the session is, for the admin page: the login, the CSRF token, the
+/// role and the functions on (every one for a super admin).
+fn whoami(session: &Session) -> serde_json::Value {
+    json!({
+        "login": session.login,
+        "csrf": session.csrf,
+        "role": session.grant.role,
+        "functions": session.grant.names(),
+    })
+}
+
 /// The answer that sets the session's cookie.
-pub fn signed_in(token: &str, login: &str, csrf: &str) -> Response {
-    let mut response = Json(json!({"login": login, "csrf": csrf})).into_response();
+pub fn signed_in(token: &str, session: &Session) -> Response {
+    let mut response = Json(whoami(session)).into_response();
     if let Ok(value) = HeaderValue::from_str(&session_cookie(token)) {
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
@@ -246,9 +302,10 @@ pub async fn logout(
     Ok(response)
 }
 
-/// `GET /api/auth/me`: the signed-in admin and the session's CSRF token.
+/// `GET /api/auth/me`: the signed-in admin, the session's CSRF token, and
+/// what the admin may change.
 pub async fn me(Admin(session): Admin) -> Json<serde_json::Value> {
-    Json(json!({"login": session.login, "csrf": session.csrf}))
+    Json(whoami(&session))
 }
 
 /// `GET /api/auth/methods`: the ways to sign in, for the sign-in page.

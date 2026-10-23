@@ -52,6 +52,15 @@ pub async fn stop(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, ApiError> {
     let mut conn = state.pool.acquire().await?;
+    // Whoever started a job may always stop it.
+    let started_by: Option<String> =
+        sqlx::query_scalar("SELECT started_by FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if started_by.as_deref() != Some(admin.0.login.as_str()) {
+        admin.require(crate::roles::Function::StopJobs)?;
+    }
     let stopped = jobs::stop(&mut conn, id, &admin.0.login).await?;
     record(&admin, format!("asked job {id} to stop"));
     Ok(Json(json!({

@@ -4,6 +4,8 @@
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgConnection;
 
+use crate::roles::Grant;
+
 /// A session ends this long after the admin's last request...
 pub const IDLE_HOURS: i32 = 12;
 /// ...and at the latest this long after signing in.
@@ -22,6 +24,8 @@ pub struct Session {
     pub login: String,
     /// The token every change must carry in its `X-CSRF-Token` header.
     pub csrf: String,
+    /// What the admin may change, as the account holds it at this request.
+    pub grant: Grant,
 }
 
 /// `bytes` random bytes, as lowercase hex.
@@ -86,14 +90,14 @@ pub async fn lookup(
     token: &str,
     touch: bool,
 ) -> sqlx::Result<Option<Session>> {
-    let found: Option<(i64, String, String)> = sqlx::query_as(
+    let found: Option<(i64, String, String, String, Vec<String>)> = sqlx::query_as(
         "UPDATE sessions s SET last_seen = CASE WHEN $5 THEN now() ELSE s.last_seen END \
          FROM admins a \
          WHERE s.token_hash = $1 AND a.id = s.admin_id AND NOT a.disabled \
            AND s.last_seen >= now() - make_interval(hours => $2) \
            AND s.created_at >= now() - make_interval(days => $3) \
            AND (NOT s.oidc OR s.created_at >= now() - make_interval(hours => $4)) \
-         RETURNING a.id, a.login, s.csrf",
+         RETURNING a.id, a.login, s.csrf, a.role, a.functions",
     )
     .bind(digest(token))
     .bind(IDLE_HOURS)
@@ -102,11 +106,14 @@ pub async fn lookup(
     .bind(touch)
     .fetch_optional(db)
     .await?;
-    Ok(found.map(|(admin_id, login, csrf)| Session {
-        admin_id,
-        login,
-        csrf,
-    }))
+    Ok(
+        found.map(|(admin_id, login, csrf, role, functions)| Session {
+            admin_id,
+            login,
+            csrf,
+            grant: Grant::stored(&role, &functions),
+        }),
+    )
 }
 
 /// Signs out: the session is deleted.

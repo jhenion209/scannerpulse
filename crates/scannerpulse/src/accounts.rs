@@ -1,5 +1,6 @@
-//! The admin accounts: one role, several accounts, at least one enabled.
-//! The command line and the admin page call the same functions.
+//! The admin accounts: super admins and associates (`roles`), at least one
+//! enabled super admin. The command line and the admin page call the same
+//! functions.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -10,6 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::Connection;
 use sqlx::postgres::PgConnection;
+
+use crate::roles::{Function, Role};
 
 /// The shortest password an account may have.
 pub const MIN_PASSWORD: usize = 12;
@@ -26,8 +29,11 @@ pub enum AccountError {
     BadPassword(String),
     Exists(String),
     NoSuch(String),
-    /// Disabling this account would leave no enabled admin.
+    /// Disabling this account, or making it an associate, would leave no
+    /// enabled super admin.
     LastAdmin,
+    /// A super admin has every function: there is no switch to change.
+    Super(String),
     Database(sqlx::Error),
 }
 
@@ -37,8 +43,11 @@ impl fmt::Display for AccountError {
             AccountError::BadName(why) | AccountError::BadPassword(why) => f.write_str(why),
             AccountError::Exists(login) => write!(f, "an admin named {login} already exists"),
             AccountError::NoSuch(login) => write!(f, "there is no admin named {login}"),
-            AccountError::LastAdmin => {
-                f.write_str("this is the last enabled admin: enable or add another first")
+            AccountError::LastAdmin => f.write_str(
+                "this is the last enabled super admin: make another admin a super admin first",
+            ),
+            AccountError::Super(login) => {
+                write!(f, "{login} is a super admin: every function is on")
             }
             AccountError::Database(error) => write!(f, "the database failed: {error}"),
         }
@@ -121,12 +130,15 @@ pub struct Admin {
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub last_sign_in: Option<DateTime<Utc>>,
+    pub role: String,
+    /// The functions on, by name: what an associate may change.
+    pub functions: Vec<String>,
 }
 
 pub async fn list(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec<Admin>> {
     sqlx::query_as(
         "SELECT login, password_hash <> '' AS password, oidc_subject IS NOT NULL AS oidc, \
-                disabled, created_at, last_sign_in \
+                disabled, created_at, last_sign_in, role, functions \
          FROM admins ORDER BY login",
     )
     .fetch_all(db)
@@ -152,7 +164,7 @@ pub fn new_hash(password: &str) -> Result<String, AccountError> {
     Ok(hash_password(password))
 }
 
-/// Adds an enabled account that signs in with `password`; returns its id.
+/// Adds an enabled super admin that signs in with `password`; returns its id.
 pub async fn add(
     conn: &mut PgConnection,
     login: &str,
@@ -160,22 +172,25 @@ pub async fn add(
 ) -> Result<i64, AccountError> {
     check_login(login)?;
     let hash = new_hash(password)?;
-    add_hashed(conn, login, &hash).await
+    add_hashed(conn, login, &hash, Role::Super).await
 }
 
-/// Adds an enabled account with an Argon2id `hash` from `new_hash`; returns its id.
+/// Adds an enabled account with an Argon2id `hash` from `new_hash`; returns
+/// its id. An associate starts with every function off.
 pub async fn add_hashed(
     conn: &mut PgConnection,
     login: &str,
     hash: &str,
+    role: Role,
 ) -> Result<i64, AccountError> {
     check_login(login)?;
     let id: Option<i64> = sqlx::query_scalar(
-        "INSERT INTO admins (login, password_hash) VALUES ($1, $2) \
+        "INSERT INTO admins (login, password_hash, role) VALUES ($1, $2, $3) \
          ON CONFLICT (login) DO NOTHING RETURNING id",
     )
     .bind(login)
     .bind(hash)
+    .bind(role.name())
     .fetch_optional(&mut *conn)
     .await?;
     id.ok_or_else(|| AccountError::Exists(login.to_string()))
@@ -213,12 +228,22 @@ pub async fn set_hash(
     Ok(())
 }
 
+/// The enabled super admins, locked: two admins disabling or demoting each
+/// other at once are taken one after the other, so the second sees the
+/// first's change.
+async fn lock_supers(tx: &mut PgConnection) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT login FROM admins WHERE NOT disabled AND role = 'super' ORDER BY id FOR UPDATE",
+    )
+    .fetch_all(&mut *tx)
+    .await
+}
+
 /// Disables the account and ends its sessions; refused for the last enabled
-/// account.
+/// super admin.
 pub async fn disable(conn: &mut PgConnection, login: &str) -> Result<(), AccountError> {
     let mut tx = conn.begin().await?;
-    // Two admins disabling each other at once are taken one after the other,
-    // so the second sees the first's change.
+    let supers = lock_supers(&mut tx).await?;
     let enabled: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, login FROM admins WHERE NOT disabled ORDER BY id FOR UPDATE")
             .fetch_all(&mut *tx)
@@ -235,7 +260,7 @@ pub async fn disable(conn: &mut PgConnection, login: &str) -> Result<(), Account
             Err(AccountError::NoSuch(login.to_string()))
         };
     };
-    if enabled.len() == 1 {
+    if supers == [login] {
         return Err(AccountError::LastAdmin);
     }
     sqlx::query("UPDATE admins SET disabled = true WHERE id = $1")
@@ -259,6 +284,57 @@ pub async fn enable(db: impl sqlx::PgExecutor<'_>, login: &str) -> Result<(), Ac
         return Err(AccountError::NoSuch(login.to_string()));
     }
     Ok(())
+}
+
+/// Makes the account a super admin or an associate; refused when it would
+/// leave no enabled super admin. An associate keeps the functions it had.
+pub async fn set_role(
+    conn: &mut PgConnection,
+    login: &str,
+    role: Role,
+) -> Result<(), AccountError> {
+    let mut tx = conn.begin().await?;
+    let supers = lock_supers(&mut tx).await?;
+    if role == Role::Associate && supers == [login] {
+        return Err(AccountError::LastAdmin);
+    }
+    let done = sqlx::query("UPDATE admins SET role = $2 WHERE login = $1")
+        .bind(login)
+        .bind(role.name())
+        .execute(&mut *tx)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(AccountError::NoSuch(login.to_string()));
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Turns the functions on (`on`) or off for an associate; refused for a
+/// super admin, who has every one.
+pub async fn switch(
+    db: impl sqlx::PgExecutor<'_>,
+    login: &str,
+    functions: &[Function],
+    on: bool,
+) -> Result<(), AccountError> {
+    let names: Vec<&str> = functions.iter().map(|f| f.name()).collect();
+    let role: Option<String> = sqlx::query_scalar(
+        "UPDATE admins SET functions = CASE WHEN role = 'super' THEN functions \
+             WHEN $3 THEN ARRAY(SELECT DISTINCT f FROM unnest(functions || $2::text[]) f ORDER BY f) \
+             ELSE ARRAY(SELECT f FROM unnest(functions) f WHERE f <> ALL ($2::text[])) END \
+         WHERE login = $1 RETURNING role",
+    )
+    .bind(login)
+    .bind(&names)
+    .bind(on)
+    .fetch_optional(db)
+    .await?;
+    match role.as_deref() {
+        None => Err(AccountError::NoSuch(login.to_string())),
+        Some("super") => Err(AccountError::Super(login.to_string())),
+        Some(_) => Ok(()),
+    }
 }
 
 /// The setting that allows password sign-in; it is on when not set.

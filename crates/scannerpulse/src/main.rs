@@ -13,6 +13,7 @@ use scannerpulse::backfill::{self, Ask};
 use scannerpulse::evaluation::{self, Draw};
 use scannerpulse::localtime::TimeHow;
 use scannerpulse::reader::{self, FileCall, ReadError};
+use scannerpulse::roles::{Function, Role};
 use scannerpulse::{accounts, favorites, ingest, jobs, lease, settings, talkgroups, web};
 use scannerpulse::{names, recorders};
 use serde_json::json;
@@ -35,7 +36,10 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse asr report --set NAME
        scannerpulse asr sets
        scannerpulse asr run --set NAME --server URL --model MODEL [--prompt-file FILE]
-       scannerpulse admin add|password|disable|enable NAME
+       scannerpulse admin add NAME [--associate]
+       scannerpulse admin password|disable|enable NAME
+       scannerpulse admin role NAME super|associate
+       scannerpulse admin allow|deny NAME FUNCTION...
        scannerpulse admin list
        scannerpulse admin password-signin on|off
        scannerpulse settings list
@@ -509,7 +513,12 @@ enum Asr {
 /// The admin accounts' commands.
 #[derive(Debug, PartialEq, Eq)]
 enum Admin {
-    Add(String),
+    /// A super admin, or with `--associate` an associate with every
+    /// function off.
+    Add(String, Role),
+    Role(String, Role),
+    /// Functions turned on (`true`) or off for an associate, by name.
+    Switch(String, Vec<String>, bool),
     Password(String),
     Disable(String),
     Enable(String),
@@ -609,7 +618,14 @@ fn parse_settings(args: &[&str]) -> Option<Settings> {
 
 fn parse_admin(args: &[&str]) -> Option<Admin> {
     match args {
-        ["add", name] => Some(Admin::Add(name.to_string())),
+        ["add", name] => Some(Admin::Add(name.to_string(), Role::Super)),
+        ["add", name, "--associate"] => Some(Admin::Add(name.to_string(), Role::Associate)),
+        ["role", name, role] => Some(Admin::Role(name.to_string(), Role::parse(role)?)),
+        ["allow" | "deny", name, functions @ ..] if !functions.is_empty() => Some(Admin::Switch(
+            name.to_string(),
+            functions.iter().map(|f| f.to_string()).collect(),
+            args[0] == "allow",
+        )),
         ["password", name] => Some(Admin::Password(name.to_string())),
         ["disable", name] => Some(Admin::Disable(name.to_string())),
         ["enable", name] => Some(Admin::Enable(name.to_string())),
@@ -1593,11 +1609,33 @@ type CommandResult = Result<ExitCode, Box<dyn std::error::Error>>;
 async fn admin(command: Admin) -> CommandResult {
     let mut conn = connect().await?;
     match command {
-        Admin::Add(login) => {
+        Admin::Add(login, role) => {
             accounts::check_login(&login)?;
             let password = new_password()?;
-            accounts::add(&mut conn, &login, &password).await?;
-            println!("added {login}");
+            let hash = accounts::new_hash(&password)?;
+            accounts::add_hashed(&mut conn, &login, &hash, role).await?;
+            println!("added {login}, {}", role.name());
+        }
+        Admin::Role(login, role) => {
+            accounts::set_role(&mut conn, &login, role).await?;
+            println!("{login} is {}", role.name());
+        }
+        Admin::Switch(login, names, on) => {
+            let mut functions = Vec::new();
+            for name in &names {
+                functions.push(Function::parse(name).ok_or_else(|| {
+                    format!(
+                        "there is no function {name}; the functions are: {}",
+                        Function::ALL.map(Function::name).join(", ")
+                    )
+                })?);
+            }
+            accounts::switch(&mut conn, &login, &functions, on).await?;
+            println!(
+                "{} {} for {login}",
+                names.join(", "),
+                if on { "on" } else { "off" }
+            );
         }
         Admin::Password(login) => {
             let password = new_password()?;
@@ -1624,9 +1662,17 @@ async fn admin(command: Admin) -> CommandResult {
                     .last_sign_in
                     .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
                     .unwrap_or_else(|| "never".into());
+                let may = if admin.role == "super" {
+                    "every function".to_string()
+                } else if admin.functions.is_empty() {
+                    "no function".to_string()
+                } else {
+                    admin.functions.join(",")
+                };
                 println!(
-                    "{}\t{}\t{how}\tlast sign-in {last}",
+                    "{}\t{}\t{}\t{may}\t{how}\tlast sign-in {last}",
                     admin.login,
+                    admin.role,
                     if admin.disabled {
                         "disabled"
                     } else {
@@ -2973,6 +3019,7 @@ mod tests {
         RecorderCommand, Settings, StorageCommand, Waiting, parse, recorders, run_to_end,
         talkgroup_list,
     };
+    use scannerpulse::roles::Role;
     use std::path::PathBuf;
     use std::process::ExitCode;
     use std::sync::mpsc;
@@ -3468,8 +3515,34 @@ mod tests {
     fn admin_takes_a_name_or_a_switch() {
         assert_eq!(
             parse(&["admin", "add", "ann"]),
-            Some(Command::Admin(Admin::Add("ann".into())))
+            Some(Command::Admin(Admin::Add("ann".into(), Role::Super)))
         );
+        assert_eq!(
+            parse(&["admin", "add", "ann", "--associate"]),
+            Some(Command::Admin(Admin::Add("ann".into(), Role::Associate)))
+        );
+        assert_eq!(
+            parse(&["admin", "role", "ann", "super"]),
+            Some(Command::Admin(Admin::Role("ann".into(), Role::Super)))
+        );
+        assert_eq!(parse(&["admin", "role", "ann", "boss"]), None);
+        assert_eq!(
+            parse(&["admin", "allow", "ann", "move", "purge"]),
+            Some(Command::Admin(Admin::Switch(
+                "ann".into(),
+                vec!["move".into(), "purge".into()],
+                true
+            )))
+        );
+        assert_eq!(
+            parse(&["admin", "deny", "ann", "move"]),
+            Some(Command::Admin(Admin::Switch(
+                "ann".into(),
+                vec!["move".into()],
+                false
+            )))
+        );
+        assert_eq!(parse(&["admin", "allow", "ann"]), None);
         assert_eq!(
             parse(&["admin", "password-signin", "off"]),
             Some(Command::Admin(Admin::PasswordSignin(false)))

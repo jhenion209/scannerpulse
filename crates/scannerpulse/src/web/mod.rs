@@ -13,6 +13,7 @@ mod embedded;
 mod error;
 mod info;
 mod jobs;
+mod needs;
 mod recorders;
 mod storage;
 
@@ -304,6 +305,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/admin/accounts/{login}/disable",
             post(admin::accounts_disable),
+        )
+        .route(
+            "/api/admin/accounts/{login}/role",
+            axum::routing::put(admin::accounts_role),
+        )
+        .route(
+            "/api/admin/accounts/{login}/functions/{function}",
+            axum::routing::put(admin::function_on).delete(admin::function_off),
         )
         .route("/api/admin/settings", get(admin::settings_list))
         .route("/api/admin/viewers", get(viewers::list))

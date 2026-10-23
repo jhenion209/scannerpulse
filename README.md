@@ -713,7 +713,8 @@ already set in the environment wins. So far:
     at every sign-in; an OIDC session ends 12 hours after signing in,
     whatever its use, so the group is checked again at least that often. A
     signed-in admin goes on to the admin page. The
-    first sign-in creates the account; an existing
+    first sign-in creates the account, as an associate with every function
+    off (see "Admin roles"); an existing
     account of the same name is never taken over. Password sign-in stays
     the way in when the provider is down, and `admin password-signin off`
     turns it off once OIDC works;
@@ -738,16 +739,43 @@ already set in the environment wins. So far:
     (`talkgroup_id`, `from`, `to`) counts the calls a queue job would take
     and `POST` starts it; `POST /api/admin/jobs/asr-run` (`set`, `server`,
     `model`, `prompt`) starts a candidate's run;
-  - `/api/admin/accounts` lists and adds admins;
-    `/api/admin/accounts/<login>/password`, `/disable` and `/enable` change
-    one, as the `admin` command does;
+  - `/api/admin/accounts` lists the admins, each with its role and the
+    functions on, and every function there is (an associate sees only their
+    own account), and adds one (`login`, `password`, `role`: `associate`
+    when left out); `/api/admin/accounts/<login>/password`, `/disable` and
+    `/enable` change one, `PUT /api/admin/accounts/<login>/role` (`role`)
+    sets its role, and `PUT` or `DELETE`
+    `/api/admin/accounts/<login>/functions/<function>` turns one of an
+    associate's functions on or off, as the `admin` command does;
+    `/api/auth/me` and the sign-in's answer give the admin's `role` and
+    `functions`;
   - `/healthz` (the database answers within 4 seconds and is the primary)
     and `/health` (the process is up), for a load balancer.
-- `admin add|password|disable|enable NAME`, `admin list` and
-  `admin password-signin on|off` manage the admin accounts. `add` and
-  `password` ask for the password twice (at least 12 characters); a new
-  password and a disabled account end that account's sessions; the last
-  enabled account cannot be disabled. Passwords are kept as Argon2id hashes.
+- `admin add NAME [--associate]`, `admin password|disable|enable NAME`,
+  `admin role NAME super|associate`, `admin allow|deny NAME FUNCTION...`,
+  `admin list` and `admin password-signin on|off` manage the admin accounts.
+  `add` and `password` ask for the password twice (at least 12 characters);
+  a new password and a disabled account end that account's sessions. `add`
+  makes a super admin, or with `--associate` an associate with every
+  function off; `list` shows each admin's role and functions. Passwords are
+  kept as Argon2id hashes.
+- **Admin roles.** A super admin may change everything. An associate sees
+  the whole admin page but may change only what a super admin turned on for
+  them, one switch per function: `locations` (add or remove a storage
+  location), `move`, `purge` (older than a day), `import`, `consolidate`,
+  `rename`, `correct`, `merge`, `purge-talkgroup`, `recorders`, `names`
+  (name proposals and staged systems), `update` (Update now), `switchover`,
+  `convert` (each step of converting to high availability), `transcribe`
+  (per talkgroup), `queue` (past calls, and retrying failed ones),
+  `evaluation` (a candidate's run), `settings`, `maintenance`, `favorites`,
+  `stop-jobs` (another admin's job: whoever started a job may always stop
+  it) and `rescan`. Only a super admin adds admins, sets roles and
+  functions, sets another's password, and changes the settings that decide
+  who signs in (`oidc.*`, `auth.password_signin`, `web.trusted_proxies`). A
+  change is refused by the server (403), whatever the page shows; a role or
+  a function changed counts from the admin's next request. The last enabled
+  super admin can be neither disabled nor made an associate. An admin made
+  before roles existed is a super admin.
 - `settings list`, `settings set KEY JSON` and `settings unset KEY` show and
   change the administrator's settings, such as `settings set time_zone
   '"America/Chicago"'`. A change is checked as the part that reads the
