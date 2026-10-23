@@ -560,11 +560,7 @@ pub async fn helper(
             Kind::ALL.map(Kind::name).join(", ")
         ))
     })?;
-    admin.require(match kind {
-        Kind::Update => Function::Update,
-        Kind::Switchover => Function::Switchover,
-        _ => Function::Convert,
-    })?;
+    admin.require(roles::helper_function(kind))?;
     if kind.converts() && convert_plan(&state).is_none() {
         return Err(ApiError::BadRequest(
             "no conversion is planned: run `sudo /usr/local/bin/scannerpulse setup` on this machine first".into(),

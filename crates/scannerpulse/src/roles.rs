@@ -186,6 +186,22 @@ impl Grant {
     }
 }
 
+/// The function asking the root helper for `kind` needs. Every kind is
+/// named, so a new kind does not build until its function is chosen.
+pub fn helper_function(kind: crate::agent::Kind) -> Function {
+    use crate::agent::Kind;
+    match kind {
+        Kind::Update => Function::Update,
+        Kind::Switchover => Function::Switchover,
+        Kind::ArchiveCheck
+        | Kind::ArchiveSwitch
+        | Kind::DbMove
+        | Kind::DbSwitch
+        | Kind::DbRetire
+        | Kind::Second => Function::Convert,
+    }
+}
+
 /// The function a setting's change needs; `None` for a setting that decides
 /// who signs in, which only a super admin changes.
 pub fn setting_function(key: &str) -> Option<Function> {
@@ -221,6 +237,26 @@ mod tests {
         assert!(helper.may(Function::Move));
         assert!(!helper.may(Function::Purge));
         assert_eq!(helper.names(), vec!["move"]);
+    }
+
+    #[test]
+    fn every_helper_request_names_its_function() {
+        use crate::agent::Kind;
+        for kind in Kind::ALL {
+            let expected = match kind.name() {
+                "update" => Function::Update,
+                "switchover" => Function::Switchover,
+                _ => {
+                    assert!(
+                        kind.converts(),
+                        "{} is neither an update, a switchover nor a step of the conversion",
+                        kind.name()
+                    );
+                    Function::Convert
+                }
+            };
+            assert_eq!(helper_function(kind), expected, "{}", kind.name());
+        }
     }
 
     #[test]
