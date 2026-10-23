@@ -145,6 +145,7 @@ async fn a_filed_file_still_in_the_source_waits_again(pool: PgPool) -> sqlx::Res
         &pool,
         row_id(&pool, "a.mp3").await,
         (1, utc("2031-01-15T18:00:00Z")),
+        None,
     )
     .await?;
     assert_eq!(row(&pool, "a.mp3").await.0, "done");
@@ -502,6 +503,7 @@ async fn waiting_and_rejected_files_are_counted(pool: PgPool) -> sqlx::Result<()
         &pool,
         row_id(&pool, "b.mp3").await,
         (1, utc("2031-01-15T18:00:00Z")),
+        None,
     )
     .await?;
     assert_eq!(store::counts(&pool).await?, (1, 1));
@@ -527,6 +529,7 @@ async fn only_old_rows_of_filed_files_are_pruned(pool: PgPool) -> sqlx::Result<(
             &pool,
             row_id(&pool, name).await,
             (1, utc("2031-01-15T18:00:00Z")),
+            None,
         )
         .await?;
     }

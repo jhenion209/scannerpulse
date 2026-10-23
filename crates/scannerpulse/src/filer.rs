@@ -308,7 +308,11 @@ impl Filer {
                     if !self.fence.held() {
                         return Ok(Outcome::LeaseLost);
                     }
-                    limited(self.db_limit, store::mark_done(&self.pool, row.id, found)).await?;
+                    limited(
+                        self.db_limit,
+                        store::mark_done(&self.pool, row.id, found, Some(call.started_at)),
+                    )
+                    .await?;
                     if self.fence.held() {
                         self.delete_source(&folder, &path, &data, &call).await;
                     }
@@ -412,7 +416,11 @@ impl Filer {
         if !self.fence.held() {
             return Ok(Outcome::LeaseLost);
         }
-        limited(self.db_limit, store::mark_done(&self.pool, row.id, call)).await?;
+        limited(
+            self.db_limit,
+            store::mark_done(&self.pool, row.id, call, None),
+        )
+        .await?;
         if let (Some(size), Some(mtime), true) = (
             row.size.and_then(|n| u64::try_from(n).ok()),
             row.file_mtime,
@@ -504,7 +512,7 @@ impl Filer {
                 row.id,
                 same,
                 row.source_id,
-                (data.len() as i64, call.file_mtime),
+                (data.len() as i64, call),
                 why,
             )
             .await
@@ -914,7 +922,7 @@ impl Filer {
             }
             limited(
                 self.db_limit,
-                store::mark_done(&self.pool, row.id, (id, started_at)),
+                store::mark_done(&self.pool, row.id, (id, started_at), None),
             )
             .await?;
             return Ok(Outcome::AlreadyFiled(id));
@@ -978,7 +986,11 @@ impl Filer {
             if !self.fence.held() {
                 return Ok(Outcome::LeaseLost);
             }
-            limited(self.db_limit, store::mark_done(&self.pool, row.id, found)).await?;
+            limited(
+                self.db_limit,
+                store::mark_done(&self.pool, row.id, found, Some(call.started_at)),
+            )
+            .await?;
             return Ok(Outcome::AlreadyFiled(found.0));
         }
         Ok(match self.record(row, &call, rel).await? {

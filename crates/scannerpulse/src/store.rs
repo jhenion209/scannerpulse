@@ -317,19 +317,23 @@ pub async fn stage(
     Ok(())
 }
 
-/// Marks a file done as a call recorded earlier.
+/// Marks a file done as a call recorded earlier, with the time its name
+/// gives when it was read (`named_at`).
 pub async fn mark_done(
     db: impl PgExecutor<'_>,
     id: i64,
     call: (i64, DateTime<Utc>),
+    named_at: Option<DateTime<Utc>>,
 ) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE ingest_files SET state = 'done', reason = NULL, call_id = $2, call_started_at = $3 \
+        "UPDATE ingest_files SET state = 'done', reason = NULL, call_id = $2, call_started_at = $3, \
+                named_at = coalesce($4, named_at) \
          WHERE id = $1",
     )
     .bind(id)
     .bind(call.0)
     .bind(call.1)
+    .bind(named_at)
     .execute(db)
     .await?;
     Ok(())
@@ -667,7 +671,13 @@ pub async fn record_in(
     .bind(call.file_mtime)
     .fetch_one(&mut *tx)
     .await?;
-    mark_done(&mut *tx, row_id, (id, call.started_at)).await?;
+    mark_done(
+        &mut *tx,
+        row_id,
+        (id, call.started_at),
+        Some(call.started_at),
+    )
+    .await?;
     if mapped {
         // The file names a spelling of its system: the correction rewrites it.
         sqlx::query("INSERT INTO mapped_calls (call_id, started_at) VALUES ($1, $2)")
@@ -825,15 +835,15 @@ pub async fn same_call(
 }
 
 /// Records, in one fenced transaction, that the waiting file `row_id` of the
-/// recorder `source_id` (`file`: its size and modification time) was a copy
-/// of `same` and was deleted ([`duplicate_in`]).
+/// recorder `source_id` (`file`: its size and what it says) was a copy of
+/// `same` and was deleted ([`duplicate_in`]).
 pub async fn duplicate(
     conn: &mut PgConnection,
     holder: &str,
     row_id: i64,
     same: &SameCall,
     source_id: i16,
-    file: (i64, DateTime<Utc>),
+    file: (i64, &FileCall),
     reason: &str,
 ) -> Result<(), RecordError> {
     let mut tx = fenced(conn, holder).await?;
@@ -850,12 +860,12 @@ pub async fn duplicate_in(
     row_id: i64,
     same: &SameCall,
     source_id: i16,
-    file: (i64, DateTime<Utc>),
+    file: (i64, &FileCall),
     reason: &str,
 ) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE ingest_files SET state = 'duplicate', reason = $2, call_id = $3, \
-         call_started_at = $4, size = $5, file_mtime = $6 \
+         call_started_at = $4, size = $5, file_mtime = $6, named_at = $7 \
          WHERE id = $1 AND state IN ('waiting', 'staged', 'listed')",
     )
     .bind(row_id)
@@ -863,7 +873,8 @@ pub async fn duplicate_in(
     .bind(same.id)
     .bind(same.started_at)
     .bind(file.0)
-    .bind(file.1)
+    .bind(file.1.file_mtime)
+    .bind(file.1.started_at)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -999,13 +1010,14 @@ pub async fn replace(
     .await?;
     sqlx::query(
         "UPDATE ingest_files SET state = 'done', reason = NULL, call_id = $2, \
-         call_started_at = $3, size = $4, file_mtime = $5 WHERE id = $1",
+         call_started_at = $3, size = $4, file_mtime = $5, named_at = $6 WHERE id = $1",
     )
     .bind(row_id)
     .bind(same.id)
     .bind(same.started_at)
     .bind(size)
     .bind(call.file_mtime)
+    .bind(call.started_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

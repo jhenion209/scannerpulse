@@ -736,3 +736,40 @@ async fn a_filed_file_seen_again_after_its_recording_was_replaced_is_not_filed_a
     assert_eq!(site.calls().await.len(), 1);
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn each_file_keeps_the_time_its_name_gives(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    filed_by_north(&site).await;
+    // South's clock runs a second ahead: a shorter copy of north's call,
+    // then a longer copy of the next.
+    site.arrive(site.south_id, &bravo("120001", 56, 4021)).await;
+    assert!(matches!(site.pass().await[..], [Outcome::Duplicate(_)]));
+    site.arrive(site.north_id, &bravo("120500", 56, 4021)).await;
+    assert!(matches!(site.pass().await[..], [Outcome::Filed(..)]));
+    site.arrive(site.south_id, &bravo("120501", 112, 4021))
+        .await;
+    assert!(matches!(site.pass().await[..], [Outcome::Replaced(_)]));
+    let named: Vec<Option<DateTime<Utc>>> =
+        sqlx::query_scalar("SELECT named_at FROM ingest_files ORDER BY id")
+            .fetch_all(&site.pool)
+            .await?;
+    // Chicago is six hours behind UTC in January.
+    let at = |time: &str| {
+        Some(
+            DateTime::parse_from_rfc3339(&format!("2031-01-15T{time}-06:00"))
+                .unwrap()
+                .to_utc(),
+        )
+    };
+    assert_eq!(
+        named,
+        [
+            at("12:00:00"),
+            at("12:00:01"),
+            at("12:05:00"),
+            at("12:05:01")
+        ]
+    );
+    Ok(())
+}

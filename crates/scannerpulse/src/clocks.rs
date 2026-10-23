@@ -22,6 +22,22 @@ pub const LIMIT_MS: i64 = 1_000;
 /// A machine whose clock was last checked longer ago than this is named.
 pub const STALE_MINUTES: i64 = 30;
 
+/// A recorder whose files are seen this long after their calls end is
+/// named: its clock may be behind, or its files slow to arrive. Beyond the
+/// watcher's rescan.
+pub const LATE_MS: i64 = 60_000;
+
+/// The files of a recorder measured: its newest of the last day.
+const SAMPLE: i64 = 200;
+
+/// A file first seen this long after the time its name gives is a backlog
+/// brought in (or one that waited while ingest was stopped), not a clock:
+/// it is not measured.
+const BACKLOG: &str = "1 hour";
+
+/// Fewer files or copies than this tell nothing.
+const FEWEST: i64 = 5;
+
 /// How long a database machine or the referee may take to answer.
 const ASK_LIMIT: Duration = Duration::from_secs(20);
 
@@ -289,6 +305,109 @@ pub async fn machine_warnings(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec
             });
         }
     }
+    Ok(warnings)
+}
+
+/// The recorders whose clocks need a look, measured from their newest files
+/// of the last day ([`SAMPLE`] at most, [`FEWEST`] at least; an import or a
+/// [`BACKLOG`] is never measured). Names give whole seconds, so a recorder is named when:
+/// its files are seen, by the database's clock, more than [`LIMIT_MS`] before
+/// the times their names give (its clock is ahead); they are seen more than
+/// [`LATE_MS`] after their calls end; or its copies of other recorders' calls
+/// are named [`LIMIT_MS`] or more apart from them (the median, both ways),
+/// enough to keep one short call as two.
+pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<Warning>> {
+    let recorders: Vec<(String, Option<f64>, Option<f64>)> = sqlx::query_as(
+        "SELECT s.name, \
+                CASE WHEN count(*) >= $2 THEN percentile_cont(0.5) WITHIN GROUP \
+                    (ORDER BY extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000) END, \
+                CASE WHEN count(c.id) >= $2 THEN percentile_cont(0.5) WITHIN GROUP \
+                    (ORDER BY extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000 \
+                              - c.duration_ms) END \
+         FROM sources s \
+         CROSS JOIN LATERAL ( \
+             SELECT f.first_seen, f.named_at, f.state, f.call_id, f.call_started_at \
+             FROM ingest_files f \
+             WHERE f.source_id = s.id AND f.named_at IS NOT NULL \
+               AND f.first_seen > now() - interval '1 day' \
+               AND f.first_seen < f.named_at + $3::interval \
+             ORDER BY f.first_seen DESC LIMIT $1) f \
+         LEFT JOIN calls c ON f.state = 'done' AND c.id = f.call_id \
+               AND c.started_at = f.call_started_at AND c.source_id = s.id \
+         WHERE s.removed_at IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
+         GROUP BY s.name",
+    )
+    .bind(SAMPLE)
+    .bind(FEWEST)
+    .bind(BACKLOG)
+    .fetch_all(&mut *db)
+    .await?;
+    let mut warnings = Vec::new();
+    for (name, seen, late) in recorders {
+        let (seen, late) = (
+            seen.map(|ms| ms.round() as i64),
+            late.map(|ms| ms.round() as i64),
+        );
+        let text = if let Some(ms) = seen.filter(|ms| *ms < -LIMIT_MS) {
+            format!(
+                "its clock is {} ahead of the database's: its files are seen before the times their names give",
+                seconds(ms)
+            )
+        } else if let Some(ms) = late.filter(|ms| *ms > LATE_MS) {
+            format!(
+                "its files are seen {} after their calls end: its clock may be behind, or its files slow to arrive",
+                seconds(ms)
+            )
+        } else {
+            continue;
+        };
+        warnings.push(Warning {
+            subject: name,
+            text,
+        });
+    }
+    // Each copy says how far its recorder's names run from those of the
+    // recorder of the call, as long as the call had no other copy.
+    let pairs: Vec<(String, String, i64, f64)> = sqlx::query_as(
+        "SELECT a.name, b.name, count(*), percentile_cont(0.5) WITHIN GROUP (ORDER BY p.ms) \
+         FROM (SELECT least(s.id, c.source_id) AS a, greatest(s.id, c.source_id) AS b, \
+                      CASE WHEN s.id < c.source_id THEN 1 ELSE -1 END \
+                      * extract(epoch FROM f.named_at - c.started_at)::float8 * 1000 AS ms \
+               FROM sources s \
+               CROSS JOIN LATERAL ( \
+                   SELECT f.named_at, f.call_id, f.call_started_at FROM ingest_files f \
+                   WHERE f.source_id = s.id AND f.state = 'duplicate' AND f.named_at IS NOT NULL \
+                     AND f.first_seen > now() - interval '1 day' \
+                   ORDER BY f.first_seen DESC LIMIT $1) f \
+               JOIN calls c ON c.id = f.call_id AND c.started_at = f.call_started_at \
+                    AND c.copies_from = ARRAY[s.id] \
+               WHERE s.removed_at IS NULL \
+                 AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id IN (s.id, c.source_id))) p \
+         JOIN sources a ON a.id = p.a \
+         JOIN sources b ON b.id = p.b \
+         GROUP BY a.name, b.name \
+         HAVING count(*) >= $2",
+    )
+    .bind(SAMPLE)
+    .bind(FEWEST)
+    .fetch_all(&mut *db)
+    .await?;
+    for (a, b, copies, ms) in pairs {
+        let ms = ms.round() as i64;
+        if ms.abs() < LIMIT_MS {
+            continue;
+        }
+        let (ahead, behind) = if ms > 0 { (a, b) } else { (b, a) };
+        warnings.push(Warning {
+            subject: ahead,
+            text: format!(
+                "its clock is {} ahead of {behind}'s ({copies} copies): one call can be kept as two",
+                seconds(ms)
+            ),
+        });
+    }
+    warnings.sort_by(|x, y| x.subject.cmp(&y.subject));
     Ok(warnings)
 }
 

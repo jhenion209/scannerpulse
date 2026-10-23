@@ -14,3 +14,8 @@ CREATE TABLE clock_checks (
     checked_at   timestamptz NOT NULL
 );
 
+-- The time a filed file's name gives (its recorder's clock), kept with its
+-- row: a recorder's clock is measured from when its files are first seen
+-- (the database's clock) and from the copies of one call other recorders
+-- named. Rows filed before stay without one. Additive.
+ALTER TABLE ingest_files ADD COLUMN named_at timestamptz;

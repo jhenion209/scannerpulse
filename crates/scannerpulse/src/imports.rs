@@ -1307,7 +1307,7 @@ pub(crate) async fn import_step(
                     "a copy of call {} from {}: the call keeps its recording",
                     same.id, same.recorder
                 );
-                let file = (size, call.file_mtime);
+                let file = (size, &call);
                 store::duplicate_in(conn, row.id, &same, params.source, file, &why).await?;
                 work.copies += 1;
             }
