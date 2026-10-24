@@ -217,8 +217,8 @@ account cannot write). Both send PostgreSQL's WAL to pgBackRest there, so
 the one that is the primary always does, and every night the primary takes
 a pgBackRest backup (full on Sundays, differential otherwise; two full ones
 kept, with the WAL between them, for recovery to any moment) and a dump
-(the newest 14), each shown on the admin page's Status. Each database
-machine is given its push addresses itself, with `backups push` above; the
+(the newest 14). Each database machine is given its push addresses
+itself, with `backups push` above (a monitor that hears no push alerts); the
 push answers are refused with database machines. A folder given or changed
 later sends the database machines back to join, which sets them up for it.
 Without `BACKUPS`, the primary keeps only a nightly dump, in
