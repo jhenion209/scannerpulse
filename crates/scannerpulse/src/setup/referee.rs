@@ -96,8 +96,11 @@ pub fn steps(
     steps.push(super::node::script(
         "Give the database machines' role its password",
         // The referee's own port: another PostgreSQL here may hold 5432.
-        "for i in $(seq 120); do runuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\nrunuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -q -v ON_ERROR_STOP=1",
-        &[("PORT", &port)],
+        // And only to the monitor in this machine's own folder: what answers
+        // on the port may be another PostgreSQL's (the plan named the wrong
+        // port), whose role must keep its password.
+        "for i in $(seq 120); do runuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\ncanon() { readlink -f \"$1\" 2>/dev/null || printf '%s\\n' \"$1\"; }\nshown=$(runuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -tAXc 'SHOW data_directory')\n[ \"$(canon \"$shown\")\" = \"$(canon \"$DATA\")\" ] || { echo \"port $PORT answers for the PostgreSQL in ${shown:-another folder}, not this machine's referee in $DATA: its password is left alone\" >&2; exit 1; }\nrunuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -q -v ON_ERROR_STOP=1",
+        &[("PORT", &port), ("DATA", &data)],
         Some(format!(
             "{}ALTER USER autoctl_node PASSWORD '{}';\nSELECT pg_reload_conf();\n",
             super::steps::QUIET_SQL,
@@ -292,6 +295,49 @@ mod tests {
                 args.contains(&"--no-upgrade".to_string()),
                 "{title}: {args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_password_goes_only_to_the_monitor_this_machine_made() {
+        use crate::setup::system::detect;
+        let ubuntu = detect("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "aarch64").unwrap();
+        let ip: Vec<IpAddr> = vec!["192.0.2.21".parse().unwrap()];
+        let all = steps(
+            &plan(),
+            &ubuntu,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ip,
+            &ip,
+        );
+        let step = all
+            .iter()
+            .find(|s| s.title == "Give the database machines' role its password")
+            .unwrap();
+        // The port answers, but for another PostgreSQL (another site's
+        // referee on 5432, say): its role keeps its password.
+        let stub = "case \"$*\" in *data_directory*) echo \"$SHOWN\" ;; esac";
+        for (shown, ours) in [
+            ("/var/lib/postgresql/monitor", false),
+            ("/var/lib/postgresql/17/monitor", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let ran = crate::setup::test_script::run(
+                step,
+                &[("runuser", stub)],
+                &[("SHOWN", shown)],
+                dir.path(),
+                "ALTER USER autoctl_node PASSWORD 'x';\n",
+            );
+            assert_eq!(ran.ok, ours, "{shown}: {}", ran.stderr);
+            assert_eq!(ran.calls.contains("ON_ERROR_STOP=1"), ours, "{}", ran.calls);
+            if !ours {
+                assert!(
+                    ran.stderr.contains("/var/lib/postgresql/17/monitor"),
+                    "{}",
+                    ran.stderr
+                );
+            }
         }
     }
 

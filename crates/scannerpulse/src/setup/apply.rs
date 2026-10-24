@@ -244,7 +244,12 @@ pub(super) fn write_plan(mut fresh: super::plan::Plan) -> Result<(), String> {
         .to_string();
     // A machine joining meanwhile waits for the plan's lock.
     Plan::replace(Path::new(PLAN), |kept| {
-        may_replan(kept.as_ref(), &fresh.nodes, fresh.referee.as_deref())?;
+        may_replan(
+            kept.as_ref(),
+            &fresh.nodes,
+            fresh.referee.as_deref(),
+            fresh.referee_port,
+        )?;
         let plan = next_plan(kept, fresh);
         if plan.second.is_some() {
             mark_archive(&plan)?;
@@ -253,16 +258,32 @@ pub(super) fn write_plan(mut fresh: super::plan::Plan) -> Result<(), String> {
     })
 }
 
-/// Whether the plan may name `referee` (or none) for `nodes`: once the
-/// same machines have joined, their referee (or their promotion by hand)
-/// stays, since they are registered with it; replacing the referee is the
-/// README's, and a change of mode a new install.
+/// Whether the plan may name `referee` (or none) on `referee_port` for
+/// `nodes`: once the same machines have joined, their referee (or their
+/// promotion by hand) stays, on its port, since they are registered with
+/// it; replacing the referee is the README's, and a change of mode a new
+/// install.
 pub(super) fn may_replan(
     kept: Option<&super::plan::Plan>,
     nodes: &[String],
     referee: Option<&str>,
+    referee_port: Option<u16>,
 ) -> Result<(), String> {
     match kept {
+        // Asked again without its port, the referee's machine would take
+        // whatever answers on 5432 there (another site's referee) for it.
+        Some(old)
+            if old.nodes == nodes
+                && old.referee.as_deref() == referee
+                && old.referee_port != referee_port
+                && !old.joined.is_empty() =>
+        {
+            Err(format!(
+                "the database machines have joined with {} as their referee on port {port}: setup keeps it (answer {port} for the referee's port; REFEREE_PORT={port} in an answers file)",
+                referee.unwrap_or_default(),
+                port = old.referee_port()
+            ))
+        }
         Some(old)
             if old.nodes == nodes
                 && old.referee.as_deref() != referee
@@ -646,27 +667,39 @@ mod tests {
         let mut kept = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
         // Nothing has joined yet: any referee, or none.
         assert_eq!(
-            super::may_replan(Some(&kept), &nodes(), Some("ref2.example.org")),
+            super::may_replan(Some(&kept), &nodes(), Some("ref2.example.org"), None),
             Ok(())
         );
-        assert_eq!(super::may_replan(Some(&kept), &nodes(), None), Ok(()));
+        assert_eq!(super::may_replan(Some(&kept), &nodes(), None, None), Ok(()));
         kept.mark_joined("ref.example.org");
         assert_eq!(
-            super::may_replan(Some(&kept), &nodes(), Some("ref.example.org")),
+            super::may_replan(Some(&kept), &nodes(), Some("ref.example.org"), None),
             Ok(())
         );
         for other in [Some("ref2.example.org"), None] {
-            let error = super::may_replan(Some(&kept), &nodes(), other).unwrap_err();
+            let error = super::may_replan(Some(&kept), &nodes(), other, None).unwrap_err();
             assert!(error.contains("have joined"), "{error}");
         }
         // Promoted by hand, joined: no referee now either.
         let mut by_hand = make(None, &nodes(), "192.0.2.10", None, None);
         by_hand.mark_joined("db1.example.org");
-        assert!(super::may_replan(Some(&by_hand), &nodes(), Some("ref.example.org")).is_err());
+        assert!(
+            super::may_replan(Some(&by_hand), &nodes(), Some("ref.example.org"), None).is_err()
+        );
         // Other machines are a new install.
         let others = vec!["db3.example.org".to_string(), "db4.example.org".to_string()];
-        assert_eq!(super::may_replan(Some(&kept), &others, None), Ok(()));
-        assert_eq!(super::may_replan(None, &nodes(), None), Ok(()));
+        assert_eq!(super::may_replan(Some(&kept), &others, None, None), Ok(()));
+        assert_eq!(super::may_replan(None, &nodes(), None, None), Ok(()));
+        // Nor its port: the referee joined on it, and on 5432 there may be
+        // another PostgreSQL.
+        kept.referee_port = Some(5433);
+        assert_eq!(
+            super::may_replan(Some(&kept), &nodes(), Some("ref.example.org"), Some(5433)),
+            Ok(())
+        );
+        let error =
+            super::may_replan(Some(&kept), &nodes(), Some("ref.example.org"), None).unwrap_err();
+        assert!(error.contains("port 5433"), "{error}");
     }
 
     #[test]

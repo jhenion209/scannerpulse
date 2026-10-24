@@ -180,9 +180,24 @@ impl System {
             ours: self
                 .our_data()
                 .iter()
-                .any(|data| Path::new(data).join("PG_VERSION").exists()),
+                .any(|data| serves(Path::new(data), port)),
         }
     }
+}
+
+/// Whether the PostgreSQL of data folder `data` is running on `port`: its
+/// `postmaster.pid` names the port on its fourth line. Its data folder alone
+/// is not enough: on a referee beside another PostgreSQL, that one holds
+/// 5432 while ours is on its own port.
+pub(super) fn serves(data: &std::path::Path, port: u16) -> bool {
+    std::fs::read_to_string(data.join("postmaster.pid"))
+        .ok()
+        .and_then(|pid| {
+            pid.lines()
+                .nth(3)
+                .map(|line| line.trim() == port.to_string())
+        })
+        .unwrap_or(false)
 }
 
 /// What a machine has of PostgreSQL, seen before setup starts.
@@ -200,7 +215,7 @@ pub struct Seen {
     pub port: u16,
     /// Something listens on that port of this machine.
     pub port_taken: bool,
-    /// PostgreSQL 17's data directory has its PG_VERSION: an earlier setup's.
+    /// What listens on that port is the PostgreSQL an earlier setup made.
     pub ours: bool,
 }
 
@@ -394,5 +409,19 @@ mod tests {
             ..Seen::default()
         };
         assert_eq!(other_postgres(&rerun), Ok(()));
+    }
+
+    #[test]
+    fn the_port_is_ours_only_while_our_cluster_listens_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!super::serves(dir.path(), 5432));
+        std::fs::write(
+            dir.path().join("postmaster.pid"),
+            "4242\n/var/lib/postgresql/17/monitor\n1761300000\n5433\n/var/run/postgresql\n*\n  1234567     12345\nready   \n",
+        )
+        .unwrap();
+        assert!(super::serves(dir.path(), 5433));
+        // Our data folder, while another program holds 5432: not ours.
+        assert!(!super::serves(dir.path(), 5432));
     }
 }

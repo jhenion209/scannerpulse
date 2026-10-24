@@ -141,8 +141,10 @@ referee, with the site up except for a few seconds:
    removes this machine's old database. Its backups stay in the backups'
    folder until you remove them; each database machine takes a nightly dump.
 
-**With a referee** (`--referee REF` after ADDRESS), the referee joins first,
-the same way. The first command, run again, then makes this machine's
+**With a referee** (`--referee REF` after ADDRESS, and `--referee-port PORT`
+when another PostgreSQL holds 5432 on the referee's machine), the referee
+joins first, the same way. The first command, run again exactly as given
+(the port too: run without it, it is refused), then makes this machine's
 database the referee's first primary: pg_autoctl runs it from then on (one
 restart, a few seconds). DB1 joins as its standby. `--switch` asks the
 referee to make DB1 the primary; this machine's database follows it as a

@@ -600,18 +600,7 @@ pub async fn begin(
     database_here_or_following(&settings)?;
     machines_apart(&nodes, &hub, referee.as_deref(), super::plan::resolve)?;
     let kept = Plan::read(path).ok();
-    if let Some(kept) = &kept
-        && !(kept.moving && kept.nodes == nodes && kept.referee == referee)
-    {
-        return Err(if kept.moving {
-            format!(
-                "the database is moving to {} already",
-                kept.nodes.join(" and ")
-            )
-        } else {
-            "this install has a plan of database machines already".into()
-        });
-    }
+    may_begin(kept.as_ref(), &nodes, referee.as_deref(), referee_port)?;
     let mut node_ips = Vec::new();
     for node in &nodes {
         let found = super::plan::resolve(node);
@@ -1232,6 +1221,42 @@ fn joined(plan: &Plan) -> Vec<&str> {
 
 /// What is said once the move is cancelled: what to do with the machines
 /// that joined it, and whether the referee (`told`) heard of it.
+/// Whether `db move` may start, or go on: only the same move again, with
+/// the same machines, referee and port. Run again without the port its
+/// referee joined on, the referee's machine would take whatever answers on
+/// 5432 there (another site's referee) for its own.
+fn may_begin(
+    kept: Option<&Plan>,
+    nodes: &[String],
+    referee: Option<&str>,
+    referee_port: Option<u16>,
+) -> Result<(), String> {
+    let Some(kept) = kept else {
+        return Ok(());
+    };
+    if !kept.moving {
+        return Err("this install has a plan of database machines already".into());
+    }
+    if kept.nodes != nodes || kept.referee.as_deref() != referee {
+        return Err(format!(
+            "the database is moving to {} already",
+            kept.nodes.join(" and ")
+        ));
+    }
+    if kept.referee_port != referee_port {
+        let again = match kept.referee_port {
+            Some(port) => format!("with `--referee-port {port}`"),
+            None => "without `--referee-port`".into(),
+        };
+        return Err(format!(
+            "the database is moving with {} as its referee on port {}: run the command again {again}",
+            referee.unwrap_or_default(),
+            kept.referee_port()
+        ));
+    }
+    Ok(())
+}
+
 pub fn cancelled_text(plan: &Plan, told: bool) -> String {
     let joined = joined(plan);
     let copies = if joined.is_empty() {
@@ -1244,7 +1269,8 @@ pub fn cancelled_text(plan: &Plan, told: bool) -> String {
     };
     let referee = match &plan.referee {
         Some(referee) if !told => format!(
-            " The referee {referee} did not answer: its formation still names this install's machines. Before a new move with it, run there: sudo -u postgres psql -d pg_auto_failover -c \"SELECT pgautofailover.remove_node(nodeid, true) FROM pgautofailover.node\""
+            " The referee {referee} did not answer: its formation still names this install's machines. Before a new move with it, run there: sudo -u postgres psql -p {} -d pg_auto_failover -c \"SELECT pgautofailover.remove_node(nodeid, true) FROM pgautofailover.node\"",
+            plan.referee_port()
         ),
         Some(referee) if plan.joined.contains(referee) => format!(
             " The referee {referee} holds no machine now: it may serve a new move, or be uninstalled."
@@ -1676,9 +1702,44 @@ mod tests {
             "{untold}"
         );
         assert!(
-            untold.contains("sudo -u postgres psql -d pg_auto_failover -c \"SELECT pgautofailover.remove_node(nodeid, true) FROM pgautofailover.node\""),
+            untold.contains("sudo -u postgres psql -p 5432 -d pg_auto_failover -c \"SELECT pgautofailover.remove_node(nodeid, true) FROM pgautofailover.node\""),
             "{untold}"
         );
+        // A referee on its own port: the command must not reach another
+        // site's referee on 5432 and empty its formation.
+        plan.referee_port = Some(5433);
+        let untold = cancelled_text(&plan, false);
+        assert!(
+            untold.contains("sudo -u postgres psql -p 5433 -d pg_auto_failover"),
+            "{untold}"
+        );
+    }
+
+    #[test]
+    fn a_move_goes_on_only_with_its_machines_referee_and_port() {
+        let mut kept = Plan {
+            referee: Some("ref.example.org".into()),
+            referee_port: Some(5433),
+            ..plan()
+        };
+        let nodes = kept.nodes.clone();
+        assert_eq!(
+            may_begin(Some(&kept), &nodes, Some("ref.example.org"), Some(5433)),
+            Ok(())
+        );
+        // Run again without the port its referee joined on.
+        let error = may_begin(Some(&kept), &nodes, Some("ref.example.org"), None).unwrap_err();
+        assert!(error.contains("--referee-port 5433"), "{error}");
+        let error = may_begin(Some(&kept), &nodes, None, None).unwrap_err();
+        assert!(error.contains("is moving to db1.example.org"), "{error}");
+        kept.moving = false;
+        let error =
+            may_begin(Some(&kept), &nodes, Some("ref.example.org"), Some(5433)).unwrap_err();
+        assert!(
+            error.contains("a plan of database machines already"),
+            "{error}"
+        );
+        assert_eq!(may_begin(None, &nodes, None, None), Ok(()));
     }
 
     #[test]
