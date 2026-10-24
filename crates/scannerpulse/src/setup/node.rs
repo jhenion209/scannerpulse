@@ -839,20 +839,23 @@ fn backup_steps(folder: &Path, autoctl: bool, system: &System) -> Vec<Step> {
     let top = folder.display().to_string();
     let repo = folder.join("pgbackrest").display().to_string();
     let dumps = folder.join("dump").display().to_string();
-    steps.push(run(
-        "Check that the postgres account reaches the backups folder",
-        "runuser",
-        &[
-            "-u",
-            "postgres",
-            "--",
-            "sh",
-            "-c",
-            &super::steps::reach("postgres"),
-            "reach",
-            &top,
-        ],
-    ));
+    let reach = |path: &str| {
+        run(
+            "Check that the postgres account reaches the backups folder",
+            "runuser",
+            &[
+                "-u",
+                "postgres",
+                "--",
+                "sh",
+                "-c",
+                &super::steps::reach("postgres"),
+                "reach",
+                path,
+            ],
+        )
+    };
+    steps.push(reach(&top));
     steps.push(run(
         "Make the backups' folders, as the postgres account",
         "runuser",
@@ -868,6 +871,11 @@ fn backup_steps(folder: &Path, autoctl: bool, system: &System) -> Vec<Step> {
             &dumps,
         ],
     ));
+    // The second machine to join finds them made by the first: on a share
+    // that keeps owners, its postgres account must be able to write in them
+    // too, or its WAL would not be archived once it is the primary.
+    steps.push(reach(&repo));
+    steps.push(reach(&dumps));
     steps.push(run(
         "Make pgBackRest's settings folder",
         "install",
@@ -1857,14 +1865,36 @@ mod tests {
             };
             assert!(args.contains(&"--no-upgrade".to_string()), "{args:?}");
             // The share must let the postgres account write; that account
-            // makes both folders there (root may not own files on a share).
-            let Action::Run { args, .. } = &titled(
-                &all,
-                "Check that the postgres account reaches the backups folder",
-            )[0] else {
-                panic!()
-            };
-            assert_eq!(args.last().unwrap(), "/srv/backups");
+            // makes both folders there (root may not own files on a share),
+            // and then writes in each: the second machine to join finds them
+            // made by the first, whose postgres account may not be its own.
+            let checks: Vec<(usize, String)> = all
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    s.title == "Check that the postgres account reaches the backups folder"
+                })
+                .map(|(i, s)| match &s.action {
+                    Action::Run { args, .. } => (i, args.last().unwrap().clone()),
+                    _ => panic!(),
+                })
+                .collect();
+            let made = all
+                .iter()
+                .position(|s| s.title == "Make the backups' folders, as the postgres account")
+                .unwrap();
+            assert_eq!(
+                checks.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>(),
+                [
+                    "/srv/backups",
+                    "/srv/backups/pgbackrest",
+                    "/srv/backups/dump"
+                ]
+            );
+            assert!(
+                checks[0].0 < made && made < checks[1].0,
+                "{checks:?} {made}"
+            );
             let Action::Run { program, args, .. } =
                 &titled(&all, "Make the backups' folders, as the postgres account")[0]
             else {
