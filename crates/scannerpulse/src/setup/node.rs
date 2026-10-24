@@ -834,36 +834,40 @@ fn backup_steps(folder: &Path, autoctl: bool, system: &System) -> Vec<Step> {
             ));
         }
     }
+    // The share must let the postgres account write there, and that account
+    // makes both folders: root may not own files on a share, or reach one.
+    let top = folder.display().to_string();
     let repo = folder.join("pgbackrest").display().to_string();
     let dumps = folder.join("dump").display().to_string();
-    for (title, path, mode) in [
-        ("Make the folder of pgBackRest's backups", &repo, "0750"),
-        ("Make the folder of the nightly dumps", &dumps, "0700"),
-    ] {
-        steps.push(run(
-            title,
-            "install",
-            &["-d", "-m", mode, "-o", "postgres", "-g", "postgres", path],
-        ));
-    }
-    // PostgreSQL archives its WAL there, and the dumps are its own: the
-    // share must let the postgres account write in both.
-    for path in [&repo, &dumps] {
-        steps.push(run(
-            "Check that the postgres account reaches the backups folder",
-            "runuser",
-            &[
-                "-u",
-                "postgres",
-                "--",
-                "sh",
-                "-c",
-                &super::steps::reach("postgres"),
-                "reach",
-                path,
-            ],
-        ));
-    }
+    steps.push(run(
+        "Check that the postgres account reaches the backups folder",
+        "runuser",
+        &[
+            "-u",
+            "postgres",
+            "--",
+            "sh",
+            "-c",
+            &super::steps::reach("postgres"),
+            "reach",
+            &top,
+        ],
+    ));
+    steps.push(run(
+        "Make the backups' folders, as the postgres account",
+        "runuser",
+        &[
+            "-u",
+            "postgres",
+            "--",
+            "sh",
+            "-c",
+            "mkdir -p -m 0750 \"$1\" && mkdir -p -m 0700 \"$2\"",
+            "folders",
+            &repo,
+            &dumps,
+        ],
+    ));
     steps.push(run(
         "Make pgBackRest's settings folder",
         "install",
@@ -1852,23 +1856,27 @@ mod tests {
                 panic!()
             };
             assert!(args.contains(&"--no-upgrade".to_string()), "{args:?}");
-            // Both folders in the share, the postgres account's, checked.
-            let Action::Run { args, .. } = &titled(&all, "Make the folder of the nightly dumps")[0]
+            // The share must let the postgres account write; that account
+            // makes both folders there (root may not own files on a share).
+            let Action::Run { args, .. } = &titled(
+                &all,
+                "Check that the postgres account reaches the backups folder",
+            )[0] else {
+                panic!()
+            };
+            assert_eq!(args.last().unwrap(), "/srv/backups");
+            let Action::Run { program, args, .. } =
+                &titled(&all, "Make the backups' folders, as the postgres account")[0]
             else {
                 panic!()
             };
-            assert_eq!(args.last().unwrap(), "/srv/backups/dump");
-            let reached: Vec<String> = titled(
-                &all,
-                "Check that the postgres account reaches the backups folder",
-            )
-            .iter()
-            .map(|a| match a {
-                Action::Run { args, .. } => args.last().unwrap().clone(),
-                _ => panic!(),
-            })
-            .collect();
-            assert_eq!(reached, ["/srv/backups/pgbackrest", "/srv/backups/dump"]);
+            assert_eq!(program, "runuser");
+            assert_eq!(
+                args[args.len() - 2..],
+                ["/srv/backups/pgbackrest", "/srv/backups/dump"]
+            );
+            assert!(args.join(" ").contains("-u postgres --"), "{args:?}");
+            assert!(titled(&all, "Make the folder of the nightly dumps").is_empty());
             let Action::Write {
                 contents, owner, ..
             } = &titled(&all, "Write pgBackRest's settings")[0]
