@@ -288,7 +288,8 @@ pub async fn run_change(change: Change) -> Result<(), String> {
                 "The push address after each {kind} backup:"
             ))?)
         };
-        let steps = super::node::push_steps(&text, kind, url.as_deref())?;
+        let unit = std::fs::read_to_string(super::node::BACKUP_UNIT).unwrap_or_default();
+        let steps = super::node::push_steps(&text, kind, url.as_deref(), &unit)?;
         let context = super::apply::Context {
             database_url: String::new(),
             db_password: String::new(),

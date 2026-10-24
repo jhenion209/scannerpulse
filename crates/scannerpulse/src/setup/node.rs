@@ -941,13 +941,27 @@ case $recovery in
   *) echo "PostgreSQL does not answer" >&2; exit 1 ;;
 esac"#;
 
+/// The nightly backups' unit on a database machine.
+pub const BACKUP_UNIT: &str = "/etc/systemd/system/scannerpulse-node-backup.service";
+
 /// `scannerpulse backups push KIND [off]` on a database machine: the
 /// address kept in its own file (`text` is that file now), or removed.
-pub fn push_steps(text: &str, kind: &str, url: Option<&str>) -> Result<Vec<Step>, String> {
+/// `unit` is the nightly backups' unit as it is here: one written before
+/// it read the push file (a machine joined with an older release) is
+/// refused an address, which would never be called.
+pub fn push_steps(
+    text: &str,
+    kind: &str,
+    url: Option<&str>,
+    unit: &str,
+) -> Result<Vec<Step>, String> {
     let var = crate::backup::push_var(kind)
         .ok_or_else(|| format!("{kind:?} is not a kind of backup: pgbackrest or dump"))?;
     if let Some(url) = url {
         super::ask::check_push(url)?;
+        if !unit.contains(&format!("EnvironmentFile=-{BACKUP_PUSH}\n")) {
+            return Err("this machine's nightly backups do not read push addresses yet (it joined with an older release): join it again first (`sudo /usr/local/bin/scannerpulse setup`, Advanced, \"join an existing install\"), then give the address".into());
+        }
     }
     Ok(vec![Step {
         title: "Keep the push address".into(),
@@ -2052,8 +2066,12 @@ mod tests {
 
     #[test]
     fn a_database_machine_keeps_its_push_addresses_root_s_alone() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let binary = Path::new("/usr/local/bin/scannerpulse");
+        let (unit, _) = dump_units(binary, &debian, true, Some(Path::new("/srv/backups")));
         let url = "https://kuma.example.org/api/push/abc?status=up&msg=OK";
-        let steps = push_steps("", "dump", Some(url)).unwrap();
+        let steps = push_steps("", "dump", Some(url), &unit).unwrap();
         let Action::Write {
             path,
             contents,
@@ -2071,7 +2089,7 @@ mod tests {
         );
         assert!(contents.contains(url), "{contents}");
         // The other kind beside it; then the first one off.
-        let both = push_steps(contents, "pgbackrest", Some(url)).unwrap();
+        let both = push_steps(contents, "pgbackrest", Some(url), &unit).unwrap();
         let Action::Write { contents: both, .. } = &both[0].action else {
             panic!()
         };
@@ -2079,14 +2097,21 @@ mod tests {
             both.contains("SCANNERPULSE_BACKUP_PUSH_PGBACKREST="),
             "{both}"
         );
-        let off = push_steps(both, "dump", None).unwrap();
+        let off = push_steps(both, "dump", None, &unit).unwrap();
         let Action::Write { contents: off, .. } = &off[0].action else {
             panic!()
         };
         assert!(!off.contains("PUSH_DUMP"), "{off}");
         assert!(off.contains("PUSH_PGBACKREST"), "{off}");
-        assert!(push_steps("", "tape", Some(url)).is_err());
-        assert!(push_steps("", "dump", Some("ftp://kuma.example.org/x")).is_err());
+        assert!(push_steps("", "tape", Some(url), &unit).is_err());
+        // A machine joined with an older release: its nightly reads no push
+        // file, so an address given would never be called. Join it again
+        // first; taking an address off still works.
+        let old = unit.replace("EnvironmentFile=-/etc/scannerpulse/backup-push\n", "");
+        let error = push_steps("", "dump", Some(url), &old).unwrap_err();
+        assert!(error.contains("join it again"), "{error}");
+        assert!(push_steps("", "dump", None, &old).is_ok());
+        assert!(push_steps("", "dump", Some("ftp://kuma.example.org/x"), &unit).is_err());
     }
 
     #[test]
