@@ -14,6 +14,7 @@ setup's Simple path is enough.
 | The referee (optional) | A third, small machine that promotes the standby by itself | the same, first |
 | The second ScannerPulse machine (optional) | Serves the same site while the first is down | the same, last |
 | The archive share | One NFS or SMB share that both ScannerPulse machines mount | yours, before setup |
+| The backups share (with database machines) | A share both database machines mount at one path (`BACKUPS`), for pgBackRest and the dumps | yours, before they join |
 | The shared address (optional) | One address that the healthy ScannerPulse machine holds | named on the first machine |
 
 All of them must be able to reach each other by name. Each machine's name must
@@ -117,6 +118,47 @@ copied: `scannerpulse backups location FOLDER` moves the backups.
   example with `uid=scannerpulse,gid=scannerpulse` among the mount options. The
   account exists only once setup has made it: setup stops at its check, you
   remount, and you run setup again.
+
+## The database machines' backups
+
+With `BACKUPS` in the first machine's setup, the database machines keep
+pgBackRest's repository and the nightly dumps in a share off both machines,
+mounted at that path on each before it joins. For a share mounted on a
+virtual machine host and passed into containers, mount it on each host and
+pass the same folder into each container.
+
+- **NFS:** have the server map every user to one owner (`all_squash`, or a
+  NAS's "map all users"), or give the postgres account the same user number
+  on both machines: each machine's PostgreSQL writes where the other wrote.
+  The join checks that its postgres account writes in both folders.
+- **Writes on the server synchronous** (not asynchronous): pgBackRest counts a
+  WAL file as kept once the server says so, and PostgreSQL then removes its
+  own copy; a server that loses a write it confirmed leaves a gap that no
+  restore can cross.
+- **A share that is gone** (an NFS mount waits, by default, for the server):
+  the primary's WAL waits on its own disk until the share is back, and the
+  nightly backup waits too. Watch the disk with `disk push` on each database
+  machine, and the backups with the push monitors (`backups push` on each,
+  the same address for each kind on both).
+
+**Restoring** a pgBackRest backup, of any install, as the postgres account on
+a machine with PostgreSQL 17 and pgBackRest, the share mounted and pgBackRest's
+settings copied from a database machine (or the ScannerPulse machine):
+
+```sh
+pgbackrest --config=/etc/pgbackrest/scannerpulse.conf --stanza=scannerpulse \
+  --pg1-path=/var/lib/postgresql/restore --archive-mode=off restore
+# to a moment: add --type=time --target="2026-10-24 21:30:00-05" --target-action=promote
+```
+
+`--archive-mode=off` keeps the copy from sending its WAL into the site's
+repository: a copy promoted there would take the next timeline's files, which
+the site's next promotion needs. The copy keeps the database machines'
+`synchronous_standby_names`: on a copy alone, run `ALTER SYSTEM RESET
+synchronous_standby_names` and restart it, or every write waits for a standby
+that is not there. On Debian, a database you promote by hand keeps
+`postgresql.conf` and `pg_hba.conf` in `/etc/postgresql`, outside the backup.
+A dump is restored with `pg_restore --dbname=DATABASE FILE`.
 
 ## The database moved to database machines
 
@@ -345,7 +387,8 @@ From Uptime Kuma or a similar service:
 - a push monitor for each kind of backup, with an interval of a day and a few
   hours. `sudo /usr/local/bin/scannerpulse backups push pgbackrest` (and `dump`)
   on the machine whose database it backs up asks for the push address: with
-  database machines, on each of them, since either may be the primary;
+  database machines, on each of them with the same address for each kind,
+  since either may be the primary;
 - a push monitor for each machine's disk, with an interval of about 15
   minutes: `sudo /usr/local/bin/scannerpulse disk push` on that machine asks
   for its address, and calls it every 5 minutes while `/` is less than 80%

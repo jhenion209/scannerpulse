@@ -218,11 +218,14 @@ the one that is the primary always does, and every night the primary takes
 a pgBackRest backup (full on Sundays, differential otherwise; two full ones
 kept, with the WAL between them, for recovery to any moment) and a dump
 (the newest 14). Each database machine is given its push addresses
-itself, with `backups push` above (a monitor that hears no push alerts); the
-push answers are refused with database machines. A folder given or changed
-later sends the database machines back to join, which sets them up for it.
-Without `BACKUPS`, the primary keeps only a nightly dump, in
-`/var/backups/scannerpulse` (the newest 14). Uninstall on a database
+itself, with `backups push` above, and both the same address for each kind
+(one monitor per kind): whichever is the primary pushes it, and a monitor that
+hears no push alerts. The push answers are refused with database machines.
+Give `BACKUPS` with the first setup: setup is not run again on a site that is
+set up, so a site set up without it, or moved to database machines by `db
+move`, keeps only a nightly dump on the primary's disk, in
+`/var/backups/scannerpulse` (the newest 14). The guide's "The database
+machines' backups" has the share's settings and how to restore. Uninstall on a database
 machine or the referee takes off setup's own parts there and leaves
 PostgreSQL and its data, and the backups.
 
