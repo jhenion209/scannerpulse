@@ -458,13 +458,15 @@ pub fn backups_folder(answers: &Answers) -> Option<PathBuf> {
 
 /// pgBackRest's settings: its repository in the backups folder, two full
 /// backups kept (with the differentials and the WAL between them), for the
-/// PostgreSQL in `data`.
+/// PostgreSQL in `data`. No symlink in the repository (its `latest`): a
+/// network share may not take one.
 pub fn pgbackrest_conf(backups: &Path, data: &str) -> String {
     format!(
         "# Written by `scannerpulse setup`.\n\
          [global]\n\
          repo1-path={repo}\n\
          repo1-retention-full=2\n\
+         repo1-symlink=n\n\
          start-fast=y\n\
          log-level-file=off\n\
          \n\
@@ -1814,6 +1816,9 @@ mod tests {
             debian.postgres_data(),
         );
         assert!(conf.contains("repo1-path=/srv/archive/.scannerpulse-backups/pgbackrest\n"));
+        // No symlink in the repository: a network share (SMB) refuses one,
+        // and pgBackRest then fails every backup.
+        assert!(conf.contains("repo1-symlink=n\n"), "{conf}");
         assert!(conf.contains("[scannerpulse]\npg1-path=/var/lib/postgresql/17/main\n"));
         let rocky = detect(ROCKY, "x86_64").unwrap();
         assert!(
