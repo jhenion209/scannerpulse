@@ -1421,7 +1421,7 @@ pub fn local_url() -> String {
 /// backups folder (`SCANNERPULSE_BACKUPS`, from the unit), a pgBackRest
 /// backup and a dump there; without, the dump on this machine's disk. Each
 /// kind's outcome, for its time and its push.
-pub fn backup() -> Result<Vec<(&'static str, Result<String, String>)>, String> {
+pub fn backup() -> Result<crate::backup::Outcomes, String> {
     if psql("SELECT pg_is_in_recovery()")? == "t" {
         return Ok(Vec::new());
     }

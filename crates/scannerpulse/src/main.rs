@@ -3224,10 +3224,7 @@ fn answered_yes(answer: &str) -> bool {
 
 /// Each backup's outcome said; one that succeeded has its time kept and is
 /// pushed.
-async fn backups_taken(
-    outcomes: Vec<(&'static str, Result<String, String>)>,
-    database_url: &str,
-) -> ExitCode {
+async fn backups_taken(outcomes: scannerpulse::backup::Outcomes, database_url: &str) -> ExitCode {
     let mut failed = Vec::new();
     for (kind, outcome) in outcomes {
         match outcome {

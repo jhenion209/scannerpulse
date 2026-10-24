@@ -53,6 +53,9 @@ fn run(program: &str, args: &[&str]) -> Result<(), String> {
 /// them.
 pub const KINDS: [&str; 2] = ["pgbackrest", "dump"];
 
+/// Each kind of backup taken, and how it went.
+pub type Outcomes = Vec<(&'static str, Result<String, String>)>;
+
 /// The settings-file variable holding `kind`'s push (heartbeat) address:
 /// it carries a token, so it is not kept in the database.
 pub fn push_var(kind: &str) -> Option<&'static str> {
@@ -113,11 +116,7 @@ pub async fn push(url: &str) -> Result<(), String> {
 /// other fails.
 /// `as_root`: run as root, which runs pgBackRest as the postgres account;
 /// else this is the postgres account already (a database machine's).
-pub fn nightly(
-    backups: &Path,
-    database_url: &str,
-    as_root: bool,
-) -> Vec<(&'static str, Result<String, String>)> {
+pub fn nightly(backups: &Path, database_url: &str, as_root: bool) -> Outcomes {
     let now = chrono::Local::now();
     let kind = kind(now.weekday());
     let config = format!("--config={PGBACKREST_CONF}");
