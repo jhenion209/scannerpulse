@@ -58,6 +58,12 @@ pub fn on_steps(url: &str, binary: &Path) -> Result<Vec<Step>, String> {
         },
     };
     Ok(vec![
+        // The referee has none; another machine's is left as it is.
+        run(
+            "Make the settings folder, if this machine has none",
+            "mkdir",
+            &["-p", "-m", "0755", super::steps::ETC],
+        ),
         write("Keep the push address", PUSH, format!("{url}\n"), 0o600),
         write(
             "Write the heartbeat's service",
@@ -214,6 +220,20 @@ mod tests {
                 .contains("ExecStart=/usr/local/bin/scannerpulse disk check\n")
         );
         assert!(written(TIMER).0.contains("OnCalendar=*:0/5\n"));
+        // The referee has no settings folder; the hub's is the account's
+        // (0750) and must stay so: made only when missing, never reset.
+        let Action::Run { program, args, .. } = &steps[0].action else {
+            panic!("{}", steps[0].title)
+        };
+        assert_eq!(
+            (program.as_str(), args.join(" ")),
+            ("mkdir", format!("-p -m 0755 {}", super::super::steps::ETC))
+        );
+        for step in &steps {
+            if let Action::Run { program, .. } = &step.action {
+                assert_ne!(program, "install", "{}", step.title);
+            }
+        }
         // The address is never an argument: sudo and ps would show it.
         for step in &steps {
             if let Action::Run { args, .. } = &step.action {
