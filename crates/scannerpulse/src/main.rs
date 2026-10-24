@@ -91,10 +91,11 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse tls letsencrypt web|dns-cloudflare NAME...
        scannerpulse backups push pgbackrest|dump [off]
        scannerpulse backups location FOLDER
+       scannerpulse disk push [off] | disk check
        scannerpulse second NAME [ADDRESS/PREFIX]
        scannerpulse uninstall [--remove-database] [--remove-backups] [--remove-archive]
        scannerpulse db promote | db rejoin | db switchover
-       scannerpulse db move DB1 DB2 --hub ADDRESS [--referee REF]
+       scannerpulse db move DB1 DB2 --hub ADDRESS [--referee REF [--referee-port PORT]]
        scannerpulse db move --switch | db move --retire | db move --cancel
        scannerpulse update [--check | --yes]
        scannerpulse agent | agent install
@@ -228,6 +229,11 @@ backups     as root: push asks for an address (or reads it from standard
             each backup of that kind that succeeds, and off removes it;
             location keeps the backups in FOLDER from
             now on, starting with a full backup there (the old ones stay)
+disk        as root, on any of the install's machines: push asks for an
+            address (or reads it from standard input; never an argument)
+            and calls it every 5 minutes while / is less than 80% full, so
+            that a monitor alerts when the calls stop; off stops it; check
+            is one such call, which the timer runs
 db          as root, with two database machines: promote, on the standby
             when the primary is gone, makes it the primary (refused while
             the other still answers as one); rejoin, on a former primary,
@@ -306,6 +312,8 @@ enum DbMove {
         nodes: [String; 2],
         hub: String,
         referee: Option<String>,
+        /// The referee's port, when not 5432.
+        referee_port: Option<u16>,
     },
     Switch,
     Retire,
@@ -317,6 +325,12 @@ enum Command {
     DbUpdate {
         quiet: bool,
     },
+    /// The disk heartbeat: `push` sets (or, `off`, stops) it; `check` is
+    /// one heartbeat.
+    DiskPush {
+        off: bool,
+    },
+    DiskCheck,
     Ingest,
     Lease,
     Web,
@@ -881,6 +895,9 @@ fn parse(args: &[&str]) -> Option<Command> {
             kind: kind.to_string(),
             off: true,
         })),
+        ["disk", "push"] => Some(Command::DiskPush { off: false }),
+        ["disk", "push", "off"] => Some(Command::DiskPush { off: true }),
+        ["disk", "check"] => Some(Command::DiskCheck),
         ["second", name] => Some(Command::Change(Change::Second {
             name: name.to_ascii_lowercase(),
             shared: None,
@@ -910,6 +927,7 @@ fn parse(args: &[&str]) -> Option<Command> {
             nodes: [first.to_string(), second.to_string()],
             hub: hub.to_string(),
             referee: None,
+            referee_port: None,
         })),
         [
             "db",
@@ -924,6 +942,25 @@ fn parse(args: &[&str]) -> Option<Command> {
             nodes: [first.to_string(), second.to_string()],
             hub: hub.to_string(),
             referee: Some(referee.to_string()),
+            referee_port: None,
+        })),
+        [
+            "db",
+            "move",
+            first,
+            second,
+            "--hub",
+            hub,
+            "--referee",
+            referee,
+            "--referee-port",
+            port,
+        ] => Some(Command::DbMove(DbMove::Begin {
+            nodes: [first.to_string(), second.to_string()],
+            hub: hub.to_string(),
+            referee: Some(referee.to_string()),
+            referee_port: Some(port.parse().ok().filter(|p: &u16| *p > 0)?)
+                .filter(|p| *p != scannerpulse::setup::steps::PORT_PG),
         })),
         ["archive", "move", new] => Some(Command::ArchiveMove {
             new: PathBuf::from(new),
@@ -1109,7 +1146,9 @@ static WENT_AHEAD: AtomicBool = AtomicBool::new(false);
 /// and is not the first setup, which made the site's database (there was
 /// none to record in) and whose own commands recorded themselves.
 fn records(command: &Command, has_database: bool) -> bool {
-    changes_something(command) && (has_database || !matches!(command, Command::Setup { .. }))
+    // A database machine or the referee has no database to record in.
+    changes_something(command)
+        && (has_database || !matches!(command, Command::Setup { .. } | Command::DiskPush { .. }))
 }
 
 /// Whether a command changes the site: when it succeeds, the audit log
@@ -1118,6 +1157,7 @@ fn records(command: &Command, has_database: bool) -> bool {
 fn changes_something(command: &Command) -> bool {
     match command {
         Command::DbUpdate { .. }
+        | Command::DiskPush { .. }
         | Command::Rescan
         | Command::Change(_)
         | Command::Db(_)
@@ -1467,6 +1507,18 @@ async fn execute(command: Option<Command>) -> ExitCode {
                 }
             }
         }
+        Some(Command::DiskPush { off }) => match as_root() {
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+            Ok(()) => node_answer(
+                scannerpulse::setup::disk::push(off, Path::new(scannerpulse::setup::BINARY)).await,
+            ),
+        },
+        Some(Command::DiskCheck) => node_answer(
+            scannerpulse::setup::disk::check(Path::new(scannerpulse::setup::disk::PUSH)).await,
+        ),
         Some(Command::Join(joined)) => node_answer(join_command(joined)),
         Some(Command::Node(command)) => node_answer(match command {
             NodeCommand::Serve => as_root().and_then(|()| scannerpulse::setup::node::serve()),
@@ -1496,13 +1548,20 @@ async fn execute(command: Option<Command>) -> ExitCode {
                         nodes,
                         hub,
                         referee,
+                        referee_port,
                     } => {
                         // Run again, the move reads its plan: the database
                         // may be restarting under pg_autoctl.
                         let mut conn = connect().await.ok();
                         as_step(
                             Kind::DbMove,
-                            scannerpulse::setup::db_move::begin(conn.as_mut(), nodes, hub, referee),
+                            scannerpulse::setup::db_move::begin(
+                                conn.as_mut(),
+                                nodes,
+                                hub,
+                                referee,
+                                referee_port,
+                            ),
                         )
                         .await
                     }
@@ -3441,6 +3500,7 @@ mod tests {
                 nodes: ["db1".into(), "db2".into()],
                 hub: "192.0.2.10".into(),
                 referee: None,
+                referee_port: None,
             }))
         );
         assert_eq!(
@@ -3457,6 +3517,50 @@ mod tests {
         );
         assert_eq!(parse(&["db", "move", "db1", "db2"]), None);
         assert_eq!(
+            parse(&["disk", "push"]),
+            Some(Command::DiskPush { off: false })
+        );
+        assert_eq!(
+            parse(&["disk", "push", "off"]),
+            Some(Command::DiskPush { off: true })
+        );
+        assert_eq!(parse(&["disk", "check"]), Some(Command::DiskCheck));
+        assert_eq!(parse(&["disk", "push", "https://kuma.example.org/x"]), None);
+        // A referee on another port: another PostgreSQL there holds 5432.
+        let moving = |port: &str| {
+            parse(&[
+                "db",
+                "move",
+                "db1",
+                "db2",
+                "--hub",
+                "192.0.2.10",
+                "--referee",
+                "ref",
+                "--referee-port",
+                port,
+            ])
+        };
+        assert_eq!(
+            moving("5433"),
+            Some(Command::DbMove(DbMove::Begin {
+                nodes: ["db1".into(), "db2".into()],
+                hub: "192.0.2.10".into(),
+                referee: Some("ref".into()),
+                referee_port: Some(5433),
+            }))
+        );
+        assert!(matches!(
+            moving("5432"),
+            Some(Command::DbMove(DbMove::Begin {
+                referee_port: None,
+                ..
+            }))
+        ));
+        assert_eq!(moving("0"), None);
+        assert_eq!(moving("65536"), None);
+        assert_eq!(moving("five"), None);
+        assert_eq!(
             parse(&[
                 "db",
                 "move",
@@ -3471,6 +3575,7 @@ mod tests {
                 nodes: ["db1".into(), "db2".into()],
                 hub: "192.0.2.10".into(),
                 referee: Some("ref".into()),
+                referee_port: None,
             }))
         );
     }
@@ -3836,6 +3941,12 @@ mod tests {
         assert!(records(&setup, true));
         let set = parse(&["settings", "set", "web.system_order", "[\"B\"]"]).unwrap();
         assert!(records(&set, false));
+        // The disk heartbeat on a database machine or the referee: no
+        // database there to record it in.
+        let disk = parse(&["disk", "push"]).unwrap();
+        assert!(!records(&disk, false));
+        assert!(records(&disk, true));
+        assert!(!records(&parse(&["disk", "check"]).unwrap(), true));
     }
 
     #[test]

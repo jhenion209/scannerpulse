@@ -187,6 +187,9 @@ pub(super) fn install(system: &System, auto: bool) -> Vec<Step> {
         "Install PostgreSQL 17 and SSH"
     };
     match system.family {
+        // A package already here keeps its version: another PostgreSQL on
+        // this machine (a referee beside one, say) is never upgraded or
+        // restarted by setup.
         Family::Apt => {
             let wait = "DPkg::Lock::Timeout=300";
             steps.push(run(
@@ -202,6 +205,7 @@ pub(super) fn install(system: &System, auto: bool) -> Vec<Step> {
                     wait,
                     "install",
                     "-y",
+                    "--no-upgrade",
                     "postgresql-common",
                     "ca-certificates",
                 ],
@@ -216,6 +220,7 @@ pub(super) fn install(system: &System, auto: bool) -> Vec<Step> {
                 wait,
                 "install",
                 "-y",
+                "--no-upgrade",
                 "postgresql-17",
                 "openssh-server",
             ];
@@ -400,14 +405,14 @@ fn by_hand(
     steps
 }
 
-/// The referee's monitor, as pg_autoctl and psql reach it.
-pub fn monitor_uri(referee: &str) -> String {
+/// The referee's monitor on `port`, as pg_autoctl and psql reach it.
+pub fn monitor_uri(referee: &str, port: u16) -> String {
     let host = if referee.contains(':') {
         format!("[{referee}]")
     } else {
         referee.to_string()
     };
-    format!("postgres://autoctl_node@{host}:5432/pg_auto_failover?sslmode=require")
+    format!("postgres://autoctl_node@{host}:{port}/pg_auto_failover?sslmode=require")
 }
 
 /// pg_autoctl's data directory on a database machine.
@@ -504,7 +509,7 @@ fn by_referee(
         ),
     ));
     steps.push(autoctl_folder("Make pg_autoctl's data directory", &data));
-    let monitor = monitor_uri(referee);
+    let monitor = monitor_uri(referee, plan.referee_port());
     steps.push(Step {
         title: "Register this machine with the referee".into(),
         action: Action::Run {
@@ -1563,6 +1568,7 @@ mod tests {
             password: "app-secret-1".into(),
             replication_password: "copy-secret-2".into(),
             referee: None,
+            referee_port: None,
             monitor_password: String::new(),
             second: None,
             shared: None,
@@ -2338,12 +2344,17 @@ mod tests {
     #[test]
     fn the_referees_address_is_a_uri_host() {
         assert_eq!(
-            monitor_uri("ref.example.org"),
+            monitor_uri("ref.example.org", 5432),
             "postgres://autoctl_node@ref.example.org:5432/pg_auto_failover?sslmode=require"
         );
         assert_eq!(
-            monitor_uri("2001:db8::31"),
+            monitor_uri("2001:db8::31", 5432),
             "postgres://autoctl_node@[2001:db8::31]:5432/pg_auto_failover?sslmode=require"
+        );
+        // Beside another PostgreSQL that holds 5432 there.
+        assert_eq!(
+            monitor_uri("ref.example.org", 5433),
+            "postgres://autoctl_node@ref.example.org:5433/pg_auto_failover?sslmode=require"
         );
     }
 

@@ -74,6 +74,9 @@ pub struct Pair {
     /// The referee, which promotes the standby by itself; none when the
     /// standby is promoted by hand.
     pub referee: Option<String>,
+    /// The referee's port, when it is not 5432 (another PostgreSQL there
+    /// holds that one).
+    pub referee_port: Option<u16>,
     /// The second ScannerPulse machine, and the address the two share.
     pub second: Option<String>,
     pub shared: Option<String>,
@@ -257,6 +260,7 @@ pub enum Action {
         hub: String,
         password: String,
         referee: Option<String>,
+        referee_port: Option<u16>,
         second: Option<String>,
         shared: Option<String>,
         archive: PathBuf,
@@ -318,6 +322,7 @@ impl std::fmt::Debug for Action {
                 nodes,
                 hub,
                 referee,
+                referee_port,
                 second,
                 shared,
                 ..
@@ -326,6 +331,7 @@ impl std::fmt::Debug for Action {
                 .field("nodes", nodes)
                 .field("hub", hub)
                 .field("referee", referee)
+                .field("referee_port", referee_port)
                 .field("second", second)
                 .field("shared", shared)
                 .finish_non_exhaustive(),
@@ -976,6 +982,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 hub: pair.hub.clone(),
                 password: db_password.to_string(),
                 referee: pair.referee.clone(),
+                referee_port: pair.referee_port,
                 second: pair.second.clone(),
                 shared: pair.shared.clone(),
                 archive: answers.archive.clone(),
@@ -2021,6 +2028,7 @@ mod tests {
                 hub: "192.0.2.10".into(),
                 password: "plan-secret".into(),
                 referee: None,
+                referee_port: None,
                 second: None,
                 shared: None,
                 archive: PathBuf::from("/srv/archive"),
@@ -2082,6 +2090,7 @@ mod tests {
                 nodes: ["db1.example.org".into(), "2001:db8::22".into()],
                 hub: "192.0.2.10".into(),
                 referee: None,
+                referee_port: None,
                 second: None,
                 shared: None,
             }),

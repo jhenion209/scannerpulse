@@ -350,9 +350,15 @@ async fn convert_step(
             // Run again, the move reads its own plan: the database may be
             // restarting under pg_autoctl.
             let mut conn = pool.acquire().await.ok();
-            db_move::begin(conn.as_deref_mut(), plan.nodes, plan.hub, plan.referee)
-                .await
-                .map(well)
+            db_move::begin(
+                conn.as_deref_mut(),
+                plan.nodes,
+                plan.hub,
+                plan.referee,
+                plan.referee_port,
+            )
+            .await
+            .map(well)
         }
         Kind::DbSwitch => db_move::switch(said).await.map(well),
         Kind::DbRetire => db_move::retire(|_| true).await.map(well),

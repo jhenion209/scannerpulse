@@ -338,10 +338,15 @@ From Uptime Kuma or a similar service:
   A failover keeps the site up, but this monitor still shows the machine that
   is down;
 - `/health` when you want "the process is up" alone;
-- a TCP monitor on each database machine's port 5432, and one on the referee's;
+- a TCP monitor on each database machine's port 5432, and one on the referee's
+  (5432, or the port it was given);
 - a push monitor for each kind of backup, with an interval of a day and a few
   hours. `sudo /usr/local/bin/scannerpulse backups push pgbackrest` (and `dump`)
-  on the machine that keeps the backups asks for the push address.
+  on the machine that keeps the backups asks for the push address;
+- a push monitor for each machine's disk, with an interval of about 15
+  minutes: `sudo /usr/local/bin/scannerpulse disk push` on that machine asks
+  for its address, and calls it every 5 minutes while `/` is less than 80%
+  full.
 
 Certificate errors can be ignored in the HTTPS monitors while the site uses
 setup's own certificate.

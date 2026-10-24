@@ -29,6 +29,9 @@ pub struct Layout {
     pub nodes: Vec<String>,
     #[serde(default)]
     pub referee: Option<String>,
+    /// The referee's port, when it is not 5432.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referee_port: Option<u16>,
     #[serde(default)]
     pub second: Option<String>,
     #[serde(default)]
@@ -215,8 +218,8 @@ fn roles(answers: &[Answer]) -> (Vec<Option<&'static str>>, Option<String>) {
 }
 
 /// The referee answers on its port.
-async fn ask_referee(host: &str) -> Result<(), String> {
-    match tokio::time::timeout(ASK_LIMIT, tokio::net::TcpStream::connect((host, 5432))).await {
+async fn ask_referee(host: &str, port: u16) -> Result<(), String> {
+    match tokio::time::timeout(ASK_LIMIT, tokio::net::TcpStream::connect((host, port))).await {
         Err(_) => Err(format!("no answer within {} s", ASK_LIMIT.as_secs())),
         Ok(Err(error)) => Err(error.to_string()),
         Ok(Ok(_)) => Ok(()),
@@ -226,12 +229,14 @@ async fn ask_referee(host: &str) -> Result<(), String> {
 /// Whether the referee the layout names answers, for the layout and the
 /// status alike; null when there is none.
 pub(crate) async fn referee(layout: Option<&Layout>) -> Value {
-    match layout.and_then(|l| l.referee.as_deref()) {
+    match layout.and_then(|l| l.referee.as_deref().map(|r| (r, l.referee_port))) {
         None => Value::Null,
-        Some(host) => match ask_referee(host).await {
-            Ok(()) => json!({"host": host, "answers": true}),
-            Err(why) => json!({"host": host, "answers": false, "error": why}),
-        },
+        Some((host, port)) => {
+            match ask_referee(host, port.unwrap_or(crate::setup::steps::PORT_PG)).await {
+                Ok(()) => json!({"host": host, "answers": true}),
+                Err(why) => json!({"host": host, "answers": false, "error": why}),
+            }
+        }
     }
 }
 
@@ -382,6 +387,25 @@ mod tests {
         );
         assert_eq!(Layout::read(&path), Some(layout));
         assert_eq!(Layout::read(&dir.path().join("none.json")), None);
+    }
+
+    #[tokio::test]
+    async fn the_referee_is_asked_on_its_own_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let layout = Layout {
+            referee: Some("127.0.0.1".into()),
+            referee_port: Some(listener.local_addr().unwrap().port()),
+            ..Layout::default()
+        };
+        assert_eq!(referee(Some(&layout)).await["answers"], json!(true));
+        // Port 1: nothing listens there. (A port just freed can come back as
+        // the connection's own, and a connection to itself answers.)
+        let closed = Layout {
+            referee_port: Some(1),
+            ..layout
+        };
+        assert_eq!(referee(Some(&closed)).await["answers"], json!(false));
+        drop(listener);
     }
 
     #[test]

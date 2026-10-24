@@ -28,6 +28,9 @@ pub struct Convert {
     /// The referee, when the standby is promoted by itself.
     #[serde(default)]
     pub referee: Option<String>,
+    /// The referee's port, when it is not 5432.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referee_port: Option<u16>,
     /// The second ScannerPulse machine, and the address the two share.
     #[serde(default)]
     pub second: Option<String>,
@@ -464,6 +467,7 @@ mod tests {
             nodes: ["db1.example.org".into(), "db2.example.org".into()],
             hub: "192.0.2.10".into(),
             referee: None,
+            referee_port: None,
             second: None,
             shared: None,
             archive: None,

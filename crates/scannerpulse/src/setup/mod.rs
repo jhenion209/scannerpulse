@@ -6,6 +6,7 @@ pub mod archive_move;
 pub mod ask;
 pub mod change;
 pub mod db_move;
+pub mod disk;
 pub mod folders;
 pub mod join;
 pub mod keepalived;
@@ -50,7 +51,7 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = system::detect(&os_release, std::env::consts::ARCH)?;
     // Another PostgreSQL here matters only to a database setup installs here.
-    let seen = system.seen();
+    let seen = system.seen(steps::PORT_PG);
     let defaults = ask::defaults();
     // Run again on a site on one machine, setup plans its conversion.
     if !dry_run && planner::standalone() && planner::run(answers_file, &defaults).await? {

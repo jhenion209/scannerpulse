@@ -57,6 +57,8 @@ pub struct Found {
     pub second: bool,
     /// keepalived's settings are setup's: this machine shares an address.
     pub keepalived: bool,
+    /// The disk heartbeat's timer is here (`scannerpulse disk push`).
+    pub disk: bool,
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
@@ -338,6 +340,9 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             },
         });
     }
+    if found.disk {
+        steps.extend(super::disk::off_steps());
+    }
     steps.push(run("Remove the program", "rm", &["-f", super::BINARY]));
     Ok(steps)
 }
@@ -431,6 +436,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
             .ok()
             .map(PathBuf::from),
         node: Path::new(super::node::NODE).exists(),
+        disk: Path::new(super::disk::TIMER).exists(),
         referee: Path::new(&super::referee::monitor_data(&system))
             .join("PG_VERSION")
             .exists(),
@@ -551,6 +557,7 @@ mod tests {
             referee: false,
             second: false,
             keepalived: false,
+            disk: false,
         }
     }
 
@@ -659,6 +666,18 @@ mod tests {
             "{all:?}"
         );
         assert!(!all.iter().any(|t| t.contains("nightly dump")), "{all:?}");
+        assert!(!all.iter().any(|t| t.contains("heartbeat")), "{all:?}");
+        // A disk heartbeat goes with the rest, before the program it runs.
+        let all = titles(&Found {
+            disk: true,
+            ..referee.clone()
+        });
+        let at = |title: &str| {
+            all.iter()
+                .position(|t| t == title)
+                .unwrap_or_else(|| panic!("{title}: {all:?}"))
+        };
+        assert!(at("Stop the heartbeat") < at("Remove the program"));
         // PostgreSQL and its data stay there.
         let error = steps(
             &node,

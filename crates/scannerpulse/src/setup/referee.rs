@@ -49,10 +49,11 @@ pub fn steps(
     let mut steps = install(system, true);
     let data = monitor_data(system);
     let referee = plan.referee.as_deref().unwrap_or_default();
+    let port = plan.referee_port().to_string();
     if system.family == Family::Apt {
         steps.push(drop_debians_cluster());
     }
-    steps.push(super::steps::firewall(true, 5432));
+    steps.push(super::steps::firewall(true, plan.referee_port()));
     steps.push(autoctl_folder("Make the referee's data directory", &data));
     steps.push(Step {
         title: "Make the referee (pg_auto_failover's monitor)".into(),
@@ -66,7 +67,7 @@ pub fn steps(
                     "--pgdata",
                     &data,
                     "--pgport",
-                    "5432",
+                    &port,
                     "--hostname",
                     referee,
                     "--auth",
@@ -94,8 +95,9 @@ pub fn steps(
     steps.extend(autoctl_service(system, &data));
     steps.push(super::node::script(
         "Give the database machines' role its password",
-        "for i in $(seq 120); do runuser -u postgres -- psql -d pg_auto_failover -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\nrunuser -u postgres -- psql -d pg_auto_failover -q -v ON_ERROR_STOP=1",
-        &[],
+        // The referee's own port: another PostgreSQL here may hold 5432.
+        "for i in $(seq 120); do runuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -tAXc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done\nrunuser -u postgres -- psql -p \"$PORT\" -d pg_auto_failover -q -v ON_ERROR_STOP=1",
+        &[("PORT", &port)],
         Some(format!(
             "{}ALTER USER autoctl_node PASSWORD '{}';\nSELECT pg_reload_conf();\n",
             super::steps::QUIET_SQL,
@@ -139,6 +141,7 @@ mod tests {
             password: "app-secret-1".into(),
             replication_password: "copy-secret-2".into(),
             referee: Some("ref.example.org".into()),
+            referee_port: None,
             monitor_password: "referee-secret-3".into(),
             second: None,
             shared: None,
@@ -233,6 +236,63 @@ mod tests {
         );
         // No database of the install's on the referee.
         assert!(!titles.iter().any(|t| t.contains("nightly dump")));
+    }
+
+    #[test]
+    fn a_referee_beside_another_postgresql_uses_its_own_port_throughout() {
+        use crate::setup::system::detect;
+        let ubuntu = detect("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "aarch64").unwrap();
+        let plan = Plan {
+            referee_port: Some(5433),
+            ..plan()
+        };
+        let ip: Vec<IpAddr> = vec!["192.0.2.21".parse().unwrap()];
+        let all = steps(
+            &plan,
+            &ubuntu,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ip,
+            &ip,
+        );
+        let step = |title: &str| {
+            all.iter()
+                .find(|s| s.title == title)
+                .unwrap_or_else(|| panic!("{title}"))
+        };
+        let Action::Run { args, .. } =
+            &step("Make the referee (pg_auto_failover's monitor)").action
+        else {
+            panic!()
+        };
+        assert!(args.join(" ").contains("--pgport 5433 "), "{args:?}");
+        step("Open port 5433 in the firewall, if firewalld runs");
+        // Every psql of the referee's names its port: a bare one would set
+        // the role's password in the other PostgreSQL, on 5432.
+        let Action::Run { args, env, .. } =
+            &step("Give the database machines' role its password").action
+        else {
+            panic!()
+        };
+        let script = &args[1];
+        assert_eq!(
+            script.matches("psql").count(),
+            script.matches("psql -p \"$PORT\"").count(),
+            "{script}"
+        );
+        assert!(env.contains(&("PORT".into(), "5433".into())), "{env:?}");
+        // The other PostgreSQL's packages keep their versions.
+        for title in [
+            "Install the PostgreSQL project's repository tool",
+            "Install PostgreSQL 17, pg_auto_failover and SSH",
+        ] {
+            let Action::Run { args, .. } = &step(title).action else {
+                panic!()
+            };
+            assert!(
+                args.contains(&"--no-upgrade".to_string()),
+                "{title}: {args:?}"
+            );
+        }
     }
 
     #[test]

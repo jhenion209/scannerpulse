@@ -226,7 +226,7 @@ pub(super) fn location_apart(
 
 /// A secret (a push address, a token): asked with hidden input on a
 /// terminal, else the first line of standard input.
-fn read_secret(question: &str) -> Result<String, String> {
+pub(super) fn read_secret(question: &str) -> Result<String, String> {
     use std::io::IsTerminal;
     let secret = if std::io::stdin().is_terminal() {
         inquire::Password::new(question)

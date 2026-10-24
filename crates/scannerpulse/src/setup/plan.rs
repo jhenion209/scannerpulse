@@ -28,6 +28,10 @@ pub struct Plan {
     /// monitor); none when it is promoted by hand.
     #[serde(default)]
     pub referee: Option<String>,
+    /// The referee's port, when it is not PostgreSQL's own 5432: another
+    /// PostgreSQL on the referee's machine may hold that one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referee_port: Option<u16>,
     /// The password the database machines reach the referee with.
     #[serde(default)]
     pub monitor_password: String,
@@ -135,12 +139,18 @@ impl Plan {
             .map_err(|error| format!("cannot write {}: {error}", layout.display()))
     }
 
+    /// The port the referee listens on.
+    pub fn referee_port(&self) -> u16 {
+        self.referee_port.unwrap_or(super::steps::PORT_PG)
+    }
+
     /// The plan's public part: no password.
     pub fn layout(&self) -> crate::layout::Layout {
         crate::layout::Layout {
             hub: self.hub.clone(),
             nodes: self.nodes.clone(),
             referee: self.referee.clone(),
+            referee_port: self.referee_port,
             second: self.second.clone(),
             shared: self.shared.clone(),
             install_id: self.install_id.clone(),
@@ -314,6 +324,7 @@ mod tests {
             password: "app-secret-1".into(),
             replication_password: "copy-secret-2".into(),
             referee: None,
+            referee_port: None,
             monitor_password: String::new(),
             second: None,
             shared: None,

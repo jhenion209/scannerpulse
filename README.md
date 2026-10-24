@@ -241,6 +241,11 @@ down together, writes (filing calls) pause until the referee returns (the
 standby waits for it too), while reading and playback go on. Put the
 referee on a different switch from the database machines where you can.
 
+The referee listens on port 5432 unless you give it another: a machine that
+already runs a PostgreSQL on 5432 (another site's referee, say) can be the
+referee on 5433. Setup then leaves that PostgreSQL as it is: it upgrades no
+package that is already there.
+
 To replace a referee (a Raspberry Pi whose card failed, say), give the new
 one the same name and join it as before; setup keeps the install's referee
 once the database machines have joined. Then register each database
@@ -256,7 +261,8 @@ systemctl restart pgautofailover
 ```
 
 (On the Red Hat family the programs are in `/usr/pgsql-17/bin` and the data
-in `/var/lib/pgsql/17/sp`.) Joining a database machine again checks that the
+in `/var/lib/pgsql/17/sp`; a referee on another port takes that port in
+place of 5432.) Joining a database machine again checks that the
 referee knows it, and says these steps if it does not.
 
 **A second ScannerPulse machine** serves the same site while this one is
@@ -311,7 +317,8 @@ An unattended join reads `JOIN` (the first machine's address) and, unless
 the login is root, `JOIN_LOGIN` and `JOIN_SUDO_PASSWORD` from its answers
 file; SSH must not ask for a password then. The first machine's answers
 file sets `DATABASE="nodes"`, `DB_NODES="db1.example.org db2.example.org"`,
-for a referee `FAILOVER="auto"` and `REFEREE="ref.example.org"`, for a
+for a referee `FAILOVER="auto"` and `REFEREE="ref.example.org"` (and
+`REFEREE_PORT="5433"` for a port other than 5432), for a
 second ScannerPulse machine `SECOND="web2.example.org"` and
 `SHARED="192.0.2.50/24"`, and, if its own address is not the one other
 machines reach, `HUB`.
@@ -323,7 +330,13 @@ uses setup's own certificate. With two ScannerPulse machines, monitor the
 shared address and each machine's own address:
 [docs/deploying.md](docs/deploying.md). `/health` says only that the process is up.
 For the backups, a push monitor for each kind (above), with an interval of a
-day and a few hours: a backup missed or failed turns it red.
+day and a few hours: a backup missed or failed turns it red. For the disk, a
+push monitor for each machine (each database machine and the referee too),
+with an interval of about 15 minutes:
+`sudo /usr/local/bin/scannerpulse disk push` there asks for its address (or
+reads it from standard input) and calls it every 5 minutes while `/` is less
+than 80% full, so the monitor turns red when the disk fills or the machine
+stops; `disk push off` stops it.
 
 **Updates.** Setup does not turn on automatic updates for the system.
 PostgreSQL and pgBackRest come from the PostgreSQL project's repository (and

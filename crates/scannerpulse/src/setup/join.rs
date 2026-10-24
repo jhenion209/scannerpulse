@@ -347,9 +347,15 @@ async fn join(hub: &Hub, dry_run: bool, yes: impl Fn(&str) -> bool) -> Result<()
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
-    // Another PostgreSQL here would take port 5432 from the one setup makes.
+    // Another PostgreSQL here would take the port of the one setup makes:
+    // 5432, or the referee's own.
     if place != Place::Second {
-        super::system::other_postgres_joining(&system.seen())?;
+        let port = if place == Place::Referee {
+            plan.referee_port()
+        } else {
+            super::steps::PORT_PG
+        };
+        super::system::other_postgres_joining(&system.seen(port))?;
     }
     let binary = Path::new(super::BINARY);
     let (steps, what) = match place {
@@ -546,6 +552,7 @@ mod tests {
             password: "app-secret-1".into(),
             replication_password: "copy-secret-2".into(),
             referee: Some("ref.example.org".into()),
+            referee_port: None,
             monitor_password: "referee-secret-3".into(),
             second: Some("web2.example.org".into()),
             shared: None,

@@ -147,6 +147,7 @@ pub fn moved_settings(text: &str, nodes: &[String]) -> Result<String, String> {
         nodes: [nodes[0].clone(), nodes[1].clone()],
         hub: String::new(),
         referee: None,
+        referee_port: None,
         second: None,
         shared: None,
     };
@@ -382,7 +383,10 @@ fn finishing(here: &node::Status, there: &node::Status) -> bool {
 /// it), and runs PostgreSQL from then on.
 pub fn adopt_steps(plan: &Plan, system: &System) -> Vec<Step> {
     let data = system.postgres_data();
-    let monitor = node::monitor_uri(plan.referee.as_deref().unwrap_or_default());
+    let monitor = node::monitor_uri(
+        plan.referee.as_deref().unwrap_or_default(),
+        plan.referee_port(),
+    );
     let mut steps = node::install(system, true);
     steps.push(node::pgpass_step(
         "Write the passwords for the copy and the referee, for the postgres account",
@@ -585,6 +589,7 @@ pub async fn begin(
     nodes: [String; 2],
     hub: String,
     referee: Option<String>,
+    referee_port: Option<u16>,
 ) -> Result<String, String> {
     not_cancelling(Path::new(CANCELLING).exists())?;
     let settings = read_settings()?;
@@ -665,6 +670,7 @@ pub async fn begin(
         password,
         replication_password: String::new(),
         referee: referee.clone(),
+        referee_port,
         monitor_password: String::new(),
         second: None,
         shared: None,
@@ -1114,10 +1120,10 @@ pub fn back_steps(text: &str, password: &str) -> Result<Vec<Step>, String> {
 /// taken out of it too, and PostgreSQL's own service runs it again with its
 /// own settings; otherwise its access rules, copying role and network
 /// opening are undone. Each runs again without harm.
-pub fn cancel_steps(system: &System, adopted: Option<&str>) -> Vec<Step> {
+pub fn cancel_steps(system: &System, adopted: Option<(&str, u16)>) -> Vec<Step> {
     let data = system.postgres_data();
     let mut steps = Vec::new();
-    if let Some(referee) = adopted {
+    if let Some((referee, port)) = adopted {
         steps.push(node::script(
             "Take this machine's database out of the referee's formation (its data stays)",
             "[ -f \"$UNIT\" ] || exit 0\ntimeout 60 runuser -u postgres -- env -u XDG_RUNTIME_DIR -u PGPASSFILE LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=\"$BIN:/usr/bin:/bin\" pg_autoctl drop node --pgdata \"$DATA\" || touch \"$UNTOLD\"",
@@ -1134,7 +1140,7 @@ pub fn cancel_steps(system: &System, adopted: Option<&str>) -> Vec<Step> {
         steps.push(node::script(
             "Take the machines that joined out of the referee's formation",
             "runuser -u postgres -- env -u PGPASSFILE PGCONNECT_TIMEOUT=5 psql \"$MONITOR\" -qtAXc \"SELECT pgautofailover.remove_node(nodeid, true) FROM pgautofailover.node WHERE formationid = 'default'\" >/dev/null || touch \"$UNTOLD\"",
-            &[("MONITOR", &node::monitor_uri(referee)), ("UNTOLD", UNTOLD)],
+            &[("MONITOR", &node::monitor_uri(referee, port)), ("UNTOLD", UNTOLD)],
             None,
         ));
         steps.push(node::script(
@@ -1315,14 +1321,18 @@ pub async fn cancel(confirm: impl Fn(&str) -> bool) -> Result<String, String> {
     let plan = read()?;
     look(&plan)?;
     std::fs::write(cancelling, "").map_err(|error| format!("{CANCELLING}: {error}"))?;
-    let adopted = plan.referee.as_deref().filter(|_| {
-        taken_over(
-            Path::new(node::AUTOCTL_UNIT),
-            Path::new(system.postgres_data()),
-            Path::new(DEBIAN_ETC),
-            Path::new(system.postgres_home()),
-        )
-    });
+    let adopted = plan
+        .referee
+        .as_deref()
+        .map(|r| (r, plan.referee_port()))
+        .filter(|_| {
+            taken_over(
+                Path::new(node::AUTOCTL_UNIT),
+                Path::new(system.postgres_data()),
+                Path::new(DEBIAN_ETC),
+                Path::new(system.postgres_home()),
+            )
+        });
     let _ = std::fs::remove_file(UNTOLD);
     let mut steps = back_steps(&settings, &password)?;
     steps.extend(cancel_steps(&system, adopted));
@@ -1551,8 +1561,8 @@ mod tests {
     #[test]
     fn with_a_referee_the_cancel_gives_the_database_back_to_its_own_service() {
         let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
-        held_off(&cancel_steps(&debian, Some("ref.example.org")));
-        let all = scripts(&cancel_steps(&debian, Some("ref.example.org")));
+        held_off(&cancel_steps(&debian, Some(("ref.example.org", 5432))));
+        let all = scripts(&cancel_steps(&debian, Some(("ref.example.org", 5432))));
         let titles: Vec<&str> = all.iter().map(|s| s.0.as_str()).collect();
         assert_eq!(
             titles,
@@ -1629,7 +1639,7 @@ mod tests {
         );
         // Red Hat: pg_autoctl left the settings in place.
         let rocky = detect("ID=\"rocky\"\nVERSION_ID=\"9.8\"\n", "x86_64").unwrap();
-        let all = scripts(&cancel_steps(&rocky, Some("ref.example.org")));
+        let all = scripts(&cancel_steps(&rocky, Some(("ref.example.org", 5432))));
         assert!(!all[3].1.contains("start.conf"), "{:?}", all[3]);
         assert!(all[3].1.contains("/^synchronous_standby_names/d"));
         assert!(all[4].1.contains("SERVICE=postgresql-17"), "{:?}", all[4]);

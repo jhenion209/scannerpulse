@@ -695,6 +695,7 @@ async fn an_admin_follows_the_conversions_guide_and_approves_its_steps(pool: PgP
         nodes: ["db1.example.org".into(), "db2.example.org".into()],
         hub: "192.0.2.10".into(),
         referee: None,
+        referee_port: None,
         second: None,
         shared: None,
         archive: None,

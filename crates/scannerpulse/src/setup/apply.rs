@@ -78,6 +78,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 hub,
                 password,
                 referee,
+                referee_port,
                 second,
                 shared,
                 archive,
@@ -91,6 +92,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 password: password.clone(),
                 replication_password: String::new(),
                 referee: referee.clone(),
+                referee_port: *referee_port,
                 monitor_password: String::new(),
                 second: second.clone(),
                 shared: shared.clone(),
@@ -330,7 +332,12 @@ pub(super) fn next_plan(
         .map(|old| old.install_id.clone())
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| crate::sessions::random_hex(8));
-    let same = kept.filter(|old| old.nodes == fresh.nodes && old.referee == fresh.referee);
+    // A referee on another port is another referee.
+    let same = kept.filter(|old| {
+        old.nodes == fresh.nodes
+            && old.referee == fresh.referee
+            && old.referee_port == fresh.referee_port
+    });
     // A second changed: the database machines join again, to let it in.
     // A second or a shared address changed: the second joins again, to
     // take it; so does an earlier second named again.
@@ -497,6 +504,7 @@ mod tests {
                 password: "app".into(),
                 replication_password: String::new(),
                 referee: referee.map(String::from),
+                referee_port: None,
                 monitor_password: String::new(),
                 second: second.map(String::from),
                 shared: None,
@@ -546,6 +554,23 @@ mod tests {
             Some("web2.example.org"),
         );
         assert!(again.retired);
+    }
+
+    #[test]
+    fn a_referee_on_another_port_is_another_referee() {
+        let mut kept = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
+        for machine in ["ref.example.org", "db1.example.org", "192.0.2.22"] {
+            kept.mark_joined(machine);
+        }
+        let mut fresh = make(None, &nodes(), "192.0.2.10", Some("ref.example.org"), None);
+        fresh.referee_port = Some(5433);
+        let again = super::next_plan(Some(kept.clone()), fresh);
+        // Made again on its port: every machine joins again, with a new
+        // password for the referee.
+        assert!(again.joined.is_empty(), "{:?}", again.joined);
+        assert_ne!(again.monitor_password, kept.monitor_password);
+        assert_eq!(again.referee_port(), 5433);
+        assert_eq!(again.install_id, kept.install_id);
     }
 
     #[test]

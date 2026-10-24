@@ -398,13 +398,30 @@ fn pair_from(
         Some("auto") => Some(need("REFEREE")?.to_ascii_lowercase()),
         Some(other) => return Err(format!("FAILOVER is {other:?}: hand or auto")),
     };
+    let referee_port = match get("REFEREE_PORT") {
+        None => None,
+        Some(_) if referee.is_none() => {
+            return Err("REFEREE_PORT goes with a referee (FAILOVER=auto)".into());
+        }
+        Some(port) => Some(port_number(&port).map_err(|why| format!("REFEREE_PORT {why}"))?)
+            .filter(|port| *port != super::steps::PORT_PG),
+    };
     Ok(Pair {
         nodes,
         hub: get("HUB").unwrap_or_else(|| default_hub(defaults)),
         referee,
+        referee_port,
         second: get("SECOND").map(|s| s.to_ascii_lowercase()),
         shared: get("SHARED"),
     })
+}
+
+/// A port: a number from 1 to 65535.
+fn port_number(text: &str) -> Result<u16, String> {
+    match text.trim().parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err(format!("{text:?} is not a port: a number from 1 to 65535")),
+    }
 }
 
 /// A conversion's answers file (CONVERT=yes, for an install on one
@@ -433,6 +450,7 @@ pub fn convert_from_file(
         nodes: pair.nodes,
         hub: pair.hub,
         referee: pair.referee,
+        referee_port: pair.referee_port,
         second: pair.second,
         shared: pair.shared,
         archive: get("ARCHIVE_SHARE"),
@@ -518,12 +536,12 @@ fn from_file_with(
         Some(other) => return Err(format!("DATABASE is {other:?}: here, theirs or nodes")),
     };
     if !matches!(database, Database::Nodes(_))
-        && ["FAILOVER", "REFEREE", "SECOND", "SHARED"]
+        && ["FAILOVER", "REFEREE", "REFEREE_PORT", "SECOND", "SHARED"]
             .iter()
             .any(|name| get(name).is_some())
     {
         return Err(
-            "FAILOVER, REFEREE, SECOND and SHARED go with two database machines (DATABASE=nodes)"
+            "FAILOVER, REFEREE, REFEREE_PORT, SECOND and SHARED go with two database machines (DATABASE=nodes)"
                 .into(),
         );
     }
@@ -898,6 +916,7 @@ pub fn ask_convert(
             nodes: plan.nodes.clone(),
             hub: plan.hub.clone(),
             referee: plan.referee.clone(),
+            referee_port: plan.referee_port,
             second: plan.second.clone(),
             shared: plan.shared.clone(),
         });
@@ -920,6 +939,7 @@ pub fn ask_convert(
             nodes: pair.nodes,
             hub: pair.hub,
             referee: pair.referee,
+            referee_port: pair.referee_port,
             second: pair.second,
             shared: pair.shared,
             archive: new,
@@ -997,6 +1017,23 @@ pub fn ask_pair(had: Option<&Pair>, defaults: &Defaults) -> Result<Pair, inquire
     } else {
         None
     };
+    let referee_port = match &referee {
+        None => None,
+        Some(_) => {
+            let port = text(
+                "The referee's port (5432, unless another PostgreSQL there already holds it):",
+                Some(
+                    &had.and_then(|p| p.referee_port)
+                        .unwrap_or(super::steps::PORT_PG)
+                        .to_string(),
+                ),
+                |p| port_number(p).map(|_| ()),
+            )?;
+            port_number(&port)
+                .ok()
+                .filter(|port| *port != super::steps::PORT_PG)
+        }
+    };
     let hub = text(
         "This machine's address, as the database machines reach it:",
         Some(&had.map_or_else(|| default_hub(defaults), |p| p.hub.clone())),
@@ -1047,6 +1084,7 @@ pub fn ask_pair(had: Option<&Pair>, defaults: &Defaults) -> Result<Pair, inquire
         nodes: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
         hub,
         referee,
+        referee_port,
         second: web2,
         shared,
     })
@@ -1808,6 +1846,7 @@ mod tests {
                 nodes: ["db1.example.org".into(), "db2.example.org".into()],
                 hub: "192.0.2.10".into(),
                 referee: Some("ref.example.org".into()),
+                referee_port: None,
                 second: Some("web2.example.org".into()),
                 shared: Some("192.0.2.50/24".into()),
                 archive: Some("/srv/share/archive".into()),
@@ -1890,6 +1929,7 @@ mod tests {
                 nodes: ["db1.example.org".into(), "2001:db8::22".into()],
                 hub: "192.0.2.10".into(),
                 referee: None,
+                referee_port: None,
                 second: None,
                 shared: None,
             })
@@ -1901,6 +1941,41 @@ mod tests {
             panic!()
         };
         assert_eq!(pair.referee.as_deref(), Some("ref.example.org"));
+        assert_eq!(pair.referee_port, None);
+        // On its own port, beside another PostgreSQL that holds 5432 there;
+        // 5432 named is no port of its own.
+        let port = |port: &str| {
+            from_file(
+                &answers_file(
+                    dir.path(),
+                    &format!("{refereed}REFEREE_PORT={port}\n"),
+                    0o600,
+                ),
+                &defaults(),
+            )
+            .map(|answers| match answers.database {
+                Database::Nodes(pair) => pair.referee_port,
+                _ => panic!(),
+            })
+        };
+        assert_eq!(port("5433"), Ok(Some(5433)));
+        assert_eq!(port("5432"), Ok(None));
+        for wrong in ["0", "65536", "five", ""] {
+            assert!(
+                port(wrong).unwrap_err().contains("REFEREE_PORT"),
+                "{wrong:?}"
+            );
+        }
+        // No referee, no port of its own.
+        let error = from_file(
+            &answers_file(dir.path(), &format!("{nodes}REFEREE_PORT=5433\n"), 0o600),
+            &defaults(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("REFEREE_PORT goes with a referee"),
+            "{error}"
+        );
         // A second ScannerPulse machine, and the address the two share.
         let pair2 = format!("{nodes}SECOND=Web2.example.org\nSHARED=192.0.2.50/24\n");
         let answers = from_file(&answers_file(dir.path(), &pair2, 0o600), &defaults()).unwrap();

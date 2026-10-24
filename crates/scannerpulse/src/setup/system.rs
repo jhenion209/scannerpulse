@@ -141,7 +141,8 @@ impl System {
     }
 
     /// What this machine has of PostgreSQL before setup changes anything.
-    pub fn seen(&self) -> Seen {
+    /// `port` is the port the PostgreSQL setup makes here would take.
+    pub fn seen(&self, port: u16) -> Seen {
         use std::net::{SocketAddr, TcpStream};
         use std::path::Path;
         use std::time::Duration;
@@ -168,11 +169,14 @@ impl System {
                 .into_iter()
                 .filter(|v| Path::new(&format!("/var/lib/pgsql/{v}/data/PG_VERSION")).exists())
                 .collect(),
-            port_taken: ["127.0.0.1:5432", "[::1]:5432"].iter().any(|a| {
-                a.parse::<SocketAddr>().is_ok_and(|addr| {
-                    TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
-                })
-            }),
+            port,
+            port_taken: [format!("127.0.0.1:{port}"), format!("[::1]:{port}")]
+                .iter()
+                .any(|a| {
+                    a.parse::<SocketAddr>().is_ok_and(|addr| {
+                        TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+                    })
+                }),
             ours: self
                 .our_data()
                 .iter()
@@ -191,7 +195,10 @@ pub struct Seen {
     pub system_data: Option<String>,
     /// Each version `v` with `/var/lib/pgsql/<v>/data/PG_VERSION`.
     pub pgsql_versions: Vec<String>,
-    /// Something listens on port 5432 of this machine.
+    /// The port the PostgreSQL setup makes here would take (5432, or the
+    /// referee's own).
+    pub port: u16,
+    /// Something listens on that port of this machine.
     pub port_taken: bool,
     /// PostgreSQL 17's data directory has its PG_VERSION: an earlier setup's.
     pub ours: bool,
@@ -207,7 +214,7 @@ fn other_found(seen: &Seen) -> Option<String> {
     } else if let Some(v) = seen.pgsql_versions.iter().find(other) {
         Some(format!("PostgreSQL {v} (/var/lib/pgsql/{v}/data)"))
     } else if seen.port_taken && !seen.ours {
-        Some("a program on port 5432".into())
+        Some(format!("a program on port {}", seen.port))
     } else {
         None
     }
@@ -219,7 +226,8 @@ pub fn other_postgres_joining(seen: &Seen) -> Result<(), String> {
     match other_found(seen) {
         None => Ok(()),
         Some(found) => Err(format!(
-            "this machine already has {found}, which would clash with the PostgreSQL 17 it needs on port 5432: remove it, or join another machine"
+            "this machine already has {found}, which would clash with the PostgreSQL 17 it needs on port {}: remove it, or join another machine",
+            seen.port
         )),
     }
 }
@@ -312,6 +320,7 @@ mod tests {
         let refused = |seen: Seen| other_postgres(&seen).unwrap_err();
         let debian = refused(Seen {
             etc_versions: vec!["15".into()],
+            port: 5432,
             port_taken: true,
             ..Seen::default()
         });
@@ -343,6 +352,7 @@ mod tests {
         );
         assert!(
             refused(Seen {
+                port: 5432,
                 port_taken: true,
                 ..Seen::default()
             })
@@ -352,15 +362,26 @@ mod tests {
         assert_eq!(other_postgres(&Seen::default()), Ok(()));
         // A joining machine is told in its own words.
         let error = other_postgres_joining(&Seen {
+            port: 5432,
             port_taken: true,
             ..Seen::default()
         })
         .unwrap_err();
         assert!(error.contains("a program on port 5432"), "{error}");
         assert!(!error.contains("Simple setup"), "{error}");
+        // A referee on its own port minds only that one.
+        let error = other_postgres_joining(&Seen {
+            port: 5433,
+            port_taken: true,
+            ..Seen::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("a program on port 5433"), "{error}");
+        assert!(error.contains("it needs on port 5433"), "{error}");
         let only_17 = Seen {
             etc_versions: vec!["17".into()],
             ours: true,
+            port: 5432,
             port_taken: true,
             ..Seen::default()
         };
@@ -368,6 +389,7 @@ mod tests {
         let rerun = Seen {
             pgsql_versions: vec!["17".into()],
             ours: true,
+            port: 5432,
             port_taken: true,
             ..Seen::default()
         };
