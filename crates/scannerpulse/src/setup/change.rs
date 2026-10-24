@@ -274,6 +274,38 @@ pub async fn run_change(change: Change) -> Result<(), String> {
     if !rustix::process::geteuid().is_root() {
         return Err("this changes the machine's own files: run it as root (sudo /usr/local/bin/scannerpulse ...)".into());
     }
+    // A database machine has no settings file: its push addresses are a
+    // file of its own, which its backups' service reads.
+    if let Change::Push { kind, off } = &change
+        && !env_path().exists()
+        && Path::new(super::node::NODE).exists()
+    {
+        let text = std::fs::read_to_string(super::node::BACKUP_PUSH).unwrap_or_default();
+        let url = if *off {
+            None
+        } else {
+            Some(read_secret(&format!(
+                "The push address after each {kind} backup:"
+            ))?)
+        };
+        let steps = super::node::push_steps(&text, kind, url.as_deref())?;
+        let context = super::apply::Context {
+            database_url: String::new(),
+            db_password: String::new(),
+            nodes: Vec::new(),
+        };
+        super::apply::apply(&steps, &context, true).await?;
+        println!(
+            "{}",
+            match url {
+                Some(_) => format!(
+                    "Each {kind} backup that succeeds on this machine is pushed to the address given."
+                ),
+                None => format!("No push follows a {kind} backup on this machine."),
+            }
+        );
+        return Ok(());
+    }
     let text = std::fs::read_to_string(env_path()).map_err(|error| {
         format!(
             "{}: {error} (is this machine set up?)",

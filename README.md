@@ -142,7 +142,7 @@ LETSENCRYPT_NAMES="radio.example.org"
 CLOUDFLARE_TOKEN="its token" # with dns-cloudflare
 PROXIES="192.0.2.5 192.0.2.6"
 SYSLOG="udp://192.0.2.30:514"
-BACKUPS="/srv/backups"     # with the database here only
+BACKUPS="/srv/backups"     # here, or the database machines' share
 PUSH_PGBACKREST="https://uptime.example.org/api/push/abc123?status=up" # here only
 PUSH_DUMP="https://uptime.example.org/api/push/def456?status=up"
 ```
@@ -182,7 +182,8 @@ so the page shows the command, run on the machine:
   outcome and the last request. `tls install` and `tls self` turn Let's Encrypt
   off, another authority named for it included;
 - `sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump` asks for a
-  push address and sets it, with the database on this machine (with no terminal it reads the first line of
+  push address and sets it, on the machine whose database it backs up: this
+  one, or each database machine (with no terminal it reads the first line of
   standard input; the address holds a token, so it is never an argument,
   which sudo would log); `... backups push dump off` removes it;
 - `sudo /usr/local/bin/scannerpulse backups location FOLDER` keeps the
@@ -207,10 +208,23 @@ Then this machine makes the tables and starts. Its services are given both
 machines (`SCANNERPULSE_DATABASE_HOSTS`) and work on the one that is the
 primary, moving to the other within seconds after a change of roles; a
 former primary that comes back still a primary is ignored, as the promoted
-machine is on a newer timeline. The primary keeps a nightly dump in
+machine is on a newer timeline.
+
+**Their backups.** With `BACKUPS` (Advanced asks it too), the database
+machines keep their backups in a share that each mounts at that path before
+it joins (a disk off both machines; the join refuses a folder the postgres
+account cannot write). Both send PostgreSQL's WAL to pgBackRest there, so
+the one that is the primary always does, and every night the primary takes
+a pgBackRest backup (full on Sundays, differential otherwise; two full ones
+kept, with the WAL between them, for recovery to any moment) and a dump
+(the newest 14), each shown on the admin page's Status. Each database
+machine is given its push addresses itself, with `backups push` above; the
+push answers are refused with database machines. A folder given or changed
+later sends the database machines back to join, which sets them up for it.
+Without `BACKUPS`, the primary keeps only a nightly dump, in
 `/var/backups/scannerpulse` (the newest 14). Uninstall on a database
 machine or the referee takes off setup's own parts there and leaves
-PostgreSQL and its data.
+PostgreSQL and its data, and the backups.
 
 - If the primary dies, run `sudo /usr/local/bin/scannerpulse db promote` on the standby. It
   is refused while the other machine still answers as the primary, so two

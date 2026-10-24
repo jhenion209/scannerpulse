@@ -83,6 +83,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 shared,
                 archive,
                 recordings,
+                backups,
             } => write_plan(super::plan::Plan {
                 hub: hub.clone(),
                 hub_key: String::new(),
@@ -99,6 +100,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
                 install_id: String::new(),
                 archive: archive.display().to_string(),
                 recordings: recordings.display().to_string(),
+                backups: backups.as_ref().map(|b| b.display().to_string()),
                 ready: false,
                 joined: Vec::new(),
                 moving: false,
@@ -359,18 +361,26 @@ pub(super) fn next_plan(
             && old.referee == fresh.referee
             && old.referee_port == fresh.referee_port
     });
-    // A second changed: the database machines join again, to let it in.
-    // A second or a shared address changed: the second joins again, to
-    // take it; so does an earlier second named again.
     let joined = match &same {
-        Some(old) if old.second == fresh.second && old.shared == fresh.shared => old.joined.clone(),
-        Some(old) => old
-            .joined
-            .iter()
-            .filter(|m| old.second == fresh.second || !fresh.nodes.contains(m))
-            .filter(|m| fresh.nodes.contains(m) || fresh.referee.as_ref() == Some(m))
-            .cloned()
-            .collect(),
+        Some(old) => {
+            // A second or the backups folder changed: the database machines
+            // join again, to let it in or to take the folder.
+            let nodes_stay = old.second == fresh.second && old.backups == fresh.backups;
+            // A second or a shared address changed: the second joins again,
+            // to take it; so does an earlier second named again.
+            let second_stays = old.second == fresh.second && old.shared == fresh.shared;
+            old.joined
+                .iter()
+                .filter(|m| {
+                    if fresh.nodes.contains(m) {
+                        nodes_stay
+                    } else {
+                        fresh.referee.as_ref() == Some(m) || second_stays
+                    }
+                })
+                .cloned()
+                .collect()
+        }
         None => Vec::new(),
     };
     super::plan::Plan {
@@ -532,6 +542,7 @@ mod tests {
                 install_id: String::new(),
                 archive: "/srv/archive".into(),
                 recordings: "/srv/recordings".into(),
+                backups: None,
                 ready: true,
                 joined: Vec::new(),
                 moving: false,
@@ -575,6 +586,51 @@ mod tests {
             Some("web2.example.org"),
         );
         assert!(again.retired);
+    }
+
+    #[test]
+    fn a_new_backups_folder_sends_only_the_database_machines_to_join_again() {
+        let mut kept = make(
+            None,
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            Some("web2.example.org"),
+        );
+        for machine in [
+            "ref.example.org",
+            "db1.example.org",
+            "192.0.2.22",
+            "web2.example.org",
+        ] {
+            kept.mark_joined(machine);
+        }
+        let mut fresh = make(
+            None,
+            &nodes(),
+            "192.0.2.10",
+            Some("ref.example.org"),
+            Some("web2.example.org"),
+        );
+        fresh.backups = Some("/srv/backups".into());
+        let again = super::next_plan(Some(kept.clone()), fresh.clone());
+        // They take the folder at their join; the referee and the second
+        // have nothing to do with it.
+        assert_eq!(again.joined, ["ref.example.org", "web2.example.org"]);
+        assert_eq!(again.backups.as_deref(), Some("/srv/backups"));
+        assert_eq!(again.replication_password, kept.replication_password);
+        // The same folder again: nothing to do.
+        let mut joined = again.clone();
+        for machine in ["db1.example.org", "192.0.2.22"] {
+            joined.mark_joined(machine);
+        }
+        let same = super::next_plan(Some(joined.clone()), fresh);
+        assert_eq!(same.joined, joined.joined);
+        // A plan written before the folder existed reads as none.
+        let text = serde_json::to_string(&kept).unwrap();
+        assert!(!text.contains("backups"), "{text}");
+        let back: crate::setup::plan::Plan = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.backups, None);
     }
 
     #[test]

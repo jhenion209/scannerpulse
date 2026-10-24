@@ -111,25 +111,27 @@ pub async fn push(url: &str) -> Result<(), String> {
 /// folders) from the database at `database_url`: each kind, as `KINDS`
 /// names it, with what it did or why it failed. Both run even when the
 /// other fails.
-pub fn nightly(backups: &Path, database_url: &str) -> Vec<(&'static str, Result<String, String>)> {
+/// `as_root`: run as root, which runs pgBackRest as the postgres account;
+/// else this is the postgres account already (a database machine's).
+pub fn nightly(
+    backups: &Path,
+    database_url: &str,
+    as_root: bool,
+) -> Vec<(&'static str, Result<String, String>)> {
     let now = chrono::Local::now();
     let kind = kind(now.weekday());
     let config = format!("--config={PGBACKREST_CONF}");
     let stanza = format!("--stanza={STANZA}");
     let kind_arg = format!("--type={kind}");
-    let pgbackrest = run(
-        "runuser",
-        &[
-            "-u",
-            "postgres",
-            "--",
-            "pgbackrest",
-            &config,
-            &stanza,
-            "backup",
-            &kind_arg,
-        ],
-    )
+    let args = [config.as_str(), &stanza, "backup", &kind_arg];
+    let pgbackrest = if as_root {
+        run(
+            "runuser",
+            &[&["-u", "postgres", "--", "pgbackrest"][..], &args].concat(),
+        )
+    } else {
+        run("pgbackrest", &args)
+    }
     .map(|()| format!("pgBackRest: {kind} backup taken"))
     .map_err(|why| format!("pgBackRest ({kind}): {why}"));
     let dump = dump(

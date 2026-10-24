@@ -51,6 +51,11 @@ pub struct Plan {
     pub archive: String,
     #[serde(default)]
     pub recordings: String,
+    /// The database machines' backups folder (a share mounted at the same
+    /// path on both: pgBackRest's repository and the nightly dumps); none:
+    /// each keeps its dumps on its own disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backups: Option<String>,
     /// The first machine has finished its setup: the second may join.
     #[serde(default)]
     pub ready: bool,
@@ -331,6 +336,7 @@ mod tests {
             install_id: String::new(),
             archive: String::new(),
             recordings: String::new(),
+            backups: None,
             ready: false,
             joined: Vec::new(),
             moving: false,

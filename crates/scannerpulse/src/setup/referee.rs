@@ -151,6 +151,7 @@ mod tests {
             install_id: String::new(),
             archive: String::new(),
             recordings: String::new(),
+            backups: None,
             ready: false,
             joined: Vec::new(),
             moving: false,

@@ -344,7 +344,8 @@ From Uptime Kuma or a similar service:
   (5432, or the port it was given);
 - a push monitor for each kind of backup, with an interval of a day and a few
   hours. `sudo /usr/local/bin/scannerpulse backups push pgbackrest` (and `dump`)
-  on the machine that keeps the backups asks for the push address;
+  on the machine whose database it backs up asks for the push address: with
+  database machines, on each of them, since either may be the primary;
 - a push monitor for each machine's disk, with an interval of about 15
   minutes: `sudo /usr/local/bin/scannerpulse disk push` on that machine asks
   for its address, and calls it every 5 minutes while `/` is less than 80%

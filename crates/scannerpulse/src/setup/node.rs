@@ -13,6 +13,9 @@ use super::system::{Family, System};
 
 /// This machine's place among the database machines; root's alone.
 pub const NODE: &str = "/etc/scannerpulse/node.json";
+/// The push addresses of this machine's nightly backups, root's alone
+/// (they carry tokens); systemd reads them for the backups' service.
+pub const BACKUP_PUSH: &str = "/etc/scannerpulse/backup-push";
 
 /// The nightly dump's folder on a database machine.
 pub const DUMPS: &str = "/var/backups/scannerpulse";
@@ -714,14 +717,20 @@ fn tail(plan: &Plan, index: usize, system: &System, binary: &Path) -> Vec<Step> 
             owner: "root:root".into(),
         },
     });
-    steps.push(run(
-        "Make the folder of the nightly dumps",
-        "install",
-        &[
-            "-d", "-m", "0700", "-o", "postgres", "-g", "postgres", DUMPS,
-        ],
-    ));
-    let (service_unit, timer) = dump_units(binary, system, plan.referee.is_some());
+    // The nightly backups: pgBackRest's and the dumps in the database
+    // machines' backups folder, or the dumps alone on this machine's disk.
+    let backups = plan.backups.as_deref().map(Path::new);
+    match backups {
+        Some(folder) => steps.extend(backup_steps(folder, plan.referee.is_some(), system)),
+        None => steps.push(run(
+            "Make the folder of the nightly dumps",
+            "install",
+            &[
+                "-d", "-m", "0700", "-o", "postgres", "-g", "postgres", DUMPS,
+            ],
+        )),
+    }
+    let (service_unit, timer) = dump_units(binary, system, plan.referee.is_some(), backups);
     for (name, contents) in [
         ("scannerpulse-node-backup.service", service_unit),
         ("scannerpulse-node-backup.timer", timer),
@@ -791,19 +800,194 @@ runuser -u postgres -- "$BIN/pg_basebackup" -d "host=$PRIMARY port=5432 user=rep
 systemctl start "$SERVICE"
 "#;
 
-/// The nightly dump on a database machine: it runs on both, and dumps on
-/// the one that is the primary.
-pub fn dump_units(binary: &Path, system: &System, autoctl: bool) -> (String, String) {
+/// The database machines' backups in `folder`, a share mounted at the same
+/// path on both: pgBackRest with PostgreSQL's WAL, its first full backup on
+/// the primary. `autoctl`: pg_autoctl runs this PostgreSQL.
+fn backup_steps(folder: &Path, autoctl: bool, system: &System) -> Vec<Step> {
+    let mut steps = Vec::new();
+    match system.family {
+        Family::Apt => steps.push(run(
+            "Install pgBackRest",
+            "apt-get",
+            &[
+                "-o",
+                "DPkg::Lock::Timeout=300",
+                "install",
+                "-y",
+                "--no-upgrade",
+                "pgbackrest",
+            ],
+        )),
+        Family::Dnf => {
+            if system.id != "fedora" {
+                // pgBackRest needs libssh2, which only EPEL carries here.
+                steps.push(run(
+                    "Add EPEL, for pgBackRest's libssh2",
+                    "dnf",
+                    &["install", "-y", "epel-release"],
+                ));
+            }
+            steps.push(run(
+                "Install pgBackRest",
+                "dnf",
+                &["install", "-y", "pgbackrest"],
+            ));
+        }
+    }
+    let repo = folder.join("pgbackrest").display().to_string();
+    let dumps = folder.join("dump").display().to_string();
+    for (title, path, mode) in [
+        ("Make the folder of pgBackRest's backups", &repo, "0750"),
+        ("Make the folder of the nightly dumps", &dumps, "0700"),
+    ] {
+        steps.push(run(
+            title,
+            "install",
+            &["-d", "-m", mode, "-o", "postgres", "-g", "postgres", path],
+        ));
+    }
+    // PostgreSQL archives its WAL there, and the dumps are its own: the
+    // share must let the postgres account write in both.
+    for path in [&repo, &dumps] {
+        steps.push(run(
+            "Check that the postgres account reaches the backups folder",
+            "runuser",
+            &[
+                "-u",
+                "postgres",
+                "--",
+                "sh",
+                "-c",
+                &super::steps::reach("postgres"),
+                "reach",
+                path,
+            ],
+        ));
+    }
+    steps.push(run(
+        "Make pgBackRest's settings folder",
+        "install",
+        &["-d", "-m", "0755", "/etc/pgbackrest"],
+    ));
+    let data = if autoctl {
+        autoctl_data(system)
+    } else {
+        system.postgres_data().to_string()
+    };
+    steps.push(Step {
+        title: "Write pgBackRest's settings".into(),
+        action: Action::Write {
+            path: PathBuf::from(crate::backup::PGBACKREST_CONF),
+            contents: super::steps::pgbackrest_conf(folder, &data),
+            mode: 0o640,
+            owner: "root:postgres".into(),
+        },
+    });
+    let config = format!("--config={}", crate::backup::PGBACKREST_CONF);
+    let stanza = format!("--stanza={}", crate::backup::STANZA);
+    // Both send their WAL: only the primary has any to send, and after a
+    // promotion the other goes on into the same repository.
+    steps.push(script(
+        "Send PostgreSQL's WAL to pgBackRest",
+        "runuser -u postgres -- psql -q -v ON_ERROR_STOP=1",
+        &[],
+        Some(format!(
+            "ALTER SYSTEM SET archive_mode = 'on';\n\
+             ALTER SYSTEM SET archive_command = 'pgbackrest {config} {stanza} archive-push %p';\n"
+        )),
+    ));
+    steps.push(run(
+        "Restart PostgreSQL 17, to start sending its WAL",
+        "systemctl",
+        &[
+            "restart",
+            if autoctl {
+                "pgautofailover"
+            } else {
+                system.postgres_service()
+            },
+        ],
+    ));
+    steps.push(script(
+        "On the primary: make pgBackRest's place for this database and take the first full backup",
+        FIRST_BACKUP,
+        &[("CONFIG", &config), ("STANZA", &stanza)],
+        None,
+    ));
+    steps
+}
+
+/// The first full backup, on the primary once it answers again; a standby
+/// leaves the backups to its primary.
+const FIRST_BACKUP: &str = r#"for i in $(seq 120); do
+  recovery=$(runuser -u postgres -- psql -tAXc 'SELECT pg_is_in_recovery()' 2>/dev/null) && break
+  sleep 1
+done
+case $recovery in
+  t) echo "a standby: its primary takes the backups" ;;
+  f) runuser -u postgres -- pgbackrest "$CONFIG" "$STANZA" stanza-create && runuser -u postgres -- pgbackrest "$CONFIG" "$STANZA" backup --type=full ;;
+  *) echo "PostgreSQL does not answer" >&2; exit 1 ;;
+esac"#;
+
+/// `scannerpulse backups push KIND [off]` on a database machine: the
+/// address kept in its own file (`text` is that file now), or removed.
+pub fn push_steps(text: &str, kind: &str, url: Option<&str>) -> Result<Vec<Step>, String> {
+    let var = crate::backup::push_var(kind)
+        .ok_or_else(|| format!("{kind:?} is not a kind of backup: pgbackrest or dump"))?;
+    if let Some(url) = url {
+        super::ask::check_push(url)?;
+    }
+    Ok(vec![Step {
+        title: "Keep the push address".into(),
+        action: Action::Write {
+            path: PathBuf::from(BACKUP_PUSH),
+            contents: crate::hostfile::changed(text, var, url)?,
+            mode: 0o600,
+            owner: "root:root".into(),
+        },
+    }])
+}
+
+/// The nightly backups on a database machine: they run on both, and back
+/// up on the one that is the primary, into `backups` (the database
+/// machines' folder; none: the dumps alone, on this machine's disk). The
+/// push addresses are root's file, which systemd reads for the service.
+pub fn dump_units(
+    binary: &Path,
+    system: &System,
+    autoctl: bool,
+    backups: Option<&Path>,
+) -> (String, String) {
+    let (what, folder) = match backups {
+        Some(folder) => (
+            "backups",
+            format!("RequiresMountsFor={}\n", super::steps::quoted(folder)),
+        ),
+        None => ("dump", String::new()),
+    };
+    let environment = match backups {
+        Some(folder) => format!(
+            "Environment={}\n",
+            super::steps::quoted(Path::new(&format!(
+                "SCANNERPULSE_BACKUPS={}",
+                folder.display()
+            )))
+        ),
+        None => String::new(),
+    };
     (
         format!(
             "# Written by `scannerpulse setup`.\n\
              [Unit]\n\
-             Description=ScannerPulse nightly dump, on the primary\n\
+             Description=ScannerPulse nightly {what}, on the primary\n\
              After={pg}.service\n\
+             {folder}\
              \n\
              [Service]\n\
              Type=oneshot\n\
              User=postgres\n\
+             {environment}\
+             EnvironmentFile=-{BACKUP_PUSH}\n\
              ExecStart={binary} node backup\n",
             pg = if autoctl {
                 "pgautofailover"
@@ -1219,22 +1403,36 @@ fn refused_with_referee(referee: bool, asked: &Asked) -> bool {
         )
 }
 
-/// `scannerpulse node backup`, as the postgres account from its timer: a
-/// dump of the database on the primary; a standby has nothing to do.
-pub fn backup() -> Result<String, String> {
-    if psql("SELECT pg_is_in_recovery()")? == "t" {
-        return Ok("a standby: the primary takes the dump".into());
-    }
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    crate::backup::dump(
-        Path::new(DUMPS),
-        &format!(
-            "postgresql:///{}?host=/var/run/postgresql",
-            super::steps::DATABASE
-        ),
-        &stamp,
+/// The database as the nightly backups reach it here: through the socket,
+/// as the postgres account.
+pub fn local_url() -> String {
+    format!(
+        "postgresql:///{}?host=/var/run/postgresql",
+        super::steps::DATABASE
     )
-    .map(|name| format!("dump: {name} written"))
+}
+
+/// `scannerpulse node backup`, as the postgres account from its timer, on
+/// the primary (a standby has nothing to do): with the database machines'
+/// backups folder (`SCANNERPULSE_BACKUPS`, from the unit), a pgBackRest
+/// backup and a dump there; without, the dump on this machine's disk. Each
+/// kind's outcome, for its time and its push.
+pub fn backup() -> Result<Vec<(&'static str, Result<String, String>)>, String> {
+    if psql("SELECT pg_is_in_recovery()")? == "t" {
+        return Ok(Vec::new());
+    }
+    Ok(match std::env::var("SCANNERPULSE_BACKUPS") {
+        Ok(folder) => crate::backup::nightly(Path::new(&folder), &local_url(), false),
+        Err(_) => {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+            vec![(
+                "dump",
+                crate::backup::dump(Path::new(DUMPS), &local_url(), &stamp)
+                    .map(|name| format!("dump: {name} written"))
+                    .map_err(|why| format!("dump: {why}")),
+            )]
+        }
+    })
 }
 
 /// `scannerpulse db promote`, as root on the standby, when the primary is
@@ -1575,6 +1773,7 @@ mod tests {
             install_id: String::new(),
             archive: String::new(),
             recordings: String::new(),
+            backups: None,
             ready: false,
             joined: Vec::new(),
             moving: false,
@@ -1620,6 +1819,236 @@ mod tests {
             .write_all(input.as_deref().unwrap_or("").as_bytes())
             .unwrap();
         assert!(child.wait().unwrap().success(), "{}", step.title);
+    }
+
+    #[test]
+    fn a_backups_folder_gives_both_machines_pgbackrest_into_the_share() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let binary = Path::new("/usr/local/bin/scannerpulse");
+        let with = |plan: &Plan, index: usize| {
+            steps(
+                plan,
+                index,
+                &debian,
+                binary,
+                &ips(&["192.0.2.10"]),
+                &ips(&["192.0.2.21", "192.0.2.22"]),
+            )
+        };
+        let titled = |all: &[Step], title: &str| {
+            all.iter()
+                .filter(|s| s.title == title)
+                .map(|s| s.action.clone())
+                .collect::<Vec<_>>()
+        };
+        let shared = Plan {
+            backups: Some("/srv/backups".into()),
+            ..refereed()
+        };
+        for index in [0, 1] {
+            let all = with(&shared, index);
+            let Action::Run { args, .. } = &titled(&all, "Install pgBackRest")[0] else {
+                panic!()
+            };
+            assert!(args.contains(&"--no-upgrade".to_string()), "{args:?}");
+            // Both folders in the share, the postgres account's, checked.
+            let Action::Run { args, .. } = &titled(&all, "Make the folder of the nightly dumps")[0]
+            else {
+                panic!()
+            };
+            assert_eq!(args.last().unwrap(), "/srv/backups/dump");
+            let reached: Vec<String> = titled(
+                &all,
+                "Check that the postgres account reaches the backups folder",
+            )
+            .iter()
+            .map(|a| match a {
+                Action::Run { args, .. } => args.last().unwrap().clone(),
+                _ => panic!(),
+            })
+            .collect();
+            assert_eq!(reached, ["/srv/backups/pgbackrest", "/srv/backups/dump"]);
+            let Action::Write {
+                contents, owner, ..
+            } = &titled(&all, "Write pgBackRest's settings")[0]
+            else {
+                panic!()
+            };
+            assert!(
+                contents.contains("repo1-path=/srv/backups/pgbackrest\n"),
+                "{contents}"
+            );
+            assert!(
+                contents.contains("pg1-path=/var/lib/postgresql/17/sp\n"),
+                "{contents}"
+            );
+            assert_eq!(owner, "root:postgres");
+            let Action::Run { input, .. } = &titled(&all, "Send PostgreSQL's WAL to pgBackRest")[0]
+            else {
+                panic!()
+            };
+            assert!(
+                input.as_deref().unwrap().contains(
+                    "archive_command = 'pgbackrest --config=/etc/pgbackrest/scannerpulse.conf --stanza=scannerpulse archive-push %p'"
+                ),
+                "{input:?}"
+            );
+            let Action::Run { args, .. } =
+                &titled(&all, "Restart PostgreSQL 17, to start sending its WAL")[0]
+            else {
+                panic!()
+            };
+            assert_eq!(args, &["restart", "pgautofailover"]);
+            assert_eq!(
+                titled(
+                    &all,
+                    "On the primary: make pgBackRest's place for this database and take the first full backup"
+                )
+                .len(),
+                1
+            );
+        }
+        // The nightly service backs up into the share, once it is mounted,
+        // and reads root's push addresses.
+        let (unit, _) = dump_units(binary, &debian, true, Some(Path::new("/srv/backups")));
+        for line in [
+            "Description=ScannerPulse nightly backups, on the primary\n",
+            "RequiresMountsFor=\"/srv/backups\"\n",
+            "Environment=\"SCANNERPULSE_BACKUPS=/srv/backups\"\n",
+            "EnvironmentFile=-/etc/scannerpulse/backup-push\n",
+            "User=postgres\n",
+        ] {
+            assert!(unit.contains(line), "{line}: {unit}");
+        }
+        // Promoted by hand: the system's own PostgreSQL and its service.
+        let by_hand = Plan {
+            backups: Some("/srv/backups".into()),
+            ..plan()
+        };
+        let all = with(&by_hand, 0);
+        let Action::Write { contents, .. } = &titled(&all, "Write pgBackRest's settings")[0] else {
+            panic!()
+        };
+        assert!(
+            contents.contains(&format!("pg1-path={}\n", debian.postgres_data())),
+            "{contents}"
+        );
+        let Action::Run { args, .. } =
+            &titled(&all, "Restart PostgreSQL 17, to start sending its WAL")[0]
+        else {
+            panic!()
+        };
+        assert_eq!(args, &["restart", debian.postgres_service()]);
+        // No folder: the dumps alone, on this machine's disk, as before.
+        let all = with(&refereed(), 0);
+        assert!(titled(&all, "Install pgBackRest").is_empty());
+        let Action::Run { args, .. } = &titled(&all, "Make the folder of the nightly dumps")[0]
+        else {
+            panic!()
+        };
+        assert_eq!(args.last().unwrap(), DUMPS);
+        let (unit, _) = dump_units(binary, &debian, true, None);
+        assert!(!unit.contains("SCANNERPULSE_BACKUPS"), "{unit}");
+        assert!(
+            unit.contains("EnvironmentFile=-/etc/scannerpulse/backup-push\n"),
+            "{unit}"
+        );
+    }
+
+    #[test]
+    fn the_first_full_backup_is_the_primarys_alone() {
+        use crate::setup::system::detect;
+        let debian = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let shared = Plan {
+            backups: Some("/srv/backups".into()),
+            ..refereed()
+        };
+        let all = steps(
+            &shared,
+            1,
+            &debian,
+            Path::new("/usr/local/bin/scannerpulse"),
+            &ips(&["192.0.2.10"]),
+            &ips(&["192.0.2.21", "192.0.2.22"]),
+        );
+        let step = all
+            .iter()
+            .find(|s| {
+                s.title
+                    .starts_with("On the primary: make pgBackRest's place")
+            })
+            .unwrap();
+        let stub = "case \"$*\" in *pg_is_in_recovery*) echo \"$RECOVERY\" ;; esac";
+        for (recovery, ok, backed_up) in [("t", true, false), ("f", true, true), ("", false, false)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let ran = crate::setup::test_script::run(
+                step,
+                &[("runuser", stub)],
+                &[("RECOVERY", recovery)],
+                dir.path(),
+                "",
+            );
+            assert_eq!(ran.ok, ok, "{recovery:?}: {}", ran.stderr);
+            assert_eq!(
+                ran.calls.contains("stanza-create"),
+                backed_up,
+                "{}",
+                ran.calls
+            );
+            if backed_up {
+                let create = ran.calls.find("stanza-create").unwrap();
+                let full = ran.calls.find("backup --type=full").unwrap();
+                assert!(create < full, "{}", ran.calls);
+                assert!(
+                    ran.calls.contains(
+                        "--config=/etc/pgbackrest/scannerpulse.conf --stanza=scannerpulse"
+                    ),
+                    "{}",
+                    ran.calls
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_database_machine_keeps_its_push_addresses_root_s_alone() {
+        let url = "https://kuma.example.org/api/push/abc?status=up&msg=OK";
+        let steps = push_steps("", "dump", Some(url)).unwrap();
+        let Action::Write {
+            path,
+            contents,
+            mode,
+            owner,
+        } = &steps[0].action
+        else {
+            panic!()
+        };
+        assert_eq!(path, Path::new(BACKUP_PUSH));
+        assert_eq!((*mode, owner.as_str()), (0o600, "root:root"));
+        assert!(
+            contents.contains("SCANNERPULSE_BACKUP_PUSH_DUMP="),
+            "{contents}"
+        );
+        assert!(contents.contains(url), "{contents}");
+        // The other kind beside it; then the first one off.
+        let both = push_steps(contents, "pgbackrest", Some(url)).unwrap();
+        let Action::Write { contents: both, .. } = &both[0].action else {
+            panic!()
+        };
+        assert!(
+            both.contains("SCANNERPULSE_BACKUP_PUSH_PGBACKREST="),
+            "{both}"
+        );
+        let off = push_steps(both, "dump", None).unwrap();
+        let Action::Write { contents: off, .. } = &off[0].action else {
+            panic!()
+        };
+        assert!(!off.contains("PUSH_DUMP"), "{off}");
+        assert!(off.contains("PUSH_PGBACKREST"), "{off}");
+        assert!(push_steps("", "tape", Some(url)).is_err());
+        assert!(push_steps("", "dump", Some("ftp://kuma.example.org/x")).is_err());
     }
 
     #[test]
@@ -1920,7 +2349,7 @@ mod tests {
         let (_, args, _, _) = ran(&first, drop);
         assert!(args[1].contains("pg_class"), "{}", args[1]);
         // The nightly dump follows pg_autoctl's service.
-        let (unit, _) = dump_units(binary, &debian, true);
+        let (unit, _) = dump_units(binary, &debian, true, None);
         assert!(unit.contains("After=pgautofailover.service"), "{unit}");
         assert!(
             at("Write the passwords for the copy and the referee, for the postgres account")

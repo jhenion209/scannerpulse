@@ -4,7 +4,7 @@
 //! network share both mount at the same path, which the first machine
 //! marked), and the two share an address when the plan names one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::plan::Plan;
 use super::steps::{
@@ -152,6 +152,7 @@ pub fn add_steps(
                 shared: shared.map(String::from),
                 archive: archive.into(),
                 recordings: recordings.into(),
+                backups: plan.backups.as_ref().map(PathBuf::from),
             },
         },
     ];
@@ -318,6 +319,7 @@ pub(super) mod tests {
             install_id: "0123456789abcdef".into(),
             archive: "/srv/archive".into(),
             recordings: "/srv/recordings".into(),
+            backups: None,
             ready: true,
             joined: Vec::new(),
             moving: false,

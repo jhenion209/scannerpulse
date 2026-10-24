@@ -74,14 +74,14 @@ fn checked(
     if let Some(server) = &answers.syslog {
         check_syslog(server)?;
     }
-    if answers.database != Database::Here
-        && (answers.backups.is_some() || !answers.pushes.is_empty())
-    {
-        return Err(match answers.database {
-            Database::Nodes(_) => "the backups are on the database machines: leave the backup folder and push addresses out",
-            _ => "a database you run keeps its own backups: leave the backup folder and push addresses out",
+    match answers.database {
+        Database::Theirs(_) if answers.backups.is_some() || !answers.pushes.is_empty() => {
+            return Err("a database you run keeps its own backups: leave the backup folder and push addresses out".into());
         }
-        .into());
+        Database::Nodes(_) if !answers.pushes.is_empty() => {
+            return Err("each database machine is given its push addresses itself (`sudo /usr/local/bin/scannerpulse backups push pgbackrest|dump` there): leave them out here".into());
+        }
+        _ => {}
     }
     if let Database::Nodes(pair) = &answers.database {
         for name in pair.nodes.iter().chain([&pair.hub]).chain(&pair.referee) {
@@ -108,7 +108,11 @@ fn checked(
         machines_apart(&answers, resolve)?;
     }
     if let Some(backups) = &answers.backups {
-        answers.backups = Some(check_backups(backups, &answers.recordings, &answers.archive)?.path);
+        answers.backups = Some(match answers.database {
+            // On the database machines, which check it as they join.
+            Database::Nodes(_) => node_backups(backups)?,
+            _ => check_backups(backups, &answers.recordings, &answers.archive)?.path,
+        });
     }
     for (kind, url) in &answers.pushes {
         if crate::backup::push_var(kind).is_none() {
@@ -838,6 +842,24 @@ pub fn interactive(
                 &archive.path,
             )?;
             pushes = ask_pushes(previous.map(|a| a.pushes.as_slice()))?;
+        } else if advanced && matches!(database, Database::Nodes(_)) {
+            say(
+                "Advanced 4 of 4. The backups: every night the database machine that is the primary takes a pgBackRest backup (with the database's changes kept between them, for recovery to any moment) and a dump, into a share mounted at the same path on both database machines. Give that path, or none: each then keeps its dumps on its own disk. Each database machine is told its push addresses itself, with `scannerpulse backups push`.",
+            );
+            let answer = text(
+                "The database machines' backup folder (empty for none):",
+                previous
+                    .and_then(|a| a.backups.as_deref())
+                    .and_then(Path::to_str),
+                |b| match b.trim() {
+                    "" => Ok(()),
+                    b => node_backups(Path::new(b)).map(drop),
+                },
+            )?;
+            backups = match answer.trim() {
+                "" => None,
+                b => Some(PathBuf::from(b)),
+            };
         }
         Ok(Some(Answers {
             recordings: recordings.path,
@@ -1383,6 +1405,20 @@ fn ask_port(previous: u16) -> Result<u16, inquire::InquireError> {
         }
     })?;
     Ok(answer.parse().expect("checked"))
+}
+
+/// The database machines' backups folder: a full path, the same on both,
+/// where each mounts the share (checked there as it joins).
+fn node_backups(folder: &Path) -> Result<PathBuf, String> {
+    match folder.to_str() {
+        Some(path) if folder.is_absolute() && !path.chars().any(char::is_control) => {
+            Ok(folder.to_path_buf())
+        }
+        _ => Err(format!(
+            "BACKUPS {} is not a full path: with database machines it is the folder each mounts the share at, the same on both",
+            folder.display()
+        )),
+    }
 }
 
 fn ask_backups(
@@ -1976,6 +2012,32 @@ mod tests {
             error.contains("REFEREE_PORT goes with a referee"),
             "{error}"
         );
+        // The database machines' backups folder: a share each mounts at that
+        // path, checked as they join (not here); each takes its push
+        // addresses itself.
+        let answers = from_file(
+            &answers_file(dir.path(), &format!("{nodes}BACKUPS=/srv/backups\n"), 0o600),
+            &defaults(),
+        )
+        .unwrap();
+        assert_eq!(
+            answers.backups,
+            Some(std::path::PathBuf::from("/srv/backups"))
+        );
+        for (extra, why) in [
+            ("BACKUPS=backups\n", "not a full path"),
+            (
+                "PUSH_DUMP=\"https://kuma.example.org/api/push/abc\"\n",
+                "backups push pgbackrest|dump",
+            ),
+        ] {
+            let error = from_file(
+                &answers_file(dir.path(), &format!("{nodes}{extra}"), 0o600),
+                &defaults(),
+            )
+            .unwrap_err();
+            assert!(error.contains(why), "{extra}: {error}");
+        }
         // A second ScannerPulse machine, and the address the two share.
         let pair2 = format!("{nodes}SECOND=Web2.example.org\nSHARED=192.0.2.50/24\n");
         let answers = from_file(&answers_file(dir.path(), &pair2, 0o600), &defaults()).unwrap();
@@ -2148,13 +2210,6 @@ mod tests {
                 "{extra}: {error}"
             );
         }
-        refused(
-            &format!(
-                "DATABASE=nodes\nDB_NODES=\"db1.example.org db2.example.org\"\nBACKUPS={}\n",
-                bak.display()
-            ),
-            "on the database machines",
-        );
         refused(
             "LETSENCRYPT=http\nLETSENCRYPT_NAMES=radio.example.org\n",
             "web or dns-cloudflare",

@@ -666,6 +666,7 @@ pub async fn begin(
         install_id: String::new(),
         archive,
         recordings,
+        backups: None,
         ready: false,
         joined: Vec::new(),
         moving: true,

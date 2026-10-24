@@ -1148,7 +1148,13 @@ static WENT_AHEAD: AtomicBool = AtomicBool::new(false);
 fn records(command: &Command, has_database: bool) -> bool {
     // A database machine or the referee has no database to record in.
     changes_something(command)
-        && (has_database || !matches!(command, Command::Setup { .. } | Command::DiskPush { .. }))
+        && (has_database
+            || !matches!(
+                command,
+                Command::Setup { .. }
+                    | Command::DiskPush { .. }
+                    | Command::Change(Change::Push { .. })
+            ))
 }
 
 /// Whether a command changes the site: when it succeeds, the audit log
@@ -1469,22 +1475,11 @@ async fn execute(command: Option<Command>) -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             };
-            let mut failed = Vec::new();
-            for (kind, outcome) in scannerpulse::backup::nightly(Path::new(&backups), &url) {
-                match outcome {
-                    Ok(done) => {
-                        println!("{done}");
-                        backup_succeeded(kind, &url).await;
-                    }
-                    Err(why) => failed.push(why),
-                }
-            }
-            if failed.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                eprintln!("backup: {}", failed.join("; "));
-                ExitCode::FAILURE
-            }
+            backups_taken(
+                scannerpulse::backup::nightly(Path::new(&backups), &url, true),
+                &url,
+            )
+            .await
         }
         Some(Command::Change(change)) => {
             let result = if matches!(change, Change::Second { .. }) {
@@ -1526,7 +1521,21 @@ async fn execute(command: Option<Command>) -> ExitCode {
                 serde_json::to_string(&scannerpulse::setup::node::status())
                     .map_err(|e| e.to_string())
             }),
-            NodeCommand::Backup => scannerpulse::setup::node::backup(),
+            NodeCommand::Backup => {
+                return match scannerpulse::setup::node::backup() {
+                    Ok(outcomes) if outcomes.is_empty() => {
+                        println!("a standby: the primary takes the backups");
+                        ExitCode::SUCCESS
+                    }
+                    Ok(outcomes) => {
+                        backups_taken(outcomes, &scannerpulse::setup::node::local_url()).await
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
         }),
         Some(Command::Db(command)) => node_answer(as_root().and_then(|()| match command {
             DbCommand::Promote => scannerpulse::setup::node::db_promote(),
@@ -3213,6 +3222,30 @@ fn answered_yes(answer: &str) -> bool {
     yes
 }
 
+/// Each backup's outcome said; one that succeeded has its time kept and is
+/// pushed.
+async fn backups_taken(
+    outcomes: Vec<(&'static str, Result<String, String>)>,
+    database_url: &str,
+) -> ExitCode {
+    let mut failed = Vec::new();
+    for (kind, outcome) in outcomes {
+        match outcome {
+            Ok(done) => {
+                println!("{done}");
+                backup_succeeded(kind, database_url).await;
+            }
+            Err(why) => failed.push(why),
+        }
+    }
+    if failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("backup: {}", failed.join("; "));
+        ExitCode::FAILURE
+    }
+}
+
 /// After a backup of `kind` succeeds: its time for the admin page, and its
 /// push address, if the settings file has one. Neither fails the backup;
 /// each says when it could not be done.
@@ -3947,6 +3980,10 @@ mod tests {
         assert!(!records(&disk, false));
         assert!(records(&disk, true));
         assert!(!records(&parse(&["disk", "check"]).unwrap(), true));
+        // A database machine's own push address: none either.
+        let push = parse(&["backups", "push", "dump"]).unwrap();
+        assert!(!records(&push, false));
+        assert!(records(&push, true));
     }
 
     #[test]

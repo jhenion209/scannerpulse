@@ -317,6 +317,13 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             "rm",
             &["-f", super::node::NODE],
         ));
+        // The backups stay in their folder, and pgBackRest's settings with
+        // PostgreSQL, which keeps sending its WAL there until it is removed.
+        steps.push(run(
+            "Remove the backups' push addresses",
+            "rm",
+            &["-f", super::node::BACKUP_PUSH],
+        ));
     }
     // The second machine lets the first machine's key in too, for updates.
     if found.node || found.referee || found.second {
@@ -644,6 +651,7 @@ mod tests {
             "Remove the nightly dump's units",
             "Take the ScannerPulse machine's key off",
             "Remove this machine's place among the database machines",
+            "Remove the backups' push addresses",
             "Remove the program",
         ] {
             assert!(all.iter().any(|t| t == title), "{title}: {all:?}");

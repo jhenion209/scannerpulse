@@ -265,6 +265,8 @@ pub enum Action {
         shared: Option<String>,
         archive: PathBuf,
         recordings: PathBuf,
+        /// The database machines' backups folder, if any.
+        backups: Option<PathBuf>,
     },
     /// The first machine has finished: the second may join.
     Ready,
@@ -455,8 +457,9 @@ pub fn backups_folder(answers: &Answers) -> Option<PathBuf> {
 }
 
 /// pgBackRest's settings: its repository in the backups folder, two full
-/// backups kept (with the differentials and the WAL between them).
-pub fn pgbackrest_conf(backups: &Path, system: &System) -> String {
+/// backups kept (with the differentials and the WAL between them), for the
+/// PostgreSQL in `data`.
+pub fn pgbackrest_conf(backups: &Path, data: &str) -> String {
     format!(
         "# Written by `scannerpulse setup`.\n\
          [global]\n\
@@ -469,7 +472,6 @@ pub fn pgbackrest_conf(backups: &Path, system: &System) -> String {
          pg1-path={data}\n\
          pg1-port={PORT_PG}\n",
         repo = backups.join("pgbackrest").display(),
-        data = system.postgres_data(),
     )
 }
 
@@ -987,6 +989,7 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
                 shared: pair.shared.clone(),
                 archive: answers.archive.clone(),
                 recordings: answers.recordings.clone(),
+                backups: answers.backups.clone(),
             },
         });
         steps.push(Step {
@@ -1342,7 +1345,7 @@ pub(super) fn backup_steps(steps: &mut Vec<Step>, backups: &Path, binary: &Path,
         title: "Write pgBackRest's settings".into(),
         action: Action::Write {
             path: PathBuf::from(PGBACKREST_CONF),
-            contents: pgbackrest_conf(backups, system),
+            contents: pgbackrest_conf(backups, system.postgres_data()),
             mode: 0o640,
             owner: "root:postgres".into(),
         },
@@ -1806,13 +1809,19 @@ mod tests {
             "/srv/archive/.scannerpulse-backups".to_string()
         )));
         let debian = detect(DEBIAN, "aarch64").unwrap();
-        let conf = pgbackrest_conf(Path::new("/srv/archive/.scannerpulse-backups"), &debian);
+        let conf = pgbackrest_conf(
+            Path::new("/srv/archive/.scannerpulse-backups"),
+            debian.postgres_data(),
+        );
         assert!(conf.contains("repo1-path=/srv/archive/.scannerpulse-backups/pgbackrest\n"));
         assert!(conf.contains("[scannerpulse]\npg1-path=/var/lib/postgresql/17/main\n"));
         let rocky = detect(ROCKY, "x86_64").unwrap();
         assert!(
-            pgbackrest_conf(Path::new("/srv/archive/.scannerpulse-backups"), &rocky)
-                .contains("pg1-path=/var/lib/pgsql/17/data\n")
+            pgbackrest_conf(
+                Path::new("/srv/archive/.scannerpulse-backups"),
+                rocky.postgres_data()
+            )
+            .contains("pg1-path=/var/lib/pgsql/17/data\n")
         );
         let (service, timer) = backup_units(
             Path::new("/usr/local/bin/scannerpulse"),
@@ -2033,6 +2042,7 @@ mod tests {
                 shared: None,
                 archive: PathBuf::from("/srv/archive"),
                 recordings: PathBuf::from("/srv/recordings"),
+                backups: None,
             },
             Action::Admin {
                 login: "chief".into(),
