@@ -248,3 +248,60 @@ async fn a_bad_setting_is_an_internal_fault_that_names_nothing(pool: PgPool) {
         serde_json::json!({"error": "internal", "detail": "something went wrong on the server"})
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_labelers_list_carries_the_progress_in_counts_only(pool: PgPool) {
+    let tg = talkgroup(&pool, "SYSA", 1).await;
+    let first = Utc.with_ymd_and_hms(2031, 3, 1, 12, 0, 0).unwrap();
+    let second = Utc.with_ymd_and_hms(2031, 3, 1, 12, 5, 0).unwrap();
+    let outside = Utc.with_ymd_and_hms(2031, 3, 1, 12, 9, 0).unwrap();
+    let labeled = call(&pool, tg, first, Some("engine two")).await;
+    let open = call(&pool, tg, second, Some("medic four")).await;
+    let other = call(&pool, tg, outside, Some("ladder one")).await;
+    for (id, at) in [(labeled, first), (open, second)] {
+        sqlx::query("INSERT INTO eval_calls (set_name, call_id, started_at, drawn_at) VALUES ('s1', $1, $2, now())")
+            .bind(id)
+            .bind(at)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (id, at, newest) in [
+        (labeled, first, "2031-03-02T10:00:00Z"),
+        (other, outside, "2031-03-02T11:00:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO transcript_labels (call_id, started_at, text, machine_text, source, created_at) \
+             VALUES ($1, $2, 'engine one', 'engine two', 'user_edit', $3::timestamptz)",
+        )
+        .bind(id)
+        .bind(at)
+        .bind(newest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('improvement_module.enabled', 'true'), \
+         ('labeler_list.public', 'true')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, todo) = get(&pool, "/api/labels/todo?set=s1").await;
+    assert_eq!(status, StatusCode::OK, "{todo}");
+    assert_eq!(todo["size"], 2);
+    assert_eq!(todo["calls"].as_array().unwrap().len(), 1);
+    assert_eq!(todo["calls"][0]["id"], open);
+    assert_eq!(todo["calls"][0]["talkgroup_id"], tg);
+    assert_eq!(todo["production"]["calls"], 1);
+    assert_eq!(todo["production"]["errors"], 1);
+    assert_eq!(todo["production"]["words"], 2);
+    assert_eq!(todo["production"]["wer"], 0.5);
+    assert_eq!(todo["corrections"]["calls"], 2);
+    assert_eq!(todo["corrections"]["newest"], "2031-03-02T11:00:00Z");
+    let body = todo.to_string();
+    for text in ["engine", "medic", "ladder", ".mp3"] {
+        assert!(!body.contains(text), "{text} leaked: {body}");
+    }
+}
