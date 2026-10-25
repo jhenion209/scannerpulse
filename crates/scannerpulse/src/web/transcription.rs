@@ -85,7 +85,7 @@ pub struct SetAsk {
     pub set: String,
 }
 
-fn score(score: &crate::wer::Score) -> Value {
+pub(super) fn score(score: &crate::wer::Score) -> Value {
     json!({
         "wer": score.wer(),
         "errors": score.errors,

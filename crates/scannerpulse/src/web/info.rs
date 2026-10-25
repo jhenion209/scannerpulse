@@ -221,8 +221,9 @@ pub struct TodoParams {
     pub set: String,
 }
 
-/// The labelers' list of a set: for everyone when `labeler_list.public` is
-/// true, for admins otherwise.
+/// The labelers' list of a set, with the set's score and the corrections
+/// collected, in counts: for everyone when `labeler_list.public` is true, for
+/// admins otherwise.
 pub async fn labels_todo(
     State(state): State<AppState>,
     MaybeAdmin(admin): MaybeAdmin,
@@ -244,12 +245,18 @@ pub async fn labels_todo(
         return Err(ApiError::NotFound);
     }
     let calls = crate::evaluation::to_label(&state.pool, &params.set).await?;
+    // Counts only: the list is public, and the people's texts are not.
+    let labeled = crate::accuracy::labeled(&state.pool, &params.set).await?;
+    let (corrected, newest) = crate::evaluation::corrections(&state.pool).await?;
     Ok(Json(json!({
         "set": params.set,
         "size": size,
+        "production": super::transcription::score(&crate::accuracy::production(&labeled)),
+        "corrections": { "calls": corrected, "newest": newest },
         "calls": calls.iter().map(|c| json!({
             "id": c.call_id,
             "started_at": c.started_at,
+            "talkgroup_id": c.talkgroup_id,
             "system": c.system,
             "talkgroup": c.number,
             "talkgroup_name": c.talkgroup,

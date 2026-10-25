@@ -700,7 +700,10 @@ already set in the environment wins. So far:
     30 seconds;
   - `/api/calls/<id>`, `/api/filters`, `/api/favorites`, and
     `/api/labels/todo?set=NAME` (for admins, and for everyone when the
-    labelers' list is public);
+    labelers' list is public): the set's calls without a person's text, the
+    set's score against the people's texts (`production`) and the calls
+    corrected in all with the newest correction's time (`corrections`), in
+    counts only;
   - `/api/status`: whether maintenance and transcription are on, the
     calls waiting to be transcribed (`queue`) and an estimate of when they
     will be done (`eta_seconds`, from the machine texts of the last ten

@@ -236,6 +236,7 @@ pub fn even_split(n: usize, sizes: &[usize]) -> Vec<usize> {
 pub struct ToLabel {
     pub call_id: i64,
     pub started_at: DateTime<Utc>,
+    pub talkgroup_id: i32,
     pub system: String,
     pub number: i64,
     pub talkgroup: String,
@@ -245,7 +246,8 @@ pub struct ToLabel {
 /// The labelers' list: the set's calls that have no person's text, oldest first.
 pub async fn to_label(db: impl PgExecutor<'_>, set: &str) -> sqlx::Result<Vec<ToLabel>> {
     sqlx::query_as(
-        "SELECT c.id AS call_id, c.started_at, s.name AS system, t.number, t.name AS talkgroup, \
+        "SELECT c.id AS call_id, c.started_at, t.id AS talkgroup_id, s.name AS system, t.number, \
+                t.name AS talkgroup, \
                 c.duration_ms \
          FROM eval_calls e \
          JOIN calls c ON c.id = e.call_id AND c.started_at = e.started_at \
@@ -257,6 +259,16 @@ pub async fn to_label(db: impl PgExecutor<'_>, set: &str) -> sqlx::Result<Vec<To
     )
     .bind(set)
     .fetch_all(db)
+    .await
+}
+
+/// The calls that have a person's text, in every set or none, and when the
+/// newest was saved: the corrections collected for training.
+pub async fn corrections(db: impl PgExecutor<'_>) -> sqlx::Result<(i64, Option<DateTime<Utc>>)> {
+    sqlx::query_as(
+        "SELECT count(DISTINCT (call_id, started_at)), max(created_at) FROM transcript_labels",
+    )
+    .fetch_one(db)
     .await
 }
 
