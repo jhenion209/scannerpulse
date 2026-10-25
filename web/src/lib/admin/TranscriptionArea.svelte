@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { counted } from '../format';
   import { tell } from '../notice.svelte';
   import ImprovementSection from './ImprovementSection.svelte';
@@ -37,10 +37,16 @@
 
   async function setSwitch(talkgroup: AdminTalkgroup, box: HTMLInputElement) {
     const value = box.checked;
+    const focused = document.activeElement === box;
     delete refusals[talkgroup.id];
     try {
       await admin('PUT', `/api/admin/talkgroups/${talkgroup.id}/transcribe`, { on: value });
       talkgroup.transcribe = value;
+      // Sorted by Transcribe, the row moves, and a moved element loses the focus: give it back.
+      if (focused) {
+        await tick();
+        box.focus();
+      }
     } catch (error) {
       refusals[talkgroup.id] = why(error);
       // `checked` is one-way: nothing writes the saved state back to a box the person toggled.

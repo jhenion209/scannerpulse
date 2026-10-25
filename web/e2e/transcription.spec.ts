@@ -57,6 +57,28 @@ test("a column's header sorts the list, and a second click turns the order round
   await expect(first).toContainText('Metro Police One');
 });
 
+test('a switch whose row moves keeps the focus, for the next key', async ({ page }) => {
+  await signIn(page, '#transcription');
+  const table = page.getByRole('table', { name: "Each talkgroup's transcription switch" });
+  const transcribe = table.getByRole('columnheader', { name: 'Transcribe' }).getByRole('button');
+  await transcribe.click();
+  await transcribe.click();
+  const name = /^Transcribe Metro Fire Dispatch/;
+  const saved = () => page.waitForResponse((r) => r.url().endsWith('/transcribe') && r.request().method() === 'PUT');
+  try {
+    await expect(table.locator('tbody tr').first()).toContainText('Metro Fire Dispatch');
+    await switchOf(page, name).focus();
+    await Promise.all([saved(), page.keyboard.press('Space')]);
+    await expect(table.locator('tbody tr').last()).toContainText('Metro Fire Dispatch');
+    await expect(switchOf(page, name)).toBeFocused();
+  } finally {
+    // The server is not reseeded between runs: the switch goes back off, whatever failed above.
+    await page.reload();
+    const on = switchOf(page, name);
+    if (await on.isChecked()) await Promise.all([saved(), on.uncheck()]);
+  }
+});
+
 test("a queue job is counted first, refused in the server's words, and asked for only after", async ({ page }) => {
   let reads = 0;
   page.on('request', (r) => { if (r.method() === 'GET' && r.url().endsWith('/api/admin/talkgroups')) reads += 1; });
