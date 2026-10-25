@@ -39,6 +39,24 @@ test('the list finds a talkgroup by name or number', async ({ page }) => {
   await expect(rows.first()).toContainText('Valley Ambulance');
 });
 
+test("a column's header sorts the list, and a second click turns the order round", async ({ page }) => {
+  await signIn(page, '#transcription');
+  const table = page.getByRole('table', { name: "Each talkgroup's transcription switch" });
+  const first = table.locator('tbody tr').first();
+  const number = table.getByRole('columnheader', { name: 'Number' });
+  await expect(first).toContainText('Metro Fire Dispatch');
+  await expect(table.getByRole('columnheader', { name: 'System' })).toHaveAttribute('aria-sort', 'ascending');
+  await expect(number).toHaveAttribute('aria-sort', 'none');
+  await number.getByRole('button').click();
+  await expect(number).toHaveAttribute('aria-sort', 'ascending');
+  await expect(first).toContainText('Metro Fire Dispatch');
+  await number.getByRole('button').click();
+  await expect(number).toHaveAttribute('aria-sort', 'descending');
+  await expect(first).toContainText('Valley Ambulance');
+  await page.getByLabel('Find a talkgroup').fill('metro');
+  await expect(first).toContainText('Metro Police One');
+});
+
 test("a queue job is counted first, refused in the server's words, and asked for only after", async ({ page }) => {
   let reads = 0;
   page.on('request', (r) => { if (r.method() === 'GET' && r.url().endsWith('/api/admin/talkgroups')) reads += 1; });
