@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "scannerpulse"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "argon2",
  "axum",
