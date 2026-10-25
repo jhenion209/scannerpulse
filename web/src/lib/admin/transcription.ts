@@ -1,5 +1,5 @@
-// The Transcription area's pure parts: finding a talkgroup in the list, the
-// queue job's request, and the words for its preview.
+// The Transcription area's pure parts: finding and sorting the talkgroups in
+// the list, the queue job's request, and the words for its preview.
 import { counted } from '../format';
 
 /** A talkgroup as `/api/admin/talkgroups` gives it. */
@@ -22,6 +22,38 @@ export function matchTalkgroups(list: AdminTalkgroup[], text: string): AdminTalk
     (t) => t.name.toLowerCase().includes(needle) || String(t.number).startsWith(needle) || t.system.toLowerCase() === needle,
   );
 }
+
+/** A column of the talkgroup table that sorts. */
+export type TalkgroupColumn = 'system' | 'number' | 'name' | 'transcribe';
+
+/** The table's order: the column and its direction. */
+export interface TalkgroupSort {
+  column: TalkgroupColumn;
+  descending: boolean;
+}
+
+const byText = (a: string, b: string) => a.localeCompare(b, 'en', { sensitivity: 'base' });
+
+/** The talkgroups in the table's order, as a new list. Numbers sort by value,
+ * text without regard to case, and ascending puts the talkgroups that are on
+ * first; equal rows follow system, then number, ascending. */
+export function sortTalkgroups(list: AdminTalkgroup[], sort: TalkgroupSort): AdminTalkgroup[] {
+  const key = (a: AdminTalkgroup, b: AdminTalkgroup): number => {
+    switch (sort.column) {
+      case 'system': return byText(a.system, b.system);
+      case 'number': return a.number - b.number;
+      case 'name': return byText(a.name, b.name);
+      case 'transcribe': return Number(b.transcribe) - Number(a.transcribe);
+    }
+  };
+  return [...list].sort(
+    (a, b) => (sort.descending ? -key(a, b) : key(a, b)) || byText(a.system, b.system) || a.number - b.number,
+  );
+}
+
+/** The order after a click on `column`'s header: the same column flips, another starts ascending. */
+export const nextSort = (sort: TalkgroupSort, column: TalkgroupColumn): TalkgroupSort =>
+  sort.column === column ? { column, descending: !sort.descending } : { column, descending: false };
 
 /** The queue job's fields: one talkgroup (null: the backlog of every talkgroup
  * whose transcription is on) and the site's days, `YYYY-MM-DD` or empty. */

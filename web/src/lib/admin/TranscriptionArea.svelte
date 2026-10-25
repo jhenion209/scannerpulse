@@ -5,13 +5,21 @@
   import ImprovementSection from './ImprovementSection.svelte';
   import { admin, can, why } from './session.svelte';
   import {
-    matchTalkgroups, previewText, queueBody, queueQuery, retriedText, type AdminTalkgroup, type QueueFields,
+    matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, sortTalkgroups,
+    type AdminTalkgroup, type QueueFields, type TalkgroupColumn, type TalkgroupSort,
   } from './transcription';
 
   let talkgroups = $state<AdminTalkgroup[] | null>(null);
   let problem = $state<string | null>(null);
   let search = $state('');
-  const shown = $derived(talkgroups ? matchTalkgroups(talkgroups, search) : []);
+  /** System, then number (the server's order) until a header is clicked. */
+  let sort = $state<TalkgroupSort>({ column: 'system', descending: false });
+  const shown = $derived(talkgroups ? sortTalkgroups(matchTalkgroups(talkgroups, search), sort) : []);
+  const columns: { key: TalkgroupColumn; label: string; num?: boolean }[] = [
+    { key: 'system', label: 'System' }, { key: 'number', label: 'Number', num: true },
+    { key: 'name', label: 'Name' }, { key: 'transcribe', label: 'Transcribe' },
+  ];
+  const ariaSort = (key: TalkgroupColumn) => (sort.column !== key ? 'none' : sort.descending ? 'descending' : 'ascending');
   const on = $derived(talkgroups ? talkgroups.filter((t) => t.transcribe).length : 0);
   /** A refusal beside the switch that asked for it. */
   let refusals = $state<Record<number, string>>({});
@@ -127,7 +135,13 @@
     </div>
     <table>
       <caption class="visually-hidden">Each talkgroup's transcription switch</caption>
-      <thead><tr><th scope="col">System</th><th scope="col" class="num">Number</th><th scope="col">Name</th><th scope="col">Transcribe</th></tr></thead>
+      <thead><tr>
+        {#each columns as column (column.key)}
+          <th scope="col" class:num={column.num} aria-sort={ariaSort(column.key)}>
+            <button type="button" class="sort" onclick={() => (sort = nextSort(sort, column.key))}>{column.label}<span aria-hidden="true">{ariaSort(column.key) === 'ascending' ? ' ▲' : ariaSort(column.key) === 'descending' ? ' ▼' : ''}</span></button>
+          </th>
+        {/each}
+      </tr></thead>
       <tbody>
         {#each shown as talkgroup (talkgroup.id)}
           <tr>
@@ -187,4 +201,5 @@
   .queue label { font-weight: 600; }
   .hint { margin: 0; color: var(--muted); }
   select { max-width: 100%; }
+  .sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
 </style>
