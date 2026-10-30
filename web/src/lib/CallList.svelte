@@ -4,6 +4,7 @@
   import { COLUMNS, EXTRA_COLUMNS, extraText, isExtra, type ColumnId } from './columns';
   import { callTime, lengthPercent, seconds } from './format';
   import RowActions from './RowActions.svelte';
+  import StarRating from './StarRating.svelte';
   import { rowClickPlays } from './rowPlay';
   import { pageState } from './selection';
   import { siteZone } from './status.svelte';
@@ -122,7 +123,10 @@
               {:else}
                 <span class="none">No text</span>
               {/if}
-            </div></td>
+            </div>
+            {#if call.transcript}
+              <StarRating id={call.id} label={`${talkgroup(call)} at ${callTime(call.started_at, now, siteZone())}`} />
+            {/if}</td>
           {:else if isExtra(column.id)}
             <td class={`c-${column.id} extra`}>{extraText(call, column.id)}</td>
           {/if}

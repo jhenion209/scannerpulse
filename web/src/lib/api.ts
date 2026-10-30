@@ -107,6 +107,17 @@ export async function saveTranscript(id: number, text: string): Promise<{ id: nu
   return response.json();
 }
 
+/** Rates a call's text from 1 to 5 stars, or clears this browser's rating
+ * (null); throws the server's refusal. */
+export async function rateCall(id: number, stars: number | null): Promise<void> {
+  const response = await fetch(`/api/calls/${id}/rating`, {
+    method: stars === null ? 'DELETE' : 'PUT',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: stars === null ? undefined : JSON.stringify({ stars }),
+  });
+  if (!response.ok) throw await apiError(response);
+}
+
 /** A file the server built, with what the listener should know about it. */
 export interface Download {
   blob: Blob;

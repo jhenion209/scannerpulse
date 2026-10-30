@@ -1304,8 +1304,14 @@ async fn audit_log(since: Option<NaiveDate>, admin: Option<String>, follow: bool
 
 async fn ratings_report(since: Option<NaiveDate>) -> CommandResult {
     let mut conn = connect().await?;
-    let zone = settings::load(&mut conn).await?.time_zone;
-    let since = since.map(|day| scannerpulse::audit::day_start(day, zone));
+    // The site's zone matters only to say when a day starts.
+    let since = match since {
+        Some(day) => {
+            let zone = settings::load(&mut conn).await?.time_zone;
+            Some(scannerpulse::audit::day_start(day, zone))
+        }
+        None => None,
+    };
     let rows = scannerpulse::ratings::report(&mut conn, since).await?;
     if rows.is_empty() {
         println!("no ratings");

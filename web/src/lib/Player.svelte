@@ -2,6 +2,7 @@
   import { view } from './calls.svelte';
   import { callTime, source } from './format';
   import { siteZone } from './status.svelte';
+  import StarRating from './StarRating.svelte';
   import { afterEnd, afterFailure, navKey, step } from './playback';
   import { failed, play, player, stepTo } from './playing.svelte';
 
@@ -90,6 +91,9 @@
       Nothing playing
     {/if}
   </p>
+  {#if player.call?.transcript}
+    <StarRating id={player.call.id} label="the playing call" />
+  {/if}
   <label><input type="checkbox" bind:checked={continuous} /> Continuous</label>
   <label><input type="checkbox" bind:checked={autoplayNew} /> Play new calls</label>
 </div>
