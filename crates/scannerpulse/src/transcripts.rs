@@ -33,44 +33,52 @@ pub async fn correct(
     if found.is_none() {
         return Ok(false);
     }
-    let oldest: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT machine_text FROM transcript_labels \
+    let oldest: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT machine_text, machine_model FROM transcript_labels \
          WHERE call_id = $1 AND started_at = $2 ORDER BY id LIMIT 1",
     )
     .bind(call.0)
     .bind(call.1)
     .fetch_optional(&mut *tx)
     .await?;
-    let machine_text = match oldest {
+    let (machine_text, machine_model) = match oldest {
         Some(first) => first,
         None => {
-            sqlx::query_scalar(
-                "SELECT text FROM transcripts \
+            let machine: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT text, model FROM transcripts \
                  WHERE call_id = $1 AND started_at = $2 AND origin = 'machine'",
             )
             .bind(call.0)
             .bind(call.1)
             .fetch_optional(&mut *tx)
-            .await?
+            .await?;
+            match machine {
+                Some((text, model)) => (Some(text), model),
+                None => (None, None),
+            }
         }
     };
     let text = text.trim();
     sqlx::query(
-        "INSERT INTO transcript_labels (call_id, started_at, text, machine_text, source, labeler) \
-         VALUES ($1, $2, $3, $4, 'user_edit', $5)",
+        "INSERT INTO transcript_labels \
+         (call_id, started_at, text, machine_text, machine_model, source, labeler) \
+         VALUES ($1, $2, $3, $4, $5, 'user_edit', $6)",
     )
     .bind(call.0)
     .bind(call.1)
     .bind(text)
     .bind(&machine_text)
+    .bind(&machine_model)
     .bind(labeler)
     .execute(&mut *tx)
     .await?;
+    // The row keeps the model that wrote the first text; `origin` says a
+    // person changed it.
     sqlx::query(
         "INSERT INTO transcripts (call_id, started_at, text, origin, model, updated_at) \
          VALUES ($1, $2, $3, 'human', NULL, now()) \
          ON CONFLICT (call_id, started_at) DO UPDATE \
-         SET text = EXCLUDED.text, origin = 'human', model = NULL, updated_at = now()",
+         SET text = EXCLUDED.text, origin = 'human', updated_at = now()",
     )
     .bind(call.0)
     .bind(call.1)

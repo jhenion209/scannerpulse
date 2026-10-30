@@ -35,6 +35,7 @@ pub mod preview;
 pub mod primary;
 pub mod purges;
 pub mod queue;
+pub mod ratings;
 pub mod reader;
 pub mod recorders;
 pub mod reports;

@@ -80,6 +80,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse status
        scannerpulse audit [--since DAY] [--admin NAME] [--follow]
        scannerpulse report traffic
+       scannerpulse ratings report [--since DAY]
        scannerpulse jobs list
        scannerpulse jobs show|stop ID
        scannerpulse jobs queue [--talkgroup SYSTEM/NUMBER] [--from DAY] [--to DAY] [--yes]
@@ -405,6 +406,10 @@ enum Command {
         follow: bool,
     },
     Traffic,
+    /// `ratings report`: the stars given to transcripts, by model.
+    Ratings {
+        since: Option<NaiveDate>,
+    },
     Version,
     Help,
 }
@@ -1033,6 +1038,14 @@ fn parse(args: &[&str]) -> Option<Command> {
                 follow: found.contains_key("--follow"),
             })
         }
+        ["ratings", "report", rest @ ..] => {
+            let found = flags(rest, &[], &["--since"], &[])?;
+            let since = match found.get("--since") {
+                Some(day) => Some(day.parse::<NaiveDate>().ok()?),
+                None => None,
+            };
+            Some(Command::Ratings { since })
+        }
         ["report", "traffic"] => Some(Command::Traffic),
         ["--version"] => Some(Command::Version),
         ["--help"] => Some(Command::Help),
@@ -1289,6 +1302,34 @@ async fn audit_log(since: Option<NaiveDate>, admin: Option<String>, follow: bool
     }
 }
 
+async fn ratings_report(since: Option<NaiveDate>) -> CommandResult {
+    let mut conn = connect().await?;
+    let zone = settings::load(&mut conn).await?.time_zone;
+    let since = since.map(|day| scannerpulse::audit::day_start(day, zone));
+    let rows = scannerpulse::ratings::report(&mut conn, since).await?;
+    if rows.is_empty() {
+        println!("no ratings");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("model  origin  ratings  calls  mean  1  2  3  4  5");
+    for r in rows {
+        println!(
+            "{}  {}  {}  {}  {:.2}  {}  {}  {}  {}  {}",
+            r.model.as_deref().unwrap_or("(none)"),
+            r.origin,
+            r.ratings,
+            r.calls,
+            r.mean,
+            r.one,
+            r.two,
+            r.three,
+            r.four,
+            r.five
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn execute(command: Option<Command>) -> ExitCode {
     match command {
         Some(Command::DbUpdate { quiet }) => match db_update(quiet).await {
@@ -1423,6 +1464,13 @@ async fn execute(command: Option<Command>) -> ExitCode {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("report: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Ratings { since }) => match ratings_report(since).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("ratings: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -3877,6 +3925,22 @@ mod tests {
         let bad = talkgroup_list("SYSA/127\nAlpha Fire\n").unwrap_err();
         assert!(bad.contains("line 2"), "{bad}");
         assert!(talkgroup_list("# nothing\n").is_err());
+    }
+
+    #[test]
+    fn ratings_report_takes_a_day() {
+        assert_eq!(
+            parse(&["ratings", "report"]),
+            Some(Command::Ratings { since: None })
+        );
+        assert_eq!(
+            parse(&["ratings", "report", "--since", "2026-10-30"]),
+            Some(Command::Ratings {
+                since: chrono::NaiveDate::from_ymd_opt(2026, 10, 30)
+            })
+        );
+        assert_eq!(parse(&["ratings", "report", "--since", "today"]), None);
+        assert_eq!(parse(&["ratings"]), None);
     }
 
     #[test]

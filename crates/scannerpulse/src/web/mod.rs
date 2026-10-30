@@ -14,6 +14,7 @@ mod error;
 mod info;
 mod jobs;
 mod needs;
+mod rating;
 mod recorders;
 mod storage;
 
@@ -35,7 +36,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 
@@ -230,6 +231,8 @@ pub struct AppState {
     pub viewers: viewers::Open,
     /// Each address's transcript saves in its current minute.
     pub saves: edit::Saves,
+    /// Each address's star ratings in its current minute.
+    pub ratings: edit::Saves,
     /// The traffic report, with the time it was made and the time zone it
     /// was made for.
     pub traffic:
@@ -255,6 +258,7 @@ impl AppState {
             traffic: Arc::new(tokio::sync::Mutex::new(None)),
             storage_counts: Arc::new(tokio::sync::Mutex::new(None)),
             saves: edit::Saves::default(),
+            ratings: edit::Saves::default(),
             host: "web".to_string(),
             oidc_secret: None,
             http: reqwest::Client::builder()
@@ -284,6 +288,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/calls", get(calls::list))
         .route("/api/calls/{id}", get(info::call))
         .route("/api/calls/{id}/transcript", patch(edit::save))
+        .route(
+            "/api/calls/{id}/rating",
+            put(rating::put).delete(rating::clear),
+        )
         .route("/api/filters", get(info::filters))
         .route("/api/favorites", get(info::favorites))
         .route("/api/status", get(info::status))

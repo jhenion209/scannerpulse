@@ -133,3 +133,50 @@ async fn a_call_without_machine_text_and_an_empty_correction(pool: PgPool) -> sq
     assert!(!transcripts::correct(&mut conn, (call.0 + 1, call.1), "x", None).await?);
     Ok(())
 }
+
+async fn model(pool: &PgPool) -> Option<String> {
+    sqlx::query_scalar("SELECT model FROM transcripts")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn machine_models(pool: &PgPool) -> Vec<Option<String>> {
+    sqlx::query_scalar("SELECT machine_model FROM transcript_labels ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_edit_keeps_the_model_that_wrote_the_first_text(pool: PgPool) -> sqlx::Result<()> {
+    common::hold_lease(&pool, HOLDER).await;
+    let call = call(&pool).await;
+    let mut conn = pool.acquire().await?;
+    queue::write(&mut conn, HOLDER, call, "a.mp3", "Engine five", "model-x")
+        .await
+        .unwrap();
+
+    assert!(transcripts::correct(&mut conn, call, "Engine 5", None).await?);
+    assert_eq!(model(&pool).await.as_deref(), Some("model-x"));
+    assert_eq!(machine_models(&pool).await, [Some("model-x".to_string())]);
+
+    // A second edit still names the model of the first output.
+    assert!(transcripts::correct(&mut conn, call, "Engine 5, go", None).await?);
+    assert_eq!(model(&pool).await.as_deref(), Some("model-x"));
+    assert_eq!(
+        machine_models(&pool).await,
+        [Some("model-x".to_string()), Some("model-x".to_string())]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_edit_of_a_call_with_no_machine_text_has_no_model(pool: PgPool) -> sqlx::Result<()> {
+    let call = call(&pool).await;
+    let mut conn = pool.acquire().await?;
+    assert!(transcripts::correct(&mut conn, call, "Engine 5", None).await?);
+    assert_eq!(model(&pool).await, None);
+    assert_eq!(machine_models(&pool).await, [None]);
+    Ok(())
+}

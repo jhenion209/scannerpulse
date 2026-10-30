@@ -28,8 +28,8 @@ const ADDRESSES: usize = 10_000;
 /// Each address's saves in its current minute, on this host.
 pub type Saves = Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>;
 
-/// Counts a save for `address`; false when it is over the limit.
-fn allowed(saves: &Saves, address: IpAddr) -> bool {
+/// Counts a save for `address`; false when it is over `limit` this minute.
+pub(super) fn allowed(saves: &Saves, address: IpAddr, limit: u32) -> bool {
     let mut saves = saves
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -42,7 +42,22 @@ fn allowed(saves: &Saves, address: IpAddr) -> bool {
         *entry = (now, 0);
     }
     entry.1 += 1;
-    entry.1 <= SAVES_PER_MINUTE
+    entry.1 <= limit
+}
+
+/// Refuses with 503 while the site is under maintenance; `what` names the
+/// paused action.
+pub(super) async fn not_paused(state: &AppState, what: &str) -> Result<(), ApiError> {
+    let maintenance: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'maintenance.enabled'")
+            .fetch_optional(&state.pool)
+            .await?;
+    if maintenance.and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(ApiError::Unavailable(format!(
+            "the site is under maintenance: {what} is paused"
+        )));
+    }
+    Ok(())
 }
 
 /// Why a text cannot be saved, if it cannot: the frontend renders text, but
@@ -73,16 +88,8 @@ pub async fn save(
     MaybeAdmin(admin): MaybeAdmin,
     Json(body): Json<Edit>,
 ) -> Result<Json<Value>, ApiError> {
-    let maintenance: Option<Value> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'maintenance.enabled'")
-            .fetch_optional(&state.pool)
-            .await?;
-    if maintenance.and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err(ApiError::Unavailable(
-            "the site is under maintenance: saving is paused".into(),
-        ));
-    }
-    if !allowed(&state.saves, address) {
+    not_paused(&state, "saving").await?;
+    if !allowed(&state.saves, address, SAVES_PER_MINUTE) {
         return Err(ApiError::Limit(
             StatusCode::TOO_MANY_REQUESTS,
             format!("at most {SAVES_PER_MINUTE} saves a minute"),
