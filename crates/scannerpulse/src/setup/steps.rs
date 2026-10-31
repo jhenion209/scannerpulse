@@ -682,6 +682,7 @@ pub(super) fn database_sql(password: &str) -> String {
          SELECT format('CREATE ROLE {ACCOUNT} LOGIN PASSWORD %L', '{quoted}') \
          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ACCOUNT}') \\gexec\n\
          ALTER ROLE {ACCOUNT} PASSWORD '{quoted}';\n\
+         GRANT pg_read_all_stats TO {ACCOUNT};\n\
          SELECT 'CREATE DATABASE {DATABASE} OWNER {ACCOUNT} TEMPLATE template0 ENCODING ''UTF8'' \
          LC_COLLATE ''C.UTF-8'' LC_CTYPE ''C.UTF-8''' \
          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{DATABASE}') \\gexec\n"
@@ -2032,6 +2033,17 @@ mod tests {
             "SET log_statement = none;\nSET log_min_error_statement = panic;\n"
         );
         assert!(super::database_sql("pw").starts_with(super::QUIET_SQL));
+    }
+
+    #[test]
+    fn the_role_may_read_replication_statistics() {
+        // Without it `pg_stat_replication` hides the standby's state and lag from Status.
+        let sql = super::database_sql("pw");
+        let account = super::ACCOUNT;
+        assert!(
+            sql.contains(&format!("GRANT pg_read_all_stats TO {account};")),
+            "{sql}"
+        );
     }
 
     #[test]
