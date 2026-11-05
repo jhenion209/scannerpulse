@@ -220,6 +220,8 @@
     savePref('showAllRows', on);
   }
 
+  let pagerHeight = $state(0);
+
   function go(page: number) {
     if (page === view.paging.index) return;
     if (page < view.paging.cursors.length) void show(ask(), { ...view.paging, index: page }, false);
@@ -316,12 +318,12 @@
   <aside class="rail" id="filters" aria-label="Filters">
     <FilterRail bind:filters bind:paused choices={choices.filters} favorites={choices.favorites} />
   </aside>
-  <main class="list" id="calls" aria-label="Calls" aria-busy={view.loading} bind:this={listEl}>
+  <main class="list" id="calls" aria-label="Calls" aria-busy={view.loading} bind:this={listEl} style:--pager-height="{pagerHeight}px">
     <Pager index={view.paging.index} hasNext={view.paging.cursors.length > view.paging.index + 1}
       total={view.total} capped={view.capped} bind:size={() => prefs.pageSize, setSize}
       bind:showAll={() => prefs.showAllRows, setShowAll} {columns} customised={prefs.columns !== null}
       oncolumns={setColumns} onresetcolumns={resetColumns} ongo={go}
-      bind:selecting={() => selecting, setSelecting} chosenCount={chosen.length}>
+      bind:selecting={() => selecting, setSelecting} bind:height={pagerHeight} chosenCount={chosen.length}>
       {#snippet extra()}
         <ExportMenu calls={view.calls} {selecting} {chosen} {columns} zone={siteZone()} params={listParams}
           bind:printChosen />

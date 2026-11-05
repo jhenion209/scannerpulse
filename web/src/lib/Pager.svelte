@@ -13,6 +13,7 @@
     size = $bindable(),
     showAll = $bindable(),
     selecting = $bindable(false),
+    height = $bindable(0),
     chosenCount = 0,
     extra,
     columns,
@@ -28,6 +29,8 @@
     size: number;
     showAll: boolean;
     selecting?: boolean;
+    /** The bar's own height, for the header row that sticks beneath it. */
+    height?: number;
     chosenCount?: number;
     /** More controls for the bar (the Export menu). */
     extra?: Snippet;
@@ -52,7 +55,7 @@
   }
 </script>
 
-<nav class="pager" aria-label="Pages">
+<nav class="pager" aria-label="Pages" bind:offsetHeight={height}>
   <span class="total">
     {#if total !== null}{total.toLocaleString()}{capped ? '+' : ''} calls{/if}
   </span>
@@ -80,7 +83,7 @@
 </nav>
 
 <style>
-  .pager { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--line); }
+  .pager { position: sticky; top: 0; z-index: 2; background: var(--bg); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--line); }
   .total { margin-right: auto; color: var(--muted); }
   form, label { display: flex; gap: 0.35rem; align-items: center; margin: 0; }
   button, input, select {

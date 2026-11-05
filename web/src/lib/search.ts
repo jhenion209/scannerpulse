@@ -6,7 +6,7 @@ import { NO_FILTERS } from './filters';
 
 export interface SearchFields {
   text: string;
-  talkgroup: number | null;
+  talkgroups: number[];
   system: number | null;
   /** Local date-times from the date fields; empty means no bound. */
   from: string;
@@ -21,7 +21,7 @@ export function searchAsk(fields: SearchFields, zone: string): Ask {
   return {
     filters: {
       ...NO_FILTERS,
-      talkgroups: fields.talkgroup === null ? [] : [fields.talkgroup],
+      talkgroups: fields.talkgroups,
       system: fields.system,
       from: fields.from || null,
       to: fields.to || null,

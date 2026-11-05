@@ -11,7 +11,9 @@
   import { tell } from './notice.svelte';
   import { FIRST_PAGE, pageCount } from './paging';
   import { player } from './playing.svelte';
+  import TalkgroupPicker from './TalkgroupPicker.svelte';
   import { PAGE_SIZES } from './prefs';
+  import { afterEnd, afterFailure } from './playback';
   import { searchAsk, type SearchFields } from './search';
   import { siteZone } from './status.svelte';
 
@@ -33,13 +35,16 @@
 
   // The panel's own fields, pages and player, over its own list (`results`). It
   // never reads or changes the live list's filters.
-  const fields = $state<SearchFields>({ text: '', talkgroup: null, system: null, from: '', to: '', size: 25 });
+  const fields = $state<SearchFields>({ text: '', talkgroups: [], system: null, from: '', to: '', size: 25 });
   const COLUMNS: ColumnId[] = ['time', 'talkgroup', 'length', 'text'];
   const played = new SvelteSet<number>();
   let playing = $state<Call | null>(null);
   /** What the results on screen were asked with: pages and the Excel file follow it, not fields edited since. */
   let searched = $state.raw<Ask | null>(null);
   let exporting = $state(false);
+  /** One result after the next: the newer one above, as the live player does; stops at the page's edge. */
+  let continuous = $state(true);
+  const failedIds = new SvelteSet<number>();
 
   let dialog: HTMLDialogElement;
   let field: HTMLInputElement;
@@ -116,10 +121,18 @@
     playing = null;
     player.held = false;
   }
+  function ended() {
+    const next = playing ? afterEnd(results.view.calls, playing.id, continuous, failedIds) : null;
+    if (next) play(next);
+    else stop();
+  }
   function failed() {
-    if (!audio.error) return;
+    if (!audio.error || !playing) return;
     tell('That call could not be played.');
-    stop();
+    failedIds.add(playing.id);
+    const next = continuous ? afterFailure(results.view.calls, playing.id, 'newer', failedIds) : null;
+    if (next) play(next);
+    else stop();
   }
   // Starting the live player by hand during a hold stops the result.
   let taken = player.takenBack;
@@ -158,17 +171,7 @@
       Words
       <input type="search" bind:this={field} bind:value={fields.text} />
     </label>
-    <label>
-      Talkgroup
-      <select value={fields.talkgroup ?? ''} onchange={(e) => (fields.talkgroup = e.currentTarget.value ? Number(e.currentTarget.value) : null)}>
-        <option value="">Any talkgroup</option>
-        {#each choices.talkgroup_groups as group (group.system_id)}
-          <optgroup label={group.system}>
-            {#each group.talkgroups as talkgroup (talkgroup.id)}<option value={talkgroup.id}>{talkgroup.name}</option>{/each}
-          </optgroup>
-        {/each}
-      </select>
-    </label>
+    <div class="picker"><TalkgroupPicker bind:chosen={fields.talkgroups} {choices} /></div>
     <label>
       System
       <select value={fields.system ?? ''} onchange={(e) => (fields.system = e.currentTarget.value ? Number(e.currentTarget.value) : null)}>
@@ -209,7 +212,8 @@
 
   <div class="result-player">
     <audio bind:this={audio} controls preload="none" aria-label="Search result player"
-      onplay={() => (player.held = true)} onended={stop} onerror={failed}></audio>
+      onplay={() => (player.held = true)} onended={ended} onerror={failed}></audio>
+    <label class="continuous"><input type="checkbox" bind:checked={continuous} /> Continuous</label>
     <p class="now" aria-live="polite">
       {#if playing}<b>{playing.talkgroup_name ?? playing.talkgroup}</b> {callTime(playing.started_at, new Date(0), siteZone())}{:else}No result playing{/if}
     </p>
@@ -241,6 +245,9 @@
   form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; color: var(--muted); }
   form label input, form label select { color: var(--text); font-size: 1rem; }
   .words { flex: 1 1 14rem; }
+  .picker { flex: 1 1 16rem; min-width: 0; }
+  .continuous { display: flex; gap: 0.35rem; align-items: center; }
+  .continuous input { min-height: 0; }
   .go { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
   .hint { margin: 0; font-size: 0.85rem; color: var(--muted); }
   .summary, .pages { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
