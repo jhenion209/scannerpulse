@@ -27,5 +27,8 @@ jobs:
       # variability in constant-time operations; it comes through
       # jsonwebtoken's p256 and p384 0.13 (11.1.0 is the newest), which only
       # verify sign-in tokens with the identity provider's public keys:
-      # nothing secret is computed.
-      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381 --ignore RUSTSEC-2026-0387
+      # nothing secret is computed. RUSTSEC-2026-0459 (libsqlite3-sys 0.30.1,
+      # fixed in 0.39) is in the lock only as sqlx-sqlite's optional
+      # dependency: sqlx here enables postgres and not sqlite, so the crate
+      # is never compiled. A fix needs sqlx 0.9.
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0459
