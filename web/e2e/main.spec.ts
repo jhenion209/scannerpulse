@@ -7,6 +7,9 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 // holds markup.
 
 const rows = (page: Page) => page.locator('tbody tr');
+// The rail and the search panel both hold a talkgroup picker, and the player and the panel both have Continuous.
+const rail = (page: Page) => page.getByRole('complementary', { name: 'Filters' });
+const livePlayer = (page: Page) => page.locator('footer.player');
 const ids = (page: Page) => rows(page).evaluateAll((trs) => trs.map((tr) => Number((tr as HTMLElement).dataset.id)));
 const playingRow = (page: Page) => page.locator('tr.playing');
 
@@ -49,8 +52,8 @@ test('pages are read on the server, by size, by next and by number', async ({ pa
 
 test('a talkgroup filter is in the URL, and the link reproduces it', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Find a talkgroup').fill('ambul');
-  await page.getByRole('checkbox', { name: 'Valley Ambulance' }).check();
+  await rail(page).getByLabel('Find a talkgroup').fill('ambul');
+  await rail(page).getByRole('checkbox', { name: 'Valley Ambulance' }).check();
   await expect(rows(page)).toHaveCount(10);
   await expect(page.locator('td.tg')).toHaveCount(10);
   await expect(page.locator('td.tg').filter({ hasNotText: 'Valley Ambulance' })).toHaveCount(0);
@@ -58,7 +61,7 @@ test('a talkgroup filter is in the URL, and the link reproduces it', async ({ pa
   expect(url).toMatch(/talkgroups=\d+/);
   await page.goto(url);
   await expect(rows(page)).toHaveCount(10);
-  await expect(page.getByRole('checkbox', { name: 'Valley Ambulance' })).toBeChecked();
+  await expect(rail(page).getByRole('checkbox', { name: 'Valley Ambulance' })).toBeChecked();
 });
 
 test('a favorite asks for its talkgroups', async ({ page }) => {
@@ -81,7 +84,7 @@ test('text is shown as text, never as markup, and opens in full', async ({ page 
 test('the player steps with N and P, stops at the edges and passes over a call that fails', async ({ page }) => {
   await page.goto('/');
   // The calls are 2 s long: without continuous play none moves on by itself.
-  await page.getByLabel('Continuous').uncheck();
+  await livePlayer(page).getByLabel('Continuous').uncheck();
   // The rows are read only once the list is there.
   await expect(rows(page)).toHaveCount(30);
   const all = await ids(page);
@@ -99,7 +102,7 @@ test('the player steps with N and P, stops at the edges and passes over a call t
   await expect(playingRow(page)).toHaveAttribute('data-id', String(all[7]));
   await expect(rows(page).nth(6)).toHaveClass(/played/);
   // Keys typed into a field are the field's.
-  const field = page.getByLabel('Find a talkgroup');
+  const field = rail(page).getByLabel('Find a talkgroup');
   await field.focus();
   // One key at a time: N then P would step away and back to the same row.
   await field.pressSequentially('n');
@@ -144,9 +147,9 @@ for (const theme of ['light', 'dark']) {
 test('on a phone the filters open from the Filters button', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await page.goto('/');
-  await expect(page.getByLabel('Find a talkgroup')).toBeHidden();
+  await expect(rail(page).getByLabel('Find a talkgroup')).toBeHidden();
   await page.getByRole('button', { name: 'Filters' }).click();
-  await expect(page.getByLabel('Find a talkgroup')).toBeVisible();
+  await expect(rail(page).getByLabel('Find a talkgroup')).toBeVisible();
 });
 
 test('the page number is in the URL, and the link opens that page', async ({ page }) => {
@@ -651,7 +654,7 @@ test('a link with words opens the panel and searches them', async ({ page }) => 
 test('a result holds the live player, which goes on when the result ends', async ({ page }) => {
   await page.goto('/');
   await expect(rows(page)).toHaveCount(30);
-  await page.getByLabel('Continuous').uncheck();
+  await livePlayer(page).getByLabel('Continuous').uncheck();
   const live = page.locator('footer.player audio');
   const result = page.locator('dialog.panel audio');
   const paused = (audio: typeof live) => audio.evaluate((a: HTMLAudioElement) => a.paused);
@@ -743,7 +746,7 @@ test('a page turn and the Excel file use the search on screen, not fields edited
   await panel(page).getByLabel('Rows').selectOption('10');
   await expect(panelRows(page)).toHaveCount(10);
   // Fields changed without pressing Search.
-  await panel(page).getByLabel('Talkgroup').selectOption({ index: 1 });
+  await panel(page).getByRole('group', { name: 'Talkgroups' }).getByRole('checkbox').first().check();
   await panel(page).getByLabel('From', { exact: true }).fill('2031-07-01T08:00');
   const turn = page.waitForRequest((request) => request.url().includes('/api/calls?') && request.url().includes('after='));
   await panel(page).getByRole('button', { name: 'Next' }).click();

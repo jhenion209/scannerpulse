@@ -60,5 +60,5 @@ test("the systems' order is set by moving them, and the talkgroup list follows i
   await expect(page.getByText('Saved. The talkgroup list shows the systems in this order.')).toBeVisible();
   await expect(field(page, 'web.system_order').locator('input')).toHaveValue('["Valley","Metro"]');
   await page.goto('/');
-  await expect(page.locator('.groups .group .system')).toHaveText(['Valley', 'Metro']);
+  await expect(page.getByRole('complementary', { name: 'Filters' }).locator('.groups .group .system')).toHaveText(['Valley', 'Metro']);
 });
