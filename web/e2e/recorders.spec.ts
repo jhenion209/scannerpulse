@@ -20,7 +20,7 @@ test('a recorder is added taken in when asked, brought in, and removed', async (
   await signIn(page, '#recorders');
   await expect(page.getByRole('heading', { name: 'Recorders', level: 1 })).toBeVisible();
   await expect(card(page, 'live').getByText('Watched')).toBeVisible();
-  await page.getByLabel('Name').fill(name);
+  await page.getByLabel('Name', { exact: true }).fill(name);
   await page.getByLabel('Folder').fill('/tmp');
   await page.getByRole('radio', { name: 'only when asked' }).check();
   await page.getByRole('button', { name: 'Add the recorder' }).click();
@@ -37,7 +37,7 @@ test('a recorder is added taken in when asked, brought in, and removed', async (
 
 test("a folder that cannot be used is refused in the server's words, and nothing is added", async ({ page }) => {
   await signIn(page, '#recorders');
-  await page.getByLabel('Name').fill(unique('west'));
+  await page.getByLabel('Name', { exact: true }).fill(unique('west'));
   await page.getByLabel('Folder').fill('/no/such/folder');
   await page.getByRole('button', { name: 'Add the recorder' }).click();
   await expect(page.getByRole('alert')).toHaveText(

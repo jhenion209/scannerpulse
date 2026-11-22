@@ -212,7 +212,7 @@ test('an older archive is reviewed first, then imported with the offset the revi
   expect(scan.violations).toEqual([]);
   await page.getByRole('button', { name: 'Import up to about 852 calls into Old' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Job 42 imports /srv/old as Old, its times moved by +01:00' })).toBeVisible();
-  expect(started).toEqual([{ name: 'Old', folder: '/srv/old', offset: '+01:00' }]);
+  expect(started).toEqual([{ name: 'Old', folder: '/srv/old', offset: '+01:00', name_time: 'start' }]);
 });
 
 test("an import's card says it is read-only, and it is consolidated once counted, move typed and confirmed", async ({ page }) => {
