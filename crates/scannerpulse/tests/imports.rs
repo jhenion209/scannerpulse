@@ -8,6 +8,7 @@ use common::seed_places;
 use id3::TagLike;
 use scannerpulse::jobs::JobError;
 use scannerpulse::recorders::{self, Refused};
+use scannerpulse::reader::NameTime;
 use scannerpulse::store;
 use scannerpulse::{consolidate, imports};
 use sqlx::PgPool;
@@ -339,7 +340,7 @@ async fn an_import_files_its_new_calls_where_they_are(pool: PgPool) {
     let old = older_archive();
     let before = snapshot(old.path());
     let mut conn = pool.acquire().await.unwrap();
-    let (job, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (job, started) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     assert!(!started.again);
@@ -433,7 +434,7 @@ async fn an_import_run_again_takes_only_the_files_it_has_not(pool: PgPool) {
     site(&pool).await;
     let old = older_archive();
     let mut conn = pool.acquire().await.unwrap();
-    imports::start(&mut conn, "Old", old.path(), None, "admin")
+    imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -446,7 +447,7 @@ async fn an_import_run_again_takes_only_the_files_it_has_not(pool: PgPool) {
     scannerpulse::names::new_system(&mut conn, "County")
         .await
         .unwrap();
-    let (job, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (job, started) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     assert!(started.again);
@@ -473,16 +474,16 @@ async fn an_import_run_again_takes_only_the_files_it_has_not(pool: PgPool) {
         ]
     );
     // It keeps its folder and its offset.
-    let why = refusal(imports::start(&mut conn, "Old", old.path(), Some(60), "admin").await);
+    let why = refusal(imports::start(&mut conn, "Old", old.path(), Some(60), None, "admin").await);
     assert!(
         why.contains("Old was imported with the offset +00:00"),
         "{why}"
     );
     let other = tempfile::tempdir().unwrap();
-    let why = refusal(imports::start(&mut conn, "Old", other.path(), None, "admin").await);
+    let why = refusal(imports::start(&mut conn, "Old", other.path(), None, None, "admin").await);
     assert!(why.contains("Old is the import of"), "{why}");
     // A name another location or a recorder has is refused.
-    let why = refusal(imports::start(&mut conn, "live", other.path(), None, "admin").await);
+    let why = refusal(imports::start(&mut conn, "live", other.path(), None, None, "admin").await);
     assert!(why.contains("live"), "{why}");
 }
 
@@ -515,7 +516,7 @@ async fn an_import_keeps_the_longer_copy_then_the_first_arrived(pool: PgPool) {
     put("20190301_150001_b.mp3", 4, 10805);
     put("20190301_160000_a.mp3", 4, 14404);
     let mut conn = pool.acquire().await.unwrap();
-    let (_, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (_, started) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -529,7 +530,7 @@ async fn an_import_keeps_the_longer_copy_then_the_first_arrived(pool: PgPool) {
     put("20190301_150000_a.mp3", 4, 10804);
     put("20190301_160001_b.mp3", 6, 14405);
     let before = snapshot(old.path());
-    let (job, _) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (job, _) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -606,7 +607,7 @@ async fn an_imports_offset_and_its_purge_date_its_files(pool: PgPool) {
     write("20190301_130000_b.mp3");
     write("20190302_090000_h.mp3");
     let mut conn = pool.acquire().await.unwrap();
-    let (_, started) = imports::start(&mut conn, "Old", old.path(), Some(60), "admin")
+    let (_, started) = imports::start(&mut conn, "Old", old.path(), Some(60), None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -633,7 +634,7 @@ async fn an_imports_offset_and_its_purge_date_its_files(pool: PgPool) {
     // day, and takes one from after it.
     write("20190301_200000_i.mp3");
     write("20190303_090000_j.mp3");
-    let (job, _) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (job, _) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -660,7 +661,7 @@ async fn a_consolidation_copies_an_imports_calls_into_the_archive(pool: PgPool) 
     let (archive, places) = site(&pool).await;
     let old = older_archive();
     let mut conn = pool.acquire().await.unwrap();
-    let (_, started) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (_, started) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -724,7 +725,7 @@ async fn a_consolidation_copies_an_imports_calls_into_the_archive(pool: PgPool) 
             .unwrap();
     assert_eq!(linked, None);
     // Imported again, it takes nothing it took before.
-    let (job, again) = imports::start(&mut conn, "Old", old.path(), None, "admin")
+    let (job, again) = imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     assert!(again.again);
@@ -742,7 +743,7 @@ async fn an_imports_files_are_listed_where_no_filer_takes_them(pool: PgPool) {
     site(&pool).await;
     let old = older_archive();
     let mut conn = pool.acquire().await.unwrap();
-    imports::start(&mut conn, "Old", old.path(), None, "admin")
+    imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     // The first step lists the folder.
@@ -770,7 +771,7 @@ async fn a_talkgroup_with_imported_calls_is_corrected_all_the_same(pool: PgPool)
     )
     .unwrap();
     let mut conn = pool.acquire().await.unwrap();
-    imports::start(&mut conn, "Old", old.path(), None, "admin")
+    imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -801,7 +802,7 @@ async fn a_review_counts_the_files_whose_system_was_named_since(pool: PgPool) {
     site(&pool).await;
     let old = older_archive();
     let mut conn = pool.acquire().await.unwrap();
-    imports::start(&mut conn, "Old", old.path(), None, "admin")
+    imports::start(&mut conn, "Old", old.path(), None, None, "admin")
         .await
         .unwrap();
     run_jobs(&pool).await;
@@ -819,4 +820,27 @@ async fn a_review_counts_the_files_whose_system_was_named_since(pool: PgPool) {
         (review.taken, review.left, review.read, review.new),
         (4, 1, 1, 1)
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_end_named_import_starts_its_calls_at_name_plus_offset_less_length(pool: PgPool) {
+    let (_archive, _places) = site(&pool).await;
+    let old = older_archive();
+    let mut conn = pool.acquire().await.unwrap();
+    let (_, started) = imports::start(&mut conn, "Old", old.path(), Some(60), Some(NameTime::End), "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let b: DateTime<Utc> = sqlx::query_scalar("SELECT started_at FROM calls WHERE location_id = $1 AND rel_path LIKE '%_b.mp3'")
+        .bind(started.location)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // 13:00 in the name, moved 60 minutes, less its 3,996 ms.
+    assert_eq!(b, at(14, 0) - chrono::Duration::milliseconds(3996));
+    let kept: String = sqlx::query_scalar("SELECT name_time FROM sources WHERE name = 'Old'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, "end");
 }

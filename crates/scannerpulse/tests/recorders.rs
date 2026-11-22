@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Duration, Utc};
 use common::seed_places;
+use scannerpulse::reader::NameTime;
 use scannerpulse::recorders::{self, Change, Refused, State};
+use scannerpulse::store;
 use sqlx::PgPool;
 
 /// A check that accepts any folder as it is written.
@@ -251,6 +253,8 @@ fn changes_are_named_as_the_command_line_and_the_page_name_them() {
         ("pause", Change::Pause),
         ("bring-in", Change::BringIn),
         ("remove", Change::Remove),
+        ("start-names", Change::NameTime(NameTime::Start)),
+        ("end-names", Change::NameTime(NameTime::End)),
     ] {
         assert_eq!(word.parse::<Change>(), Ok(change));
     }
@@ -286,4 +290,22 @@ fn root_checks_a_folder_as_the_service_account_and_says_why_it_fails() {
         why.contains("no-such-account account cannot list or write") || why.contains("runuser"),
         "{why}"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorders_time_in_file_names_is_set_listed_and_read_with_its_files(pool: PgPool) {
+    let (_, live) = seed_places(&pool, Path::new("/srv/archive"), Path::new("/srv/in/live")).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let listed = recorders::list(&mut conn, Utc::now()).await.unwrap();
+    assert_eq!(listed[0].name_time, NameTime::Start, "start by default");
+    store::upsert_seen(&pool, live, &[store::Seen { rel_path: "20261122_132244_a.mp3".into(), size: 10, file_mtime: Utc::now() }])
+        .await
+        .unwrap();
+    recorders::change(&mut conn, live, Change::NameTime(NameTime::End)).await.unwrap();
+    let listed = recorders::list(&mut conn, Utc::now()).await.unwrap();
+    assert_eq!(listed[0].name_time, NameTime::End);
+    let waiting = store::waiting(&pool, 10, &[]).await.unwrap();
+    assert_eq!(waiting[0].name_time, NameTime::End, "a file waiting when it changed is read with the new setting");
+    recorders::change(&mut conn, live, Change::NameTime(NameTime::Start)).await.unwrap();
+    assert_eq!(recorders::list(&mut conn, Utc::now()).await.unwrap()[0].name_time, NameTime::Start);
 }

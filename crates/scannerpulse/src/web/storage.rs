@@ -383,6 +383,9 @@ pub struct ImportStart {
     pub folder: String,
     /// `±HH:MM`; none: the offset the import keeps, or none at all.
     pub offset: Option<String>,
+    /// `start` or `end`: which time its file names give; none: what the
+    /// import keeps, or start.
+    pub name_time: Option<String>,
 }
 
 /// `POST /api/admin/storage/import`: starts importing an older archive where
@@ -399,12 +402,20 @@ pub async fn import_start(
         .map(crate::imports::parse_offset)
         .transpose()
         .map_err(ApiError::BadRequest)?;
+    let name_time = body
+        .name_time
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::parse::<crate::reader::NameTime>)
+        .transpose()
+        .map_err(ApiError::BadRequest)?;
     let mut conn = state.pool.acquire().await?;
     let (job, started) = crate::imports::start(
         &mut conn,
         &body.name,
         &PathBuf::from(&body.folder),
         offset,
+        name_time,
         &admin.0.login,
     )
     .await
@@ -414,10 +425,11 @@ pub async fn import_start(
         .record(
             &state,
             format!(
-                "started job {job}: import {} as {} (offset {})",
+                "started job {job}: import {} as {} (offset {}, file names give the {})",
                 body.folder,
                 body.name,
-                crate::imports::offset_text(started.offset)
+                crate::imports::offset_text(started.offset),
+                started.name_time.as_str()
             ),
         )
         .await;

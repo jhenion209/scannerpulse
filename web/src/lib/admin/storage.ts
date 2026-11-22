@@ -185,6 +185,8 @@ export interface Review {
   new_at: number[];
   suggested: number | null;
   kept_offset: number | null;
+  /** Which time its file names give, when it ran before (start otherwise). An older server sends none. */
+  kept_name_time?: 'start' | 'end';
   done: boolean;
 }
 
@@ -287,6 +289,8 @@ export interface ImportStarted {
   location: number;
   source: number;
   offset: number;
+  /** Which time its file names give. An older server sends none. */
+  name_time?: 'start' | 'end';
   again: boolean;
 }
 
