@@ -427,3 +427,84 @@ async fn machines_no_longer_in_the_install_are_forgotten(pool: PgPool) {
         .unwrap();
     assert_eq!(left, ["192.0.2.9", "web-a"]);
 }
+
+/// 30 filed calls of `source`, 1 s to 15.5 s long, each seen `seen_after`
+/// (its length in ms) after its name's time.
+async fn spread(pool: &PgPool, source: i16, seen_after: impl Fn(i64) -> i64) {
+    for i in 0..30i64 {
+        let length = 1_000 + i * 500;
+        let seen = ago((i + 1) * 60);
+        filed(
+            pool,
+            source,
+            seen - Duration::milliseconds(seen_after(length)),
+            length as i32,
+            seen,
+        )
+        .await;
+    }
+}
+
+async fn names_end(pool: &PgPool, source: i16) {
+    sqlx::query("UPDATE sources SET name_time = 'end' WHERE id = $1")
+        .bind(source)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_naming_files_at_their_end_is_told_to_say_so(pool: PgPool) {
+    let sdrtrunk = recorder(&pool, "sdrtrunk").await;
+    // Each file is seen 2.3 s after its name, however long its call.
+    spread(&pool, sdrtrunk, |_| 2_300).await;
+    assert_eq!(
+        recorder_warnings(&pool).await,
+        [
+            "sdrtrunk: its file names look like end times (SDRTrunk 0.6.1 names them so): set Time in file names to End on its page"
+        ]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_set_to_end_whose_names_give_the_start_is_told(pool: PgPool) {
+    let rust = recorder(&pool, "rust").await;
+    names_end(&pool, rust).await;
+    // Read as ends, its starts come a length early: seen two lengths after.
+    spread(&pool, rust, |length| 2 * length + 2_300).await;
+    assert_eq!(
+        recorder_warnings(&pool).await,
+        ["rust: its file names look like start times: set Time in file names to Start on its page"]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_recorder_named_as_set_is_not_told(pool: PgPool) {
+    let (start, end) = (recorder(&pool, "start").await, recorder(&pool, "end").await);
+    names_end(&pool, end).await;
+    spread(&pool, start, |length| length + 2_300).await;
+    spread(&pool, end, |length| length + 2_300).await;
+    assert_eq!(recorder_warnings(&pool).await, Vec::<String>::new());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn calls_of_one_length_tell_nothing_of_names(pool: PgPool) {
+    let same = recorder(&pool, "same").await;
+    for minute in 1..=30 {
+        let seen = ago(minute * 60);
+        filed(
+            &pool,
+            same,
+            seen - Duration::milliseconds(2_300),
+            3_000,
+            seen,
+        )
+        .await;
+    }
+    assert_eq!(
+        recorder_warnings(&pool).await,
+        [
+            "same: its clock is 2.7 s ahead of the database's: its files are seen before their calls end"
+        ]
+    );
+}

@@ -30,6 +30,12 @@ pub const LATE_MS: i64 = 60_000;
 /// The files of a recorder measured: its newest of the last day.
 const SAMPLE: i64 = 200;
 
+/// The time its names give is told from this many files at least, of
+/// lengths this spread (standard deviation, ms), by a slope this steep.
+const NAMES_FEWEST: i64 = 20;
+const NAMES_SPREAD_MS: f64 = 1_000.0;
+const NAMES_SLOPE: f64 = 0.5;
+
 /// Fewer files or copies than this tell nothing.
 const FEWEST: i64 = 5;
 
@@ -372,12 +378,23 @@ pub async fn machine_warnings(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec
 /// recorder is named too when its copies of other recorders' calls are
 /// named [`LIMIT_MS`] or more apart from them (the median, both ways),
 /// enough to keep one short call as two.
+/// A recorder's name, the low tail of its files' delays, the slope of
+/// those delays against the calls' lengths, the lengths' spread, and how
+/// many files were measured (ms throughout).
+type RecorderSample = (String, Option<f64>, Option<f64>, Option<f64>, i64);
+
 pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<Warning>> {
-    let recorders: Vec<(String, Option<f64>)> = sqlx::query_as(
+    // The slope of the delay against the call's length tells the time a
+    // recorder's names give: none when it is read as it names, -1 when its
+    // names give the end but are read as starts, +1 the other way round.
+    let recorders: Vec<RecorderSample> = sqlx::query_as(
         "SELECT s.name, \
                 CASE WHEN count(*) >= $2 THEN percentile_cont($4) WITHIN GROUP \
                     (ORDER BY extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000 \
-                              - c.duration_ms - $3) END \
+                              - c.duration_ms - $3) END, \
+                regr_slope(extract(epoch FROM f.first_seen - f.named_at)::float8 * 1000 - c.duration_ms, \
+                           c.duration_ms::float8), \
+                stddev_samp(c.duration_ms::float8), count(*) \
          FROM sources s \
          CROSS JOIN LATERAL ( \
              SELECT f.first_seen, f.named_at, f.call_id, f.call_started_at \
@@ -398,7 +415,25 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
     .fetch_all(&mut *db)
     .await?;
     let mut warnings = Vec::new();
-    for (name, delay) in recorders {
+    for (name, delay, slope, spread, files) in recorders {
+        let telling = files >= NAMES_FEWEST && spread.is_some_and(|sd| sd >= NAMES_SPREAD_MS);
+        let named_as = match slope {
+            Some(slope) if telling && slope < -NAMES_SLOPE => Some(
+                "its file names look like end times (SDRTrunk 0.6.1 names them so): set Time in file names to End on its page",
+            ),
+            Some(slope) if telling && slope > NAMES_SLOPE => Some(
+                "its file names look like start times: set Time in file names to Start on its page",
+            ),
+            _ => None,
+        };
+        if let Some(text) = named_as {
+            // The names, not the clock, put its files out of time.
+            warnings.push(Warning {
+                subject: name,
+                text: text.to_string(),
+            });
+            continue;
+        }
         let text = match delay.map(|ms| ms.round() as i64) {
             Some(ms) if ms < -LIMIT_MS => format!(
                 "its clock is {} ahead of the database's: its files are seen before their calls end",

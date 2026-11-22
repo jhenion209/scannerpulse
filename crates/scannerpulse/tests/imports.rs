@@ -7,8 +7,8 @@ use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use common::seed_places;
 use id3::TagLike;
 use scannerpulse::jobs::JobError;
-use scannerpulse::recorders::{self, Refused};
 use scannerpulse::reader::NameTime;
+use scannerpulse::recorders::{self, Refused};
 use scannerpulse::store;
 use scannerpulse::{consolidate, imports};
 use sqlx::PgPool;
@@ -827,15 +827,24 @@ async fn an_end_named_import_starts_its_calls_at_name_plus_offset_less_length(po
     let (_archive, _places) = site(&pool).await;
     let old = older_archive();
     let mut conn = pool.acquire().await.unwrap();
-    let (_, started) = imports::start(&mut conn, "Old", old.path(), Some(60), Some(NameTime::End), "admin")
-        .await
-        .unwrap();
+    let (_, started) = imports::start(
+        &mut conn,
+        "Old",
+        old.path(),
+        Some(60),
+        Some(NameTime::End),
+        "admin",
+    )
+    .await
+    .unwrap();
     run_jobs(&pool).await;
-    let b: DateTime<Utc> = sqlx::query_scalar("SELECT started_at FROM calls WHERE location_id = $1 AND rel_path LIKE '%_b.mp3'")
-        .bind(started.location)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let b: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT started_at FROM calls WHERE location_id = $1 AND rel_path LIKE '%_b.mp3'",
+    )
+    .bind(started.location)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     // 13:00 in the name, moved 60 minutes, less its 3,996 ms.
     assert_eq!(b, at(14, 0) - chrono::Duration::milliseconds(3996));
     let kept: String = sqlx::query_scalar("SELECT name_time FROM sources WHERE name = 'Old'")

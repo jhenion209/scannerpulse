@@ -326,9 +326,14 @@ async fn read_call(
     limit: Duration,
 ) -> io::Result<Result<(FileCall, i64), String>> {
     let path = root.join(rel_path);
-    match bounded(limit, move || Ok(reader::read_path(&path, zone, reader::NameTime::Start))).await? {
+    match bounded(limit, move || {
+        Ok(reader::read_path(&path, zone, reader::NameTime::Start))
+    })
+    .await?
+    {
         Ok((mut call, data)) => {
-            call.started_at = name_time.start(started_at(call.local_start, offset, zone), call.duration_ms);
+            call.started_at =
+                name_time.start(started_at(call.local_start, offset, zone), call.duration_ms);
             Ok(Ok((call, data.len() as i64)))
         }
         Err(ReadError::Rejected(why)) => Ok(Err(why)),
@@ -1303,24 +1308,32 @@ pub(crate) async fn import_step(
         store::ensure_partition(pool, noon.and_utc()).await?;
     }
     for row in &batch {
-        let (call, size) =
-            match read_call(&root, &row.rel_path, place.offset_minutes, place.name_time, zone, limit).await {
-                Ok(Ok(read)) => read,
-                Ok(Err(why)) => {
-                    store::reject(&mut *conn, row.id, &why).await?;
-                    work.rejected += 1;
-                    work.after = row.id;
-                    continue;
-                }
-                Err(error) => {
-                    unchanged(std::slice::from_ref(&root), &before, limit).await?;
-                    return Ok(hung(
-                        &format!("{} {error}", root.display()),
-                        &work,
-                        &params.name,
-                    ));
-                }
-            };
+        let (call, size) = match read_call(
+            &root,
+            &row.rel_path,
+            place.offset_minutes,
+            place.name_time,
+            zone,
+            limit,
+        )
+        .await
+        {
+            Ok(Ok(read)) => read,
+            Ok(Err(why)) => {
+                store::reject(&mut *conn, row.id, &why).await?;
+                work.rejected += 1;
+                work.after = row.id;
+                continue;
+            }
+            Err(error) => {
+                unchanged(std::slice::from_ref(&root), &before, limit).await?;
+                return Ok(hung(
+                    &format!("{} {error}", root.display()),
+                    &work,
+                    &params.name,
+                ));
+            }
+        };
         match classify(conn, &call, place.purged_before, zone).await? {
             Class::BeforePurge(day) => {
                 let why = format!("from before {day}, before which {} was purged", params.name);
