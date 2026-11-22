@@ -170,6 +170,7 @@ fn sample() -> reader::FileCall {
         &common::frames(28),
         Utc::now(),
         chrono_tz::UTC,
+        reader::NameTime::Start,
     )
     .unwrap()
 }

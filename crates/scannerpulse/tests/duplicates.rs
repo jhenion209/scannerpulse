@@ -172,7 +172,7 @@ impl Site {
 
     /// The call south's file at `path` is a copy of.
     async fn same_call(&self, path: &std::path::Path) -> (reader::FileCall, store::SameCall) {
-        let (call, _) = reader::read_path(path, ZONE).unwrap();
+        let (call, _) = reader::read_path(path, ZONE, reader::NameTime::Start).unwrap();
         let talkgroup = store::talkgroup_of(&self.pool, "SYSB", 215)
             .await
             .unwrap()
@@ -313,7 +313,7 @@ async fn a_longer_copy_replaces_the_recording_and_the_call_keeps_its_id_and_star
     );
     assert_eq!(fs::read(site.root.path().join(&rel)).unwrap(), copy.1);
     // The archive still describes the call: its file gives the call's start.
-    let (read, _) = reader::read_path(&site.root.path().join(&rel), ZONE).unwrap();
+    let (read, _) = reader::read_path(&site.root.path().join(&rel), ZONE, reader::NameTime::Start).unwrap();
     assert_eq!(read.started_at, started_at);
     let leftovers: i64 = sqlx::query_scalar("SELECT count(*) FROM archive_leftovers")
         .fetch_one(&site.pool)

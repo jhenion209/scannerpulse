@@ -99,9 +99,53 @@ pub(crate) static COMMENT_SYSTEM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"System:([^;]+)").unwrap());
 static COMMENT_SITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Site:([^;]+)").unwrap());
 
-/// Reads the file at `path`. Its name gives the start time in `zone`.
+/// Which time a recorder writes in its file names: when the call started,
+/// or when it ended (SDRTrunk 0.6.1 names a file as the call ends).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NameTime {
+    #[default]
+    Start,
+    End,
+}
+
+impl NameTime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NameTime::Start => "start",
+            NameTime::End => "end",
+        }
+    }
+
+    /// The call's start, from the instant its name gives and its length.
+    pub fn start(self, named: DateTime<Utc>, duration_ms: i32) -> DateTime<Utc> {
+        match self {
+            NameTime::Start => named,
+            NameTime::End => named - chrono::Duration::milliseconds(i64::from(duration_ms)),
+        }
+    }
+}
+
+impl TryFrom<String> for NameTime {
+    type Error = String;
+    fn try_from(s: String) -> Result<NameTime, String> { s.parse() }
+}
+
+impl std::str::FromStr for NameTime {
+    type Err = String;
+    fn from_str(s: &str) -> Result<NameTime, String> {
+        match s {
+            "start" => Ok(NameTime::Start),
+            "end" => Ok(NameTime::End),
+            _ => Err(format!("{s:?} is not start or end")),
+        }
+    }
+}
+
+/// Reads the file at `path`. Its name gives the start time in `zone`, or the
+/// end time for a recorder whose names give it (`name_time`).
 /// Returns the call and the file's bytes.
-pub fn read_path(path: &Path, zone: Tz) -> Result<(FileCall, Vec<u8>), ReadError> {
+pub fn read_path(path: &Path, zone: Tz, name_time: NameTime) -> Result<(FileCall, Vec<u8>), ReadError> {
     let meta = std::fs::metadata(path).map_err(ReadError::Io)?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(ReadError::Rejected(format!(
@@ -120,29 +164,34 @@ pub fn read_path(path: &Path, zone: Tz) -> Result<(FileCall, Vec<u8>), ReadError
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    let call = read_bytes(name, &data, mtime, zone).map_err(ReadError::Rejected)?;
+    let call = read_bytes(name, &data, mtime, zone, name_time).map_err(ReadError::Rejected)?;
     Ok((call, data))
 }
 
 /// The call in a file's bytes. `name` is the file's name, `file_mtime` its
-/// modification time. Err gives the reason the file cannot be filed.
+/// modification time, `name_time` which time the name gives. Err gives the
+/// reason the file cannot be filed.
 pub fn read_bytes(
     name: &str,
     data: &[u8],
     file_mtime: DateTime<Utc>,
     zone: Tz,
+    name_time: NameTime,
 ) -> Result<FileCall, String> {
     let local_start =
         start_time(name).ok_or("the file name holds no date and time (YYYYMMDD_HHMMSS)")?;
     let stream = mp3::stream(data).ok_or("the file holds no MPEG audio frame")?;
     let described = describe(name, &tags(data));
-    let (started_at, time_how) =
+    // The repeated autumn hour is settled on the name's own time (the file is
+    // written near it either way); the call's length comes off after.
+    let (named, time_how) =
         localtime::to_instant(local_start, Some(file_mtime.timestamp()), zone);
+    let duration_ms = i32::try_from(stream.duration_ms).unwrap_or(i32::MAX);
     Ok(FileCall {
         local_start,
-        started_at,
+        started_at: name_time.start(named, duration_ms),
         time_how,
-        duration_ms: i32::try_from(stream.duration_ms).unwrap_or(i32::MAX),
+        duration_ms,
         file_mtime,
         described,
     })
