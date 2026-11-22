@@ -54,7 +54,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse rescan
        scannerpulse recorder list
        scannerpulse recorder add NAME FOLDER [--when-asked]
-       scannerpulse recorder watch|ask|pause|bring-in|remove NAME
+       scannerpulse recorder watch|ask|pause|bring-in|remove|start-names|end-names NAME
        scannerpulse recorder preview NAME
        scannerpulse names list
        scannerpulse names approve|dismiss SYSTEM/NUMBER NAME
@@ -67,7 +67,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse storage remove NAME
        scannerpulse storage move FROM TO LOCATION [--confirm move]
        scannerpulse storage purge-before DAY [--confirm DAY]
-       scannerpulse storage import NAME FOLDER [--review | --offset ±HH:MM]
+       scannerpulse storage import NAME FOLDER [--review | --offset ±HH:MM] [--names start|end]
        scannerpulse storage consolidate NAME [--confirm move]
        scannerpulse talkgroups
        scannerpulse talkgroup transcribe SYSTEM/NUMBER on|off
@@ -480,6 +480,8 @@ enum StorageCommand {
         folder: PathBuf,
         review: bool,
         offset: Option<i32>,
+        /// `--names end`: the file names give the calls' ends (SDRTrunk 0.6.1).
+        name_time: Option<scannerpulse::reader::NameTime>,
     },
     Consolidate {
         name: String,
@@ -827,7 +829,7 @@ fn parse(args: &[&str]) -> Option<Command> {
             }))
         }
         ["storage", "import", name, folder, rest @ ..] => {
-            let found = flags(rest, &[], &["--offset"], &["--review"])?;
+            let found = flags(rest, &[], &["--offset", "--names"], &["--review"])?;
             let review = found.contains_key("--review");
             let offset = match found.get("--offset") {
                 // The review counts the copies at every offset itself.
@@ -835,11 +837,17 @@ fn parse(args: &[&str]) -> Option<Command> {
                 Some(text) => Some(scannerpulse::imports::parse_offset(text).ok()?),
                 None => None,
             };
+            let name_time = match found.get("--names") {
+                Some(_) if review => return None,
+                Some(text) => Some(text.parse().ok()?),
+                None => None,
+            };
             Some(Command::Storage(StorageCommand::Import {
                 name: name.to_string(),
                 folder: PathBuf::from(folder),
                 review,
                 offset,
+                name_time,
             }))
         }
         ["storage", "consolidate", name, rest @ ..] => {
@@ -2133,9 +2141,10 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                         .to_string()
                 });
                 println!(
-                    "{}\t{state}\t{}\tlast file {last}\ttoday {} filed, {} rejected, {} duplicates removed, {} staged, {} waiting",
+                    "{}\t{state}\t{}\tnames give {}\tlast file {last}\ttoday {} filed, {} rejected, {} duplicates removed, {} staged, {} waiting",
                     r.name,
                     r.folder,
+                    r.name_time.as_str(),
                     r.filed_today,
                     r.rejected_today,
                     r.duplicates_today,
@@ -2191,6 +2200,10 @@ async fn recorder_command(command: RecorderCommand) -> CommandResult {
                     ),
                     recorders::Change::Remove => format!(
                         "{name} is removed: its files stay in its folder, its calls stay in the archive"
+                    ),
+                    recorders::Change::NameTime(name_time) => format!(
+                        "{name}'s file names are read as the calls' {}s: files filed from now on start so; calls filed before keep their times",
+                        name_time.as_str()
                     ),
                 }
             );
@@ -2631,11 +2644,12 @@ async fn storage_command(command: StorageCommand) -> CommandResult {
             name,
             folder,
             offset,
+            name_time,
             ..
         } => {
             use scannerpulse::imports;
             let (job, started) =
-                imports::start(&mut conn, &name, &folder, offset, &command_line_user()).await?;
+                imports::start(&mut conn, &name, &folder, offset, name_time, &command_line_user()).await?;
             println!(
                 "job {job} is started: import {} as {name}{}, its times moved by {}; `scannerpulse jobs show {job}` follows it",
                 folder.display(),
@@ -4222,6 +4236,7 @@ mod tests {
                 folder: PathBuf::from("/srv/old"),
                 review: true,
                 offset: None,
+                name_time: None,
             }))
         );
         assert_eq!(
@@ -4231,8 +4246,20 @@ mod tests {
                 folder: PathBuf::from("/srv/old"),
                 review: false,
                 offset: Some(-60),
+                name_time: None,
             }))
         );
+        assert_eq!(
+            parse(&["storage", "import", "Old", "/srv/old", "--names", "end"]),
+            Some(Command::Storage(StorageCommand::Import {
+                name: "Old".into(),
+                folder: PathBuf::from("/srv/old"),
+                review: false,
+                offset: None,
+                name_time: Some(scannerpulse::reader::NameTime::End),
+            }))
+        );
+        assert_eq!(parse(&["storage", "import", "Old", "/srv/old", "--names", "middle"]), None);
         assert_eq!(
             parse(&["storage", "import", "Old", "/srv/old", "--offset", "1h"]),
             None

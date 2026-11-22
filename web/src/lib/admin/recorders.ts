@@ -30,7 +30,12 @@ export interface Recorder {
   hosts: FolderHealth[];
   /** What its files say is wrong with its clock. An older server sends none. */
   clock?: string | null;
+  /** Which time its file names give. An older server sends none (start). */
+  name_time?: NameTime;
 }
+
+/** Which time a recorder writes in its file names: the call's start, or its end (SDRTrunk 0.6.1). */
+export type NameTime = 'start' | 'end';
 
 /** `GET /api/admin/recorders`: the recorders, and the hosts whose ingest runs. */
 export interface Recorders {
@@ -38,7 +43,7 @@ export interface Recorders {
   hosts: string[];
 }
 
-export type Change = 'watch' | 'ask' | 'pause' | 'bring-in' | 'remove';
+export type Change = 'watch' | 'ask' | 'pause' | 'bring-in' | 'remove' | 'start-names' | 'end-names';
 
 /** A host's word on a folder older than this is no word: its ingest has
  * stopped listing it. Ingest lists every folder every few seconds. */
@@ -74,6 +79,8 @@ export const CHANGE_LABEL: Record<Change, string> = {
   pause: 'Pause',
   'bring-in': 'Bring in now',
   remove: 'Remove…',
+  'start-names': 'Start',
+  'end-names': 'End',
 };
 
 /** What a change did, for the notice. */
@@ -89,6 +96,9 @@ export function changedText(name: string, change: Change): string {
       return `${name}'s files are brought in: those its folder holds now are filed within a few seconds.`;
     case 'remove':
       return `${name} is removed: its files stay in its folder, its calls in the archive.`;
+    case 'start-names':
+    case 'end-names':
+      return `${name}'s file names are read as the calls' ${change === 'end-names' ? 'ends' : 'starts'}: files filed from now on start so; calls filed before keep their times.`;
   }
 }
 

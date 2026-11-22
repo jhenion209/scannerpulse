@@ -36,6 +36,8 @@ pub struct Recorder {
     pub name: String,
     pub folder: String,
     pub state: State,
+    /// Which time its file names give.
+    pub name_time: crate::reader::NameTime,
     /// Taken in when asked, asked to bring its files in, and not every file
     /// of that request filed yet.
     pub bringing_in: bool,
@@ -81,6 +83,8 @@ pub enum Change {
     BringIn,
     /// Stop taking its files for good; its calls stay.
     Remove,
+    /// Which time its file names give: files filed afterwards are read so.
+    NameTime(crate::reader::NameTime),
 }
 
 impl FromStr for Change {
@@ -93,6 +97,8 @@ impl FromStr for Change {
             "pause" => Ok(Change::Pause),
             "bring-in" => Ok(Change::BringIn),
             "remove" => Ok(Change::Remove),
+            "start-names" => Ok(Change::NameTime(crate::reader::NameTime::Start)),
+            "end-names" => Ok(Change::NameTime(crate::reader::NameTime::End)),
             other => Err(format!("{other:?} is not a change to a recorder")),
         }
     }
@@ -330,6 +336,13 @@ pub async fn change(conn: &mut PgConnection, id: i16, change: Change) -> Result<
     };
     let asked = intake == "asked";
     match change {
+        Change::NameTime(name_time) => {
+            sqlx::query("UPDATE sources SET name_time = $2 WHERE id = $1")
+                .bind(id)
+                .bind(name_time.as_str())
+                .execute(&mut *conn)
+                .await?;
+        }
         Change::Watch => {
             sqlx::query("UPDATE sources SET intake = 'watched', enabled = true WHERE id = $1")
                 .bind(id)
@@ -393,6 +406,7 @@ type Row = (
     String,
     bool,
     String,
+    String,
     bool,
     Option<DateTime<Utc>>,
     i64,
@@ -415,7 +429,7 @@ type HealthRow = (
 /// start of the day in the site's time zone) and its folder's health.
 pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result<Vec<Recorder>> {
     let rows: Vec<Row> = sqlx::query_as(&format!(
-        "SELECT s.id, s.name, s.path, s.enabled, s.intake, \
+        "SELECT s.id, s.name, s.path, s.enabled, s.intake, s.name_time, \
                 s.bring_in_at IS NOT NULL AND s.brought_in_at IS DISTINCT FROM s.bring_in_at, \
                 (SELECT max(f.first_seen) FROM ingest_files f WHERE f.source_id = s.id), \
                 (SELECT count(*) FROM ingest_files f WHERE f.source_id = s.id AND f.state = 'waiting'), \
@@ -447,6 +461,7 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                 folder,
                 enabled,
                 intake,
+                name_time,
                 asked_pending,
                 last_file,
                 waiting,
@@ -469,6 +484,7 @@ pub async fn list(conn: &mut PgConnection, since: DateTime<Utc>) -> sqlx::Result
                     name,
                     folder,
                     state,
+                    name_time: name_time.parse().unwrap_or_default(),
                     bringing_in: state == State::Asked && (asked_pending || waiting > 0),
                     last_file,
                     waiting,

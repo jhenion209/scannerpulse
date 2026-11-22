@@ -168,6 +168,18 @@
             <dt>Last file</dt><dd>{lastText(r, now)}</dd>
             <dt>Today</dt><dd>{todayText(r)}</dd>
             {#if held}<dt>Waiting</dt><dd>{held}</dd>{/if}
+            <dt><label for={`name-time-${r.id}`}>Time in file names</label></dt>
+            <dd>
+              {#if can('recorders')}
+                <select id={`name-time-${r.id}`} value={r.name_time ?? 'start'}
+                  onchange={(e) => apply(r, e.currentTarget.value === 'end' ? 'end-names' : 'start-names')}>
+                  <option value="start">Start</option>
+                  <option value="end">End</option>
+                </select>
+              {:else}
+                {r.name_time === 'end' ? 'End' : 'Start'}
+              {/if}
+            </dd>
           </dl>
           {#each troubles as trouble (trouble)}<p class="problem">{trouble}</p>{/each}
           {#if r.clock}<p class="problem">{clockSentence(r.clock)}</p>{/if}

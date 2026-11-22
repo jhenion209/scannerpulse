@@ -159,6 +159,8 @@ struct Kept {
     location_id: Option<i16>,
     folder: String,
     offset_minutes: i32,
+    #[sqlx(try_from = "String")]
+    name_time: reader::NameTime,
     purged_before: Option<NaiveDate>,
 }
 
@@ -166,7 +168,7 @@ struct Kept {
 /// removed, its register stays.
 async fn kept(conn: &mut PgConnection, name: &str) -> sqlx::Result<Option<Kept>> {
     sqlx::query_as(
-        "SELECT i.source_id, i.location_id, s.path AS folder, i.offset_minutes, l.purged_before \
+        "SELECT i.source_id, i.location_id, s.path AS folder, i.offset_minutes, s.name_time, l.purged_before \
          FROM imports i JOIN sources s ON s.id = i.source_id \
          LEFT JOIN locations l ON l.id = i.location_id WHERE s.name = $1",
     )
@@ -319,13 +321,14 @@ async fn read_call(
     root: &Path,
     rel_path: &str,
     offset: i32,
+    name_time: reader::NameTime,
     zone: Tz,
     limit: Duration,
 ) -> io::Result<Result<(FileCall, i64), String>> {
     let path = root.join(rel_path);
     match bounded(limit, move || Ok(reader::read_path(&path, zone, reader::NameTime::Start))).await? {
         Ok((mut call, data)) => {
-            call.started_at = started_at(call.local_start, offset, zone);
+            call.started_at = name_time.start(started_at(call.local_start, offset, zone), call.duration_ms);
             Ok(Ok((call, data.len() as i64)))
         }
         Err(ReadError::Rejected(why)) => Ok(Err(why)),
@@ -391,6 +394,9 @@ pub struct Review {
     pub suggested: Option<i32>,
     /// The offset the import keeps, when it ran before.
     pub kept_offset: Option<i32>,
+    /// Which time its file names give, when it ran before (Start otherwise).
+    #[serde(default)]
+    pub kept_name_time: reader::NameTime,
     /// Every file of the sample is read: the review is complete.
     #[serde(default)]
     pub done: bool,
@@ -628,6 +634,7 @@ pub(crate) async fn review_step(
                 work.name = params.name.clone();
                 work.folder = params.folder.clone();
                 work.kept_offset = kept.as_ref().map(|k| k.offset_minutes);
+                work.kept_name_time = kept.as_ref().map(|k| k.name_time).unwrap_or_default();
                 work.copies_at = vec![0; OFFSETS.len()];
                 work.new_at = vec![0; OFFSETS.len()];
                 work.draw = 0x9E37_79B9_7F4A_7C15;
@@ -672,7 +679,7 @@ pub(crate) async fn review_step(
         .collect();
     let own = work.kept_offset.unwrap_or(0);
     for rel in batch {
-        let call = match read_call(&root, &rel, own, zone, limit).await {
+        let call = match read_call(&root, &rel, own, work.kept_name_time, zone, limit).await {
             Ok(Ok((call, _))) => call,
             Ok(Err(why)) => {
                 work.read += 1;
@@ -908,6 +915,8 @@ pub struct Started {
     pub location: i16,
     pub source: i16,
     pub offset: i32,
+    /// Which time its file names give.
+    pub name_time: reader::NameTime,
     pub again: bool,
 }
 
@@ -921,11 +930,12 @@ pub async fn start(
     name: &str,
     folder: &Path,
     offset: Option<i32>,
+    name_time: Option<reader::NameTime>,
     started_by: &str,
 ) -> Result<(i64, Started), JobError> {
     let real = look(folder).await?;
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-    match start_in(&mut tx, name, &real, offset, started_by).await {
+    match start_in(&mut tx, name, &real, offset, name_time, started_by).await {
         Ok(started) => {
             tx.commit().await?;
             Ok(started)
@@ -944,6 +954,7 @@ async fn start_in(
     name: &str,
     real: &Path,
     offset: Option<i32>,
+    name_time: Option<reader::NameTime>,
     started_by: &str,
 ) -> Result<(i64, Started), JobError> {
     // One start at a time: two would make the same import twice.
@@ -967,6 +978,14 @@ async fn start_in(
                     offset_text(kept.offset_minutes)
                 )));
             }
+            if let Some(name_time) = name_time
+                && name_time != kept.name_time
+            {
+                return Err(JobError::Refused(format!(
+                    "{name} was imported with the time in its file names read as the {}: it keeps it, so that its files are dated as before",
+                    kept.name_time.as_str()
+                )));
+            }
             let location = match kept.location_id {
                 Some(location) => location,
                 None => {
@@ -983,18 +1002,21 @@ async fn start_in(
                 location,
                 source: kept.source_id,
                 offset: kept.offset_minutes,
+                name_time: kept.name_time,
                 again: true,
             }
         }
         None => {
             let offset = offset.unwrap_or(0);
+            let name_time = name_time.unwrap_or_default();
             let location = new_location(tx, name, real).await?;
             let source: i16 = sqlx::query_scalar(
-                "INSERT INTO sources (name, kind, path, enabled) \
-                 VALUES ($1, 'import', $2, false) RETURNING id",
+                "INSERT INTO sources (name, kind, path, enabled, name_time) \
+                 VALUES ($1, 'import', $2, false, $3) RETURNING id",
             )
             .bind(name)
             .bind(real.display().to_string())
+            .bind(name_time.as_str())
             .fetch_one(&mut *tx)
             .await?;
             sqlx::query(
@@ -1009,6 +1031,7 @@ async fn start_in(
                 location,
                 source,
                 offset,
+                name_time,
                 again: false,
             }
         }
@@ -1115,6 +1138,8 @@ struct Place {
     location_id: i16,
     root: String,
     offset_minutes: i32,
+    #[sqlx(try_from = "String")]
+    name_time: reader::NameTime,
     purged_before: Option<NaiveDate>,
 }
 
@@ -1151,8 +1176,8 @@ pub(crate) async fn import_step(
     };
     // Shared, so that the location is not removed while the step runs.
     let place: Option<Place> = sqlx::query_as(
-        "SELECT l.id AS location_id, l.root, i.offset_minutes, l.purged_before \
-         FROM imports i JOIN locations l ON l.id = i.location_id \
+        "SELECT l.id AS location_id, l.root, i.offset_minutes, s.name_time, l.purged_before \
+         FROM imports i JOIN locations l ON l.id = i.location_id JOIN sources s ON s.id = i.source_id \
          WHERE i.source_id = $1 FOR SHARE OF l",
     )
     .bind(params.source)
@@ -1263,6 +1288,12 @@ pub(crate) async fn import_step(
         .iter()
         .filter_map(|row| reader::start_time(row.rel_path.rsplit('/').next()?))
         .map(|local| started_at(local, place.offset_minutes, zone))
+        // A call named at its end may start in the month before (a call is
+        // shorter than an hour).
+        .flat_map(|at| match place.name_time {
+            reader::NameTime::Start => vec![at],
+            reader::NameTime::End => vec![at, at - TimeDelta::hours(1)],
+        })
         .map(|at| (at.year(), at.month()))
         .collect();
     for (year, month) in months {
@@ -1273,7 +1304,7 @@ pub(crate) async fn import_step(
     }
     for row in &batch {
         let (call, size) =
-            match read_call(&root, &row.rel_path, place.offset_minutes, zone, limit).await {
+            match read_call(&root, &row.rel_path, place.offset_minutes, place.name_time, zone, limit).await {
                 Ok(Ok(read)) => read,
                 Ok(Err(why)) => {
                     store::reject(&mut *conn, row.id, &why).await?;

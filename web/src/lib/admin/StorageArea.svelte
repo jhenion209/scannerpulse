@@ -63,6 +63,7 @@
   let importName = $state('');
   let importFolder = $state('');
   let offset = $state('');
+  let nameTime = $state<'start' | 'end'>('start');
   /** The review's job, and what it found so far. */
   let reviewJob = $state<number | null>(null);
   let review = $state<Review | null>(null);
@@ -142,7 +143,10 @@
         if (found) {
           review = found;
           if (found.done) {
-            if (found.kept_offset !== null) offset = offsetText(found.kept_offset);
+            if (found.kept_offset !== null) {
+              offset = offsetText(found.kept_offset);
+              nameTime = found.kept_name_time ?? 'start';
+            }
             else if (found.suggested !== null) offset = offsetText(found.suggested);
             return;
           }
@@ -165,7 +169,7 @@
     importing = true;
     importRefusal = null;
     try {
-      const done = await admin<ImportStarted>('POST', '/api/admin/storage/import', { name: r.name, folder: r.folder, offset });
+      const done = await admin<ImportStarted>('POST', '/api/admin/storage/import', { name: r.name, folder: r.folder, offset, name_time: nameTime });
       tell(
         `Job ${done.job} imports ${r.folder} as ${r.name}${done.again ? ', taking only the files it has not taken' : ''}, its times moved by ${offsetText(done.offset)}; the Jobs area follows it.`,
       );
@@ -444,6 +448,12 @@
         <label for="import-offset">Offset</label>
         <input id="import-offset" type="text" autocomplete="off" placeholder="+00:00" readonly={r.kept_offset !== null} bind:value={offset} />
         <p class="hint">The times its file names give are moved by this, as ±HH:MM; the names stay as they are.</p>
+        <label for="import-name-time">Time in file names</label>
+        <select id="import-name-time" disabled={r.kept_offset !== null} bind:value={nameTime}>
+          <option value="start">Start</option>
+          <option value="end">End</option>
+        </select>
+        <p class="hint">End for files named when their call ended (SDRTrunk 0.6.1): each call then starts its length earlier.</p>
         <div class="row">
           <button type="button" class="primary" disabled={importing || (importCount(r, offset) ?? 1) + r.unknown === 0} onclick={() => startImport(r)}>{importAction(r, r.name, offset)}</button>
         </div>

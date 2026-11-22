@@ -83,6 +83,23 @@ async fn an_admin_adds_lists_and_changes_recorders(pool: PgPool) {
         pause.status, 400,
         "a recorder taken in when asked has nothing to pause"
     );
+    let end = send(
+        &app,
+        "POST",
+        &format!("/api/admin/recorders/{id}/end-names"),
+        &h,
+        None,
+    )
+    .await;
+    assert_eq!(end.status, 204);
+    let listed = send(&app, "GET", "/api/admin/recorders", &h, None).await;
+    let east = listed.body["recorders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(id))
+        .unwrap();
+    assert_eq!(east["name_time"], json!("end"));
     let unknown = send(
         &app,
         "POST",
