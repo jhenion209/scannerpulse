@@ -15,6 +15,7 @@
     freeText,
     importAction,
     importCount,
+    nameTimeAfterReview,
     offsetText,
     reviewLines,
     moveAction,
@@ -143,10 +144,8 @@
         if (found) {
           review = found;
           if (found.done) {
-            if (found.kept_offset !== null) {
-              offset = offsetText(found.kept_offset);
-              nameTime = found.kept_name_time ?? 'start';
-            }
+            nameTime = nameTimeAfterReview(found);
+            if (found.kept_offset !== null) offset = offsetText(found.kept_offset);
             else if (found.suggested !== null) offset = offsetText(found.suggested);
             return;
           }

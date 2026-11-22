@@ -853,3 +853,50 @@ async fn an_end_named_import_starts_its_calls_at_name_plus_offset_less_length(po
         .unwrap();
     assert_eq!(kept, "end");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_end_named_import_of_a_long_call_starting_the_month_before_is_filed(pool: PgPool) {
+    let (_archive, _places) = site(&pool).await;
+    // Named 01:30 UTC on 1 June 2019, two hours long: it began in May, a month no call is in yet.
+    let named = Utc
+        .with_ymd_and_hms(2019, 6, 1, 1, 30, 0)
+        .unwrap()
+        .with_timezone(&ZONE);
+    let old = tempfile::tempdir().unwrap();
+    std::fs::write(
+        old.path()
+            .join(format!("{}_long.mp3", named.format("%Y%m%d_%H%M%S"))),
+        recording("Metro", 702, "Fire", 2 * 3600),
+    )
+    .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let (job, started) = imports::start(
+        &mut conn,
+        "Long",
+        old.path(),
+        None,
+        Some(NameTime::End),
+        "admin",
+    )
+    .await
+    .unwrap();
+    run_jobs(&pool).await;
+    let (state, message): (String, String) =
+        sqlx::query_as("SELECT state, message FROM jobs WHERE id = $1")
+            .bind(job)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "done", "{message}");
+    let at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT started_at FROM calls WHERE location_id = $1")
+            .bind(started.location)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        at,
+        Utc.with_ymd_and_hms(2019, 5, 31, 23, 30, 0).unwrap(),
+        "two hours before its name"
+    );
+}
