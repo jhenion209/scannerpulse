@@ -107,7 +107,7 @@ pub struct Filer {
 }
 
 /// How a recorder's file is read ([`reader::read_path`]).
-pub type Reader = fn(&Path, Tz) -> Result<(FileCall, Vec<u8>), ReadError>;
+pub type Reader = fn(&Path, Tz, reader::NameTime) -> Result<(FileCall, Vec<u8>), ReadError>;
 
 impl Filer {
     pub fn new(
@@ -216,9 +216,9 @@ impl Filer {
         // In a thread of its own, as is the deletion: a recorder's share that
         // stopped answering holds up no other recorder's files (a read on
         // the runtime's worker would hold every task).
-        let (read, zone, file) = (self.read, self.zone, path.clone());
+        let (read, zone, file, name_time) = (self.read, self.zone, path.clone(), row.name_time);
         let job: watcher::Job<Result<(FileCall, Vec<u8>), ReadError>> =
-            Box::new(move || Ok(read(&file, zone)));
+            Box::new(move || Ok(read(&file, zone, name_time)));
         let answered = watcher::run_bounded(
             vec![(folder.clone(), job)],
             &mut self.hung,
@@ -968,7 +968,7 @@ impl Filer {
         else {
             return self.reject(row, MISSING.to_string()).await;
         };
-        let call = match reader::read_path(path, self.zone) {
+        let call = match reader::read_path(path, self.zone, row.name_time) {
             Ok((call, _)) => call,
             Err(error) => {
                 return Ok(Outcome::Later {

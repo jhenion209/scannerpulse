@@ -147,14 +147,15 @@ type Read = (usize, Vec<(String, Result<FileCall, ReadError>)>);
 /// its own, within [`PREVIEW_LIMIT`]: a share that stopped answering holds
 /// up nothing else.
 pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Preview, Refused> {
-    let found: Option<(String, String)> =
-        sqlx::query_as("SELECT name, path FROM sources WHERE id = $1 AND removed_at IS NULL")
+    let found: Option<(String, String, String)> =
+        sqlx::query_as("SELECT name, path, name_time FROM sources WHERE id = $1 AND removed_at IS NULL")
             .bind(id)
             .fetch_optional(&mut *conn)
             .await?;
-    let Some((name, folder)) = found else {
+    let Some((name, folder, name_time)) = found else {
         return Err(Refused::NoSuch(format!("there is no recorder {id}")));
     };
+    let name_time: crate::reader::NameTime = name_time.parse().unwrap_or_default();
     let folder = PathBuf::from(folder);
     let root = folder.clone();
     let job: watcher::Job<Read> = Box::new(move || {
@@ -170,7 +171,7 @@ pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Previ
         let read = paths
             .into_iter()
             .map(|rel| {
-                let call = reader::read_path(&root.join(&rel), zone).map(|(call, _)| call);
+                let call = reader::read_path(&root.join(&rel), zone, name_time).map(|(call, _)| call);
                 (rel, call)
             })
             .collect();

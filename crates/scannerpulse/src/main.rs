@@ -30,7 +30,7 @@ usage: scannerpulse db-update [--quiet]
        scannerpulse ingest
        scannerpulse lease
        scannerpulse web
-       scannerpulse read --zone ZONE FILE...
+       scannerpulse read --zone ZONE [--end-named] FILE...
        scannerpulse transcribe --talkgroup SYSTEM/NUMBER --from DAY --to DAY [--yes]
        scannerpulse asr sample --set NAME --talkgroups FILE --calls N --days N
                                [--min-seconds S] [--seed N] [--yes]
@@ -338,6 +338,8 @@ enum Command {
     Read {
         zone: String,
         files: Vec<String>,
+        /// The names give the call's end (SDRTrunk 0.6.1), not its start.
+        end_named: bool,
     },
     Transcribe {
         talkgroup: String,
@@ -756,9 +758,15 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["ingest"] => Some(Command::Ingest),
         ["lease"] => Some(Command::Lease),
         ["web"] => Some(Command::Web),
-        ["read", "--zone", zone, files @ ..] if !files.is_empty() => Some(Command::Read {
+        ["read", "--zone", zone, "--end-named", files @ ..] if !files.is_empty() => Some(Command::Read {
             zone: zone.to_string(),
             files: files.iter().map(|file| file.to_string()).collect(),
+            end_named: true,
+        }),
+        ["read", "--zone", zone, files @ ..] if !files.is_empty() && files[0] != "--end-named" => Some(Command::Read {
+            zone: zone.to_string(),
+            files: files.iter().map(|file| file.to_string()).collect(),
+            end_named: false,
         }),
         [
             "transcribe",
@@ -1377,7 +1385,7 @@ async fn execute(command: Option<Command>) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Some(Command::Read { zone, files }) => read(&zone, &files),
+        Some(Command::Read { zone, files, end_named }) => read(&zone, &files, end_named),
         Some(Command::Transcribe {
             talkgroup,
             from,
@@ -3324,14 +3332,15 @@ async fn backup_succeeded(kind: &str, database_url: &str) {
 }
 
 /// Prints one JSON line per file. Exits 0 when every file was read.
-fn read(zone: &str, files: &[String]) -> ExitCode {
+fn read(zone: &str, files: &[String], end_named: bool) -> ExitCode {
+    let name_time = if end_named { reader::NameTime::End } else { reader::NameTime::Start };
     let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
         eprintln!("read: {zone:?} is not a known time zone");
         return ExitCode::from(2);
     };
     let mut all_read = true;
     for file in files {
-        let line = match reader::read_path(Path::new(file), zone) {
+        let line = match reader::read_path(Path::new(file), zone, name_time) {
             Ok((call, _)) => call_json(file, &call),
             Err(ReadError::Rejected(why)) => {
                 all_read = false;
@@ -3795,10 +3804,20 @@ mod tests {
             Some(Command::Read {
                 zone: "UTC".to_string(),
                 files: vec!["a.mp3".to_string(), "b.mp3".to_string()],
+                end_named: false,
             })
         );
         assert_eq!(parse(&["read", "--zone", "UTC"]), None);
         assert_eq!(parse(&["read", "a.mp3"]), None);
+        assert_eq!(
+            parse(&["read", "--zone", "UTC", "--end-named", "a.mp3"]),
+            Some(Command::Read {
+                zone: "UTC".to_string(),
+                files: vec!["a.mp3".to_string()],
+                end_named: true,
+            })
+        );
+        assert_eq!(parse(&["read", "--zone", "UTC", "--end-named"]), None);
     }
 
     #[test]

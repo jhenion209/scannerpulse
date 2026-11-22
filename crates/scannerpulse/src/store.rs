@@ -237,6 +237,9 @@ pub struct Waiting {
     pub source_id: i16,
     /// Its recorder's folder.
     pub source_path: String,
+    /// Which time its recorder writes in file names.
+    #[sqlx(try_from = "String")]
+    pub name_time: crate::reader::NameTime,
     pub rel_path: String,
     pub size: Option<i64>,
     /// Its modification time when the watcher last saw it.
@@ -264,7 +267,7 @@ pub async fn waiting(
     skip: &[i64],
 ) -> sqlx::Result<Vec<Waiting>> {
     sqlx::query_as(
-        "SELECT f.id, f.source_id, s.path AS source_path, f.rel_path, f.size, f.file_mtime, f.seen_at, \
+        "SELECT f.id, f.source_id, s.path AS source_path, s.name_time, f.rel_path, f.size, f.file_mtime, f.seen_at, \
                 f.call_id, f.call_started_at, c.id IS NOT NULL AS same_file, \
                 f.state = 'staged' AS staged \
          FROM ingest_files f \

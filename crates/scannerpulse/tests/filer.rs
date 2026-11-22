@@ -226,7 +226,7 @@ async fn filed_but_left_in_source(site: &Site) -> sqlx::Result<(PathBuf, i64)> {
     let target = site.archived(&rel());
     archive::write_part(&target, &data, &archive::sha256(&data)).unwrap();
     archive::finish_part(&target).unwrap();
-    let (call, _) = reader::read_path(&source, ZONE).unwrap();
+    let (call, _) = reader::read_path(&source, ZONE, reader::NameTime::Start).unwrap();
     store::ensure_partition(&site.pool, call.started_at).await?;
     let row: i64 = sqlx::query_scalar("SELECT id FROM ingest_files")
         .fetch_one(&site.pool)
@@ -590,6 +590,7 @@ static ANSWER: AtomicBool = AtomicBool::new(false);
 fn slow_read(
     path: &std::path::Path,
     zone: chrono_tz::Tz,
+    name_time: reader::NameTime,
 ) -> Result<(reader::FileCall, Vec<u8>), reader::ReadError> {
     if path.parent().is_some_and(|folder| folder.ends_with("hung")) {
         SLOW_READS.fetch_add(1, Ordering::SeqCst);
@@ -597,7 +598,7 @@ fn slow_read(
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    reader::read_path(path, zone)
+    reader::read_path(path, zone, name_time)
 }
 
 #[sqlx::test(migrations = "./migrations")]

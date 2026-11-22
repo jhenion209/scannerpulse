@@ -323,7 +323,7 @@ async fn read_call(
     limit: Duration,
 ) -> io::Result<Result<(FileCall, i64), String>> {
     let path = root.join(rel_path);
-    match bounded(limit, move || Ok(reader::read_path(&path, zone))).await? {
+    match bounded(limit, move || Ok(reader::read_path(&path, zone, reader::NameTime::Start))).await? {
         Ok((mut call, data)) => {
             call.started_at = started_at(call.local_start, offset, zone);
             Ok(Ok((call, data.len() as i64)))

@@ -3,7 +3,7 @@ mod common;
 use chrono::{DateTime, NaiveDate, Utc};
 use id3::TagLike;
 use scannerpulse::localtime::TimeHow;
-use scannerpulse::reader::{self, Described, ReadError, Tags, Talkgroup};
+use scannerpulse::reader::{self, Described, NameTime, ReadError, Tags, Talkgroup};
 
 const CHICAGO: chrono_tz::Tz = chrono_tz::America::Chicago;
 
@@ -221,7 +221,7 @@ fn the_tag_is_read_back_from_the_bytes() {
 fn a_file_is_read_whole() {
     let data = common::tagged(&recorder_tag(), 28);
     let mtime = utc("2031-01-15T18:00:05Z");
-    let call = reader::read_bytes(NAME, &data, mtime, CHICAGO).unwrap();
+    let call = reader::read_bytes(NAME, &data, mtime, CHICAGO, NameTime::Start).unwrap();
     assert_eq!(call.started_at, utc("2031-01-15T18:00:00Z"));
     assert_eq!(call.time_how, TimeHow::Plain);
     assert_eq!(call.duration_ms, 1008);
@@ -246,7 +246,7 @@ fn a_damaged_tag_is_read_as_no_tag() {
     let mut data = common::id3v2_header(body.len());
     data.extend_from_slice(&body);
     data.extend_from_slice(&common::frames(28));
-    let call = reader::read_bytes(NAME, &data, utc("2031-01-15T18:00:05Z"), CHICAGO).unwrap();
+    let call = reader::read_bytes(NAME, &data, utc("2031-01-15T18:00:05Z"), CHICAGO, NameTime::Start).unwrap();
     assert_eq!(call.described, Described::default());
     assert_eq!(call.duration_ms, 1008);
 }
@@ -269,9 +269,9 @@ fn a_tag_damaged_after_its_first_frame_is_read_as_no_tag() {
 #[test]
 fn a_file_without_a_date_or_a_frame_is_rejected() {
     let mtime = utc("2031-01-15T18:00:05Z");
-    let err = reader::read_bytes("recording.mp3", &common::frames(5), mtime, CHICAGO).unwrap_err();
+    let err = reader::read_bytes("recording.mp3", &common::frames(5), mtime, CHICAGO, NameTime::Start).unwrap_err();
     assert!(err.contains("date"), "{err}");
-    let err = reader::read_bytes(NAME, b"not audio", mtime, CHICAGO).unwrap_err();
+    let err = reader::read_bytes(NAME, b"not audio", mtime, CHICAGO, NameTime::Start).unwrap_err();
     assert!(err.contains("frame"), "{err}");
 }
 
@@ -281,7 +281,7 @@ fn a_file_too_large_is_rejected_unread() {
     let path = dir.path().join(NAME);
     let file = std::fs::File::create(&path).unwrap();
     file.set_len(reader::MAX_FILE_BYTES + 1).unwrap();
-    match reader::read_path(&path, CHICAGO) {
+    match reader::read_path(&path, CHICAGO, NameTime::Start) {
         Err(ReadError::Rejected(why)) => assert!(why.contains("larger"), "{why}"),
         other => panic!("{other:?}"),
     }
@@ -290,8 +290,44 @@ fn a_file_too_large_is_rejected_unread() {
 #[test]
 fn a_missing_file_is_an_error_to_retry() {
     let dir = tempfile::tempdir().unwrap();
-    match reader::read_path(&dir.path().join(NAME), CHICAGO) {
+    match reader::read_path(&dir.path().join(NAME), CHICAGO, NameTime::Start) {
         Err(ReadError::Io(error)) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn end_named_file_starts_at_name_minus_duration() {
+    let data = common::tagged(&recorder_tag(), 28);
+    let mtime = utc("2031-01-15T18:00:05Z");
+    let end = reader::read_bytes(NAME, &data, mtime, CHICAGO, NameTime::End).unwrap();
+    assert_eq!(end.started_at, utc("2031-01-15T17:59:58.992Z"));
+    let start = reader::read_bytes(NAME, &data, mtime, CHICAGO, NameTime::Start).unwrap();
+    assert_eq!(start.started_at, utc("2031-01-15T18:00:00Z"));
+}
+
+#[test]
+fn end_named_file_after_midnight_starts_previous_day() {
+    let name = "20310115_000000SYSA_North_Alpha__TO_127_FROM_711351.mp3";
+    let data = common::tagged(&recorder_tag(), 28);
+    let call = reader::read_bytes(name, &data, utc("2031-01-15T06:00:01Z"), CHICAGO, NameTime::End).unwrap();
+    assert_eq!(call.started_at, utc("2031-01-15T05:59:58.992Z"), "23:59:58.992 on the 14th, Chicago");
+}
+
+#[test]
+fn end_named_repeated_hour_uses_mtime_then_duration() {
+    let name = "20261101_013000SYSA_North_Alpha__TO_127_FROM_711351.mp3";
+    let data = common::tagged(&recorder_tag(), 28);
+    let call = reader::read_bytes(name, &data, utc("2026-11-01T07:30:01Z"), CHICAGO, NameTime::End).unwrap();
+    assert_eq!(call.time_how, TimeHow::ByMtime);
+    assert_eq!(call.started_at, utc("2026-11-01T07:29:58.992Z"), "the second 01:30 (CST), less the call");
+}
+
+#[test]
+fn name_time_reads_and_writes_its_words() {
+    assert_eq!("end".parse::<NameTime>(), Ok(NameTime::End));
+    assert_eq!("start".parse::<NameTime>(), Ok(NameTime::Start));
+    assert!("middle".parse::<NameTime>().is_err());
+    assert_eq!(NameTime::End.as_str(), "end");
+    assert_eq!(NameTime::default(), NameTime::Start);
 }
