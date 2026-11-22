@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  callsText, consolidateAction, consolidateAsk, consolidateText, freeText, importAction, moveAction, moveAsk, offsetText,
+  callsText, consolidateAction, nameTimeAfterReview, consolidateAsk, consolidateText, freeText, importAction, moveAction, moveAsk, offsetText,
   previewText, purgeAction, purgeAsk, purgeText, reviewLines, seenBy, sizeText,
   type ConsolidatePreview, type Location, type MovePreview, type PurgePreview, type Review,
 } from './storage';
@@ -143,6 +143,13 @@ describe('an import', () => {
     kept_offset: null,
     done: true,
     ...over,
+  });
+
+  it('takes the time in file names an import keeps, and Start for a new one', () => {
+    expect(nameTimeAfterReview(review({ kept_offset: 60, kept_name_time: 'end' }))).toBe('end');
+    expect(nameTimeAfterReview(review({ kept_offset: 60 }))).toBe('start');
+    // A new folder after a kept End import: back to Start, not left at End.
+    expect(nameTimeAfterReview(review({ kept_offset: null, kept_name_time: 'end' }))).toBe('start');
   });
 
   it('writes an offset as the server reads it', () => {

@@ -294,6 +294,13 @@ export interface ImportStarted {
   again: boolean;
 }
 
+/** The time in file names the import form shows after a review: the one an
+ * import that ran before keeps, and Start for a new one (never a choice left
+ * from another folder). */
+export function nameTimeAfterReview(review: Review): 'start' | 'end' {
+  return review.kept_offset !== null ? (review.kept_name_time ?? 'start') : 'start';
+}
+
 /** `GET /api/admin/storage/consolidate`: what consolidating an import would do. */
 export interface ConsolidatePreview {
   name: string;

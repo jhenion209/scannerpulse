@@ -1293,12 +1293,6 @@ pub(crate) async fn import_step(
         .iter()
         .filter_map(|row| reader::start_time(row.rel_path.rsplit('/').next()?))
         .map(|local| started_at(local, place.offset_minutes, zone))
-        // A call named at its end may start in the month before (a call is
-        // shorter than an hour).
-        .flat_map(|at| match place.name_time {
-            reader::NameTime::Start => vec![at],
-            reader::NameTime::End => vec![at, at - TimeDelta::hours(1)],
-        })
         .map(|at| (at.year(), at.month()))
         .collect();
     for (year, month) in months {
@@ -1334,6 +1328,11 @@ pub(crate) async fn import_step(
                 ));
             }
         };
+        // A call named at its end starts its length before its name, maybe
+        // in a month the names above did not give.
+        if place.name_time == reader::NameTime::End {
+            store::ensure_partition(pool, call.started_at).await?;
+        }
         match classify(conn, &call, place.purged_before, zone).await? {
             Class::BeforePurge(day) => {
                 let why = format!("from before {day}, before which {} was purged", params.name);
