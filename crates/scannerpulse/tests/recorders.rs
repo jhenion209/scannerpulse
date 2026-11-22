@@ -298,14 +298,33 @@ async fn a_recorders_time_in_file_names_is_set_listed_and_read_with_its_files(po
     let mut conn = pool.acquire().await.unwrap();
     let listed = recorders::list(&mut conn, Utc::now()).await.unwrap();
     assert_eq!(listed[0].name_time, NameTime::Start, "start by default");
-    store::upsert_seen(&pool, live, &[store::Seen { rel_path: "20261122_132244_a.mp3".into(), size: 10, file_mtime: Utc::now() }])
+    store::upsert_seen(
+        &pool,
+        live,
+        &[store::Seen {
+            rel_path: "20261122_132244_a.mp3".into(),
+            size: 10,
+            file_mtime: Utc::now(),
+        }],
+    )
+    .await
+    .unwrap();
+    recorders::change(&mut conn, live, Change::NameTime(NameTime::End))
         .await
         .unwrap();
-    recorders::change(&mut conn, live, Change::NameTime(NameTime::End)).await.unwrap();
     let listed = recorders::list(&mut conn, Utc::now()).await.unwrap();
     assert_eq!(listed[0].name_time, NameTime::End);
     let waiting = store::waiting(&pool, 10, &[]).await.unwrap();
-    assert_eq!(waiting[0].name_time, NameTime::End, "a file waiting when it changed is read with the new setting");
-    recorders::change(&mut conn, live, Change::NameTime(NameTime::Start)).await.unwrap();
-    assert_eq!(recorders::list(&mut conn, Utc::now()).await.unwrap()[0].name_time, NameTime::Start);
+    assert_eq!(
+        waiting[0].name_time,
+        NameTime::End,
+        "a file waiting when it changed is read with the new setting"
+    );
+    recorders::change(&mut conn, live, Change::NameTime(NameTime::Start))
+        .await
+        .unwrap();
+    assert_eq!(
+        recorders::list(&mut conn, Utc::now()).await.unwrap()[0].name_time,
+        NameTime::Start
+    );
 }

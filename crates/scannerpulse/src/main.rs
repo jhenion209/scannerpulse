@@ -760,16 +760,20 @@ fn parse(args: &[&str]) -> Option<Command> {
         ["ingest"] => Some(Command::Ingest),
         ["lease"] => Some(Command::Lease),
         ["web"] => Some(Command::Web),
-        ["read", "--zone", zone, "--end-named", files @ ..] if !files.is_empty() => Some(Command::Read {
-            zone: zone.to_string(),
-            files: files.iter().map(|file| file.to_string()).collect(),
-            end_named: true,
-        }),
-        ["read", "--zone", zone, files @ ..] if !files.is_empty() && files[0] != "--end-named" => Some(Command::Read {
-            zone: zone.to_string(),
-            files: files.iter().map(|file| file.to_string()).collect(),
-            end_named: false,
-        }),
+        ["read", "--zone", zone, "--end-named", files @ ..] if !files.is_empty() => {
+            Some(Command::Read {
+                zone: zone.to_string(),
+                files: files.iter().map(|file| file.to_string()).collect(),
+                end_named: true,
+            })
+        }
+        ["read", "--zone", zone, files @ ..] if !files.is_empty() && files[0] != "--end-named" => {
+            Some(Command::Read {
+                zone: zone.to_string(),
+                files: files.iter().map(|file| file.to_string()).collect(),
+                end_named: false,
+            })
+        }
         [
             "transcribe",
             "--talkgroup",
@@ -1393,7 +1397,11 @@ async fn execute(command: Option<Command>) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Some(Command::Read { zone, files, end_named }) => read(&zone, &files, end_named),
+        Some(Command::Read {
+            zone,
+            files,
+            end_named,
+        }) => read(&zone, &files, end_named),
         Some(Command::Transcribe {
             talkgroup,
             from,
@@ -2648,8 +2656,15 @@ async fn storage_command(command: StorageCommand) -> CommandResult {
             ..
         } => {
             use scannerpulse::imports;
-            let (job, started) =
-                imports::start(&mut conn, &name, &folder, offset, name_time, &command_line_user()).await?;
+            let (job, started) = imports::start(
+                &mut conn,
+                &name,
+                &folder,
+                offset,
+                name_time,
+                &command_line_user(),
+            )
+            .await?;
             println!(
                 "job {job} is started: import {} as {name}{}, its times moved by {}; `scannerpulse jobs show {job}` follows it",
                 folder.display(),
@@ -3347,7 +3362,11 @@ async fn backup_succeeded(kind: &str, database_url: &str) {
 
 /// Prints one JSON line per file. Exits 0 when every file was read.
 fn read(zone: &str, files: &[String], end_named: bool) -> ExitCode {
-    let name_time = if end_named { reader::NameTime::End } else { reader::NameTime::Start };
+    let name_time = if end_named {
+        reader::NameTime::End
+    } else {
+        reader::NameTime::Start
+    };
     let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
         eprintln!("read: {zone:?} is not a known time zone");
         return ExitCode::from(2);
@@ -4259,7 +4278,10 @@ mod tests {
                 name_time: Some(scannerpulse::reader::NameTime::End),
             }))
         );
-        assert_eq!(parse(&["storage", "import", "Old", "/srv/old", "--names", "middle"]), None);
+        assert_eq!(
+            parse(&["storage", "import", "Old", "/srv/old", "--names", "middle"]),
+            None
+        );
         assert_eq!(
             parse(&["storage", "import", "Old", "/srv/old", "--offset", "1h"]),
             None

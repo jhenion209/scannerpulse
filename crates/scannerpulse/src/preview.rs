@@ -147,11 +147,12 @@ type Read = (usize, Vec<(String, Result<FileCall, ReadError>)>);
 /// its own, within [`PREVIEW_LIMIT`]: a share that stopped answering holds
 /// up nothing else.
 pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Preview, Refused> {
-    let found: Option<(String, String, String)> =
-        sqlx::query_as("SELECT name, path, name_time FROM sources WHERE id = $1 AND removed_at IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let found: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT name, path, name_time FROM sources WHERE id = $1 AND removed_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some((name, folder, name_time)) = found else {
         return Err(Refused::NoSuch(format!("there is no recorder {id}")));
     };
@@ -171,7 +172,8 @@ pub async fn preview(conn: &mut PgConnection, id: i16, zone: Tz) -> Result<Previ
         let read = paths
             .into_iter()
             .map(|rel| {
-                let call = reader::read_path(&root.join(&rel), zone, name_time).map(|(call, _)| call);
+                let call =
+                    reader::read_path(&root.join(&rel), zone, name_time).map(|(call, _)| call);
                 (rel, call)
             })
             .collect();
