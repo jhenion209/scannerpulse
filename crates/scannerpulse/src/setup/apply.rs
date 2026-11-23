@@ -217,7 +217,8 @@ async fn folders(context: &Context, recordings: &Path, archive: &Path) -> Result
         .map_err(|error| format!("cannot record the folders: {error}"))
 }
 
-/// Adds the admin `login`, or gives it `password` if it exists already.
+/// Adds the admin `login`, or gives it `password` (and enables it) if it
+/// exists already.
 pub async fn first_admin(
     conn: &mut sqlx::PgConnection,
     login: &str,
@@ -229,7 +230,11 @@ pub async fn first_admin(
         .map_err(|error| error.to_string())?;
     match found {
         None => accounts::add(conn, login, password).await.map(drop),
-        Some(_) => accounts::set_password(conn, login, password).await,
+        // A kept database may hold it disabled: setup's admin signs in.
+        Some((_, _, disabled)) => match accounts::set_password(&mut *conn, login, password).await {
+            Ok(()) if disabled => accounts::enable(&mut *conn, login).await,
+            other => other,
+        },
     }
     .map_err(|error| format!("the admin {login}: {error}"))
 }

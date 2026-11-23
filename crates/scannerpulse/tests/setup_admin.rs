@@ -25,6 +25,30 @@ async fn the_first_admin_is_added_then_given_the_new_password_on_a_kept_database
     assert!(error.starts_with("the admin chief: "), "{error}");
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn setup_signs_a_disabled_first_admin_back_in(pool: PgPool) {
+    let mut conn = pool.acquire().await.unwrap();
+    first_admin(&mut conn, "chief", "the first long password")
+        .await
+        .unwrap();
+    // Disabled on the kept database (say, before an uninstall that kept it).
+    sqlx::query("UPDATE admins SET disabled = true WHERE login = 'chief'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    first_admin(&mut conn, "chief", "the second long password")
+        .await
+        .unwrap();
+    let (_, _, disabled) = accounts::by_login(&mut *conn, "chief")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !disabled,
+        "setup said it was done: the admin must be able to sign in"
+    );
+}
+
 /// The database URL of the test's own database, its host not answering:
 /// the steps must find the primary among the nodes.
 fn url_on_nowhere(pool: &PgPool) -> String {
