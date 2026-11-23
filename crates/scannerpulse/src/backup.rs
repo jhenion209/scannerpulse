@@ -147,11 +147,21 @@ pub fn nightly(backups: &Path, database_url: &str, as_root: bool) -> Outcomes {
 /// reads it before giving it its name, and removes the oldest beyond
 /// `KEEP_DUMPS`.
 pub fn dump(folder: &Path, database_url: &str, stamp: &str) -> Result<String, String> {
+    dump_with(folder, database_url, stamp, ("pg_dump", "pg_restore"))
+}
+
+/// `dump` with the programs it runs: (pg_dump, pg_restore).
+fn dump_with(
+    folder: &Path,
+    database_url: &str,
+    stamp: &str,
+    (pg_dump, pg_restore): (&str, &str),
+) -> Result<String, String> {
     let name = format!("scannerpulse-{stamp}.dump");
     let partial = folder.join(format!(".{name}.partial"));
     let partial_arg = partial.display().to_string();
     let result = run(
-        "pg_dump",
+        pg_dump,
         &[
             "--format=custom",
             "--file",
@@ -160,7 +170,7 @@ pub fn dump(folder: &Path, database_url: &str, stamp: &str) -> Result<String, St
             database_url,
         ],
     )
-    .and_then(|()| run("pg_restore", &["--list", &partial_arg]))
+    .and_then(|()| run(pg_restore, &["--list", &partial_arg]))
     .and_then(|()| {
         std::fs::rename(&partial, folder.join(&name)).map_err(|error| error.to_string())
     });
@@ -172,15 +182,106 @@ pub fn dump(folder: &Path, database_url: &str, stamp: &str) -> Result<String, St
         .map_err(|error| format!("{}: {error}", folder.display()))?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
         .collect();
+    // The new dump is made: a problem removing old ones says so, with its name.
     for old in old_dumps(&names, KEEP_DUMPS) {
-        std::fs::remove_file(folder.join(&old)).map_err(|error| format!("{old}: {error}"))?;
+        std::fs::remove_file(folder.join(&old)).map_err(|error| {
+            format!("{name} was made, but the old dump {old} could not be removed: {error}")
+        })?;
     }
     Ok(name)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{kind, old_dumps, run};
+    use super::{dump_with, kind, old_dumps, run};
+
+    /// Stand-ins for pg_dump (writes its --file) and pg_restore (exits with `restore_code`).
+    fn fakes(dir: &std::path::Path, restore_code: i32) -> (String, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.display().to_string()
+        };
+        (
+            script("pg_dump", "echo dump > \"$3\""),
+            script("pg_restore", &format!("exit {restore_code}")),
+        )
+    }
+
+    #[test]
+    fn a_dump_is_named_once_pg_restore_reads_it() {
+        let (bin, folder) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (pg_dump, pg_restore) = fakes(bin.path(), 0);
+        let name = dump_with(
+            folder.path(),
+            "postgres://x",
+            "20261123T031700",
+            (&pg_dump, &pg_restore),
+        )
+        .unwrap();
+        assert_eq!(name, "scannerpulse-20261123T031700.dump");
+        let left: Vec<_> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left,
+            [std::ffi::OsString::from(&name)],
+            "no partial file left"
+        );
+    }
+
+    #[test]
+    fn a_dump_pg_restore_cannot_read_is_not_kept() {
+        let (bin, folder) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (pg_dump, pg_restore) = fakes(bin.path(), 1);
+        assert!(
+            dump_with(
+                folder.path(),
+                "postgres://x",
+                "20261123T031700",
+                (&pg_dump, &pg_restore)
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_failed_clean_up_names_the_dump_that_was_made() {
+        let (bin, folder) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (pg_dump, pg_restore) = fakes(bin.path(), 0);
+        // More old dumps than are kept, the oldest one a folder that cannot be removed as a file.
+        std::fs::create_dir(folder.path().join("scannerpulse-20200101T031700.dump")).unwrap();
+        for d in 2..=20 {
+            std::fs::write(
+                folder
+                    .path()
+                    .join(format!("scannerpulse-202001{d:02}T031700.dump")),
+                b"x",
+            )
+            .unwrap();
+        }
+        let error = dump_with(
+            folder.path(),
+            "postgres://x",
+            "20261123T031700",
+            (&pg_dump, &pg_restore),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("scannerpulse-20261123T031700.dump was made"),
+            "{error}"
+        );
+        assert!(
+            folder
+                .path()
+                .join("scannerpulse-20261123T031700.dump")
+                .exists()
+        );
+    }
     use chrono::Weekday;
 
     #[test]

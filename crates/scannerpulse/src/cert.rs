@@ -18,6 +18,9 @@ pub fn make(names: &[String], cert: &Path, key: &Path) -> Result<(), String> {
     let Some(first) = names.first() else {
         return Err("a certificate needs at least one name or address".into());
     };
+    if let Some(bad) = names.iter().find(|n| !host_or_address(n)) {
+        return Err(format!("{bad:?} is not a host name or an address"));
+    }
     // An address becomes an address entry, anything else a host name.
     let mut params = CertificateParams::new(names.to_vec())
         .map_err(|_| format!("{names:?} holds something that is not a host name or an address"))?;
@@ -35,8 +38,26 @@ pub fn make(names: &[String], cert: &Path, key: &Path) -> Result<(), String> {
     let made = params
         .self_signed(&pair)
         .map_err(|error| format!("cannot make the certificate: {error}"))?;
-    write(cert, made.pem().as_bytes(), 0o644)?;
-    write(key, pair.serialize_pem().as_bytes(), 0o600)
+    // The key first: a certificate left without its new key would be served with the old one.
+    write(key, pair.serialize_pem().as_bytes(), 0o600)?;
+    write(cert, made.pem().as_bytes(), 0o644)
+}
+
+/// An IP address, or a host name of letters, digits and inner hyphens, dot-separated (a leading `*.` allowed).
+fn host_or_address(name: &str) -> bool {
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let host = name.strip_prefix("*.").unwrap_or(name);
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
 }
 
 /// What a certificate says of itself: the names and addresses it covers,

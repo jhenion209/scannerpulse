@@ -725,6 +725,30 @@ pub(super) fn scram(password: &str) -> String {
     scram_verifier(password, &salt)
 }
 
+/// A step that runs `sql` in psql as the postgres account, stopping at the first error.
+pub(super) fn psql_step(title: &str, sql: String) -> Step {
+    Step {
+        title: title.into(),
+        action: Action::Run {
+            program: "runuser".into(),
+            args: [
+                "-u",
+                "postgres",
+                "--",
+                "psql",
+                "-q",
+                "-v",
+                "ON_ERROR_STOP=1",
+            ]
+            .map(String::from)
+            .to_vec(),
+            input: Some(sql),
+            env: Vec::new(),
+            unless: None,
+        },
+    }
+}
+
 pub(super) fn database_sql(password: &str) -> String {
     let quoted = scram(password);
     format!(
@@ -869,26 +893,10 @@ pub fn steps(answers: &Answers, system: &System, binary: &Path, db_password: &st
     }
     steps.push(account_step());
     if here {
-        steps.push(Step {
-            title: "Make the database and its role".into(),
-            action: Action::Run {
-                program: "runuser".into(),
-                args: [
-                    "-u",
-                    "postgres",
-                    "--",
-                    "psql",
-                    "-q",
-                    "-v",
-                    "ON_ERROR_STOP=1",
-                ]
-                .map(String::from)
-                .to_vec(),
-                input: Some(database_sql(db_password)),
-                env: Vec::new(),
-                unless: None,
-            },
-        });
+        steps.push(psql_step(
+            "Make the database and its role",
+            database_sql(db_password),
+        ));
     }
     steps.extend(folder_steps(&answers.recordings, &answers.archive, false));
     steps.extend(settings_folder_steps());

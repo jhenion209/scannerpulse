@@ -50,6 +50,8 @@ pub struct Found {
     pub gone: Vec<PathBuf>,
     /// This is a database machine (its place, `node.json`, is here).
     pub node: bool,
+    /// Why the database could not be read (None when it answered): the folders it names are unknown.
+    pub unread: Option<String>,
     /// This is the referee (the monitor's data is here).
     pub referee: bool,
     /// This is the second ScannerPulse machine: the archive holds the first
@@ -62,26 +64,7 @@ pub struct Found {
 }
 
 fn postgres(title: &str, sql: &str) -> Step {
-    Step {
-        title: title.into(),
-        action: Action::Run {
-            program: "runuser".into(),
-            args: [
-                "-u",
-                "postgres",
-                "--",
-                "psql",
-                "-q",
-                "-v",
-                "ON_ERROR_STOP=1",
-            ]
-            .map(String::from)
-            .to_vec(),
-            input: Some(sql.into()),
-            env: Vec::new(),
-            unless: None,
-        },
-    }
+    super::steps::psql_step(title, sql.into())
 }
 
 /// The steps that undo setup on `system`, keeping what `remove` does not name.
@@ -98,7 +81,15 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         return Err("the database is one you run on another machine: uninstall leaves it; drop it there if it should go".into());
     }
     if remove.archive && found.archive.is_none() {
-        return Err("the archive's folder is recorded in the database, which does not answer: it cannot be removed this way".into());
+        return Err(match &found.unread {
+            Some(why) => format!(
+                "the archive's folder is recorded in the database, which cannot be read ({why}): it cannot be removed this way"
+            ),
+            None => {
+                "the database records no archive (no primary location): there is none to remove"
+                    .into()
+            }
+        });
     }
     if let (true, Some(archive)) = (remove.archive, &found.archive)
         && found.gone.contains(archive)
@@ -225,6 +216,13 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
         ));
     }
     if let (true, Some(archive)) = (remove.archive, &found.archive) {
+        // The path comes from the database: a row that says / (or a relative path) must never be emptied.
+        if !archive.is_absolute() || archive.parent().is_none() {
+            return Err(format!(
+                "the archive's recorded path is {}: uninstall will not empty that",
+                archive.display()
+            ));
+        }
         let a = archive.display().to_string();
         let kept = ".scannerpulse-backups";
         let keep_backups = !remove.backups
@@ -247,6 +245,7 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
                 "find",
                 &[
                     &a,
+                    "-xdev",
                     "-mindepth",
                     "1",
                     "-maxdepth",
@@ -266,7 +265,7 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
             run(
                 "Remove everything in the archive",
                 "find",
-                &[&a, "-mindepth", "1", "-delete"],
+                &[&a, "-xdev", "-mindepth", "1", "-delete"],
             )
         });
         if found.account {
@@ -354,13 +353,17 @@ pub fn steps(found: &Found, remove: Remove, system: &System) -> Result<Vec<Step>
     Ok(steps)
 }
 
+/// The folders the database names (the sources, the primary location) and its call count, if it could count.
+pub(super) type Known = (Vec<PathBuf>, Option<PathBuf>, Option<i64>);
+
 /// What the database says the folders are: the sources, and the primary
-/// location; and how many calls it holds.
-pub(super) async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+/// location; and how many calls it holds (None when that count fails: the
+/// folders still count). Err says why the database could not be read.
+pub(super) async fn folders() -> Result<Known, String> {
+    let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set".to_string())?;
     let mut conn = crate::primary::connect(&url, std::time::Duration::from_secs(5))
         .await
-        .ok()?;
+        .map_err(|error| error.to_string())?;
     // An older archive imported where it is stays as it was: nothing is
     // written in it, not even its access list.
     let sources: Vec<String> = sqlx::query_scalar(
@@ -369,27 +372,36 @@ pub(super) async fn folders() -> Option<(Vec<PathBuf>, Option<PathBuf>, i64)> {
     )
     .fetch_all(&mut conn)
     .await
-    .ok()?;
+    .map_err(|error| error.to_string())?;
     let archive: Option<String> = sqlx::query_scalar("SELECT root FROM locations WHERE is_primary")
         .fetch_optional(&mut conn)
         .await
-        .ok()?;
-    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM calls")
+        .map_err(|error| error.to_string())?;
+    let calls: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM calls")
         .fetch_one(&mut conn)
         .await
-        .ok()?;
-    Some((
+        .ok();
+    Ok((
         sources.into_iter().map(PathBuf::from).collect(),
         archive.map(PathBuf::from),
         calls,
     ))
 }
 
+/// `path` with links and `..` resolved, so folders compare as they really are; as given when that cannot be done.
+fn resolved(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 /// The question `--remove-archive` asks before its path is typed.
-fn archive_question(archive: &Path, calls: i64) -> String {
-    let noun = if calls == 1 { "call" } else { "calls" };
+fn archive_question(archive: &Path, calls: Option<i64>) -> String {
+    let held = match calls {
+        Some(1) => "1 call".to_string(),
+        Some(n) => format!("{n} calls"),
+        None => "an unknown number of calls".to_string(),
+    };
     format!(
-        "The archive {} holds {calls} {noun}. --remove-archive deletes them all, with their recordings, and they cannot be got back. Delete them?",
+        "The archive {} holds {held}. --remove-archive deletes them all, with their recordings, and they cannot be got back. Delete them?",
         archive.display()
     )
 }
@@ -399,9 +411,9 @@ fn typed(what: &str, name: &str) -> Result<bool, String> {
     let answer = Text::new(&format!(
         "{what} will be deleted for good. Type {name} to go ahead:"
     ))
-    .prompt()
-    .map_err(|error| error.to_string())?;
-    Ok(answer.trim() == name)
+    .prompt();
+    // Leaving the question (Esc or Ctrl-C) is a no.
+    Ok(super::ask::left(answer)?.is_some_and(|answer| answer.trim() == name))
 }
 
 /// Undoes setup on this machine, as root.
@@ -416,7 +428,10 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     let os_release = std::fs::read_to_string("/etc/os-release")
         .map_err(|error| format!("/etc/os-release: {error}"))?;
     let system = super::system::detect(&os_release, std::env::consts::ARCH)?;
-    let (recordings, archive, calls) = folders().await.unwrap_or_default();
+    let (recordings, archive, calls, unread) = match folders().await {
+        Ok((recordings, archive, calls)) => (recordings, archive.map(resolved), calls, None),
+        Err(why) => (Vec::new(), None, None, Some(why)),
+    };
     let gone: Vec<PathBuf> = recordings
         .iter()
         .chain(&archive)
@@ -441,7 +456,8 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         archive,
         backups: std::env::var("SCANNERPULSE_BACKUPS")
             .ok()
-            .map(PathBuf::from),
+            .map(PathBuf::from)
+            .map(resolved),
         node: Path::new(super::node::NODE).exists(),
         disk: Path::new(super::disk::TIMER).exists(),
         referee: Path::new(&super::referee::monitor_data(&system))
@@ -455,6 +471,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         second,
         keepalived: std::fs::read_to_string(super::keepalived::CONF)
             .is_ok_and(|text| super::keepalived::ours(&text)),
+        unread,
     };
     let steps = steps(&found, remove, &system)?;
     println!("\nUninstall will:");
@@ -500,10 +517,12 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
     if !kept.is_empty() {
         println!("It keeps {}.", kept.join(", "));
     }
-    let mut go = Confirm::new("Uninstall ScannerPulse?")
-        .with_default(false)
-        .prompt()
-        .map_err(|error| error.to_string())?;
+    let mut go = super::ask::left(
+        Confirm::new("Uninstall ScannerPulse?")
+            .with_default(false)
+            .prompt(),
+    )?
+    .unwrap_or(false);
     if go && remove.database {
         go = typed(&format!("The database {DATABASE}"), DATABASE)?;
     }
@@ -514,10 +533,12 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         )?;
     }
     if let (true, true, Some(archive)) = (go, remove.archive, &found.archive) {
-        go = Confirm::new(&archive_question(archive, calls))
-            .with_default(false)
-            .prompt()
-            .map_err(|error| error.to_string())?
+        go = super::ask::left(
+            Confirm::new(&archive_question(archive, calls))
+                .with_default(false)
+                .prompt(),
+        )?
+        .unwrap_or(false)
             && typed("Every call in the archive", &archive.display().to_string())?;
     }
     if !go {
@@ -529,7 +550,7 @@ pub async fn run_uninstall(remove: Remove) -> Result<(), String> {
         db_password: String::new(),
         nodes: Vec::new(),
     };
-    apply::apply(&steps, &context, true).await?;
+    apply::apply_as("uninstall", &steps, &context, true).await?;
     println!("\nScannerPulse is uninstalled.");
     Ok(())
 }
@@ -543,11 +564,15 @@ mod tests {
 
     #[test]
     fn removing_the_archive_asks_first_naming_its_folder_and_its_calls() {
-        let question = archive_question(Path::new("/srv/archive"), 1200);
+        assert!(
+            archive_question(Path::new("/srv/archive"), None)
+                .contains("holds an unknown number of calls")
+        );
+        let question = archive_question(Path::new("/srv/archive"), Some(1200));
         assert!(question.starts_with("The archive /srv/archive holds 1200 calls."));
         assert!(question.contains("--remove-archive deletes them all"));
         assert!(question.ends_with("Delete them?"));
-        assert!(archive_question(Path::new("/srv/archive"), 1).contains("holds 1 call."));
+        assert!(archive_question(Path::new("/srv/archive"), Some(1)).contains("holds 1 call."));
     }
 
     fn found() -> Found {
@@ -565,6 +590,7 @@ mod tests {
             second: false,
             keepalived: false,
             disk: false,
+            unread: None,
         }
     }
 
@@ -859,8 +885,102 @@ mod tests {
         assert!(text.contains(
             "rmdir --ignore-fail-on-non-empty -- \"$1\" rmdir /srv/archive/.scannerpulse-backups"
         ));
-        assert!(text.contains("find /srv/archive -mindepth 1 -delete"));
+        assert!(text.contains("find /srv/archive -xdev -mindepth 1 -delete"));
         assert!(!text.contains("setfacl -R -x u:scannerpulse -x d:u:scannerpulse /srv/archive"));
+    }
+
+    #[test]
+    fn uninstall_drops_the_database_with_the_same_psql_as_setup_makes_it() {
+        let (made, dropped) = (
+            super::super::steps::psql_step("a", "SELECT 1".into()),
+            super::postgres("b", "SELECT 2"),
+        );
+        let program_and_args = |s: &Step| match &s.action {
+            Action::Run { program, args, .. } => (program.clone(), args.clone()),
+            _ => unreachable!(),
+        };
+        assert_eq!(program_and_args(&made), program_and_args(&dropped));
+    }
+
+    #[test]
+    fn removing_backups_no_one_can_find_is_refused() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        let unknown = Found {
+            backups: None,
+            ..found()
+        };
+        let error = steps(
+            &unknown,
+            Remove {
+                backups: true,
+                ..Remove::default()
+            },
+            &system,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "the settings file does not say where the backups are"
+        );
+    }
+
+    #[test]
+    fn an_archive_path_that_is_the_root_or_relative_is_never_emptied() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        for bad in ["/", "srv/archive"] {
+            let odd = Found {
+                archive: Some(PathBuf::from(bad)),
+                backups: None,
+                ..found()
+            };
+            let error = steps(
+                &odd,
+                Remove {
+                    archive: true,
+                    ..Remove::default()
+                },
+                &system,
+            )
+            .unwrap_err();
+            assert!(error.contains("will not empty"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn emptying_the_archive_stays_on_its_own_disk() {
+        let system = detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        for remove in [
+            Remove {
+                archive: true,
+                ..Remove::default()
+            },
+            Remove {
+                archive: true,
+                backups: true,
+                ..Remove::default()
+            },
+        ] {
+            let text = lines(&steps(&found(), remove, &system).unwrap()).join("\n");
+            assert!(
+                text.contains("find /srv/archive -xdev -mindepth 1"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_is_compared_as_it_really_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("archive");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        let resolved = super::resolved(dir.path().join("link"));
+        assert_eq!(resolved, std::fs::canonicalize(&real).unwrap());
+        assert_eq!(
+            super::resolved(PathBuf::from("/no/such/folder")),
+            PathBuf::from("/no/such/folder"),
+            "kept as given when it cannot be"
+        );
     }
 
     #[test]
@@ -873,7 +993,7 @@ mod tests {
         let text = lines(&steps(&found(), only, &system).unwrap()).join("\n");
         assert!(
             text.contains(
-                "find /srv/archive -mindepth 1 -maxdepth 1 ! -name .scannerpulse-backups -exec rm -rf -- {} +"
+                "find /srv/archive -xdev -mindepth 1 -maxdepth 1 ! -name .scannerpulse-backups -exec rm -rf -- {} +"
             ),
             "{text}"
         );
@@ -904,6 +1024,7 @@ mod tests {
             units: vec![],
             pgbackrest: false,
             account: true,
+            unread: Some("connection refused".into()),
             ..Found::default()
         };
         let text = lines(&steps(&half, Remove::default(), &system).unwrap()).join("\n");
@@ -921,7 +1042,26 @@ mod tests {
             &system,
         )
         .unwrap_err();
-        assert!(error.contains("does not answer"), "{error}");
+        assert!(
+            error.contains("cannot be read (connection refused)"),
+            "{error}"
+        );
+        // The database answered but records no archive: a different reason.
+        let none = Found {
+            archive: None,
+            unread: None,
+            ..found()
+        };
+        let error = steps(
+            &none,
+            Remove {
+                archive: true,
+                ..Remove::default()
+            },
+            &system,
+        )
+        .unwrap_err();
+        assert!(error.contains("records no archive"), "{error}");
     }
 
     #[test]

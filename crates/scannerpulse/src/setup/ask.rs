@@ -1479,19 +1479,28 @@ pub enum Next {
     Quit,
 }
 
+/// A prompt's answer: None when the person left the question (Esc or Ctrl-C), an error for any other failure.
+pub fn left<T>(answer: Result<T, inquire::InquireError>) -> Result<Option<T>, String> {
+    match answer {
+        Ok(value) => Ok(Some(value)),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => Ok(None),
+        Err(other) => Err(other.to_string()),
+    }
+}
+
 /// Asks to go ahead, change an answer, or quit, after the summary.
 pub fn next() -> Result<Next, String> {
     const GO: &str = "Set up this machine now";
     const CHANGE: &str = "Change an answer";
     const QUIT: &str = "Quit; nothing is written";
-    let choice = Select::new("Nothing has been written yet.", vec![GO, CHANGE, QUIT])
-        .prompt()
-        .map_err(|error| error.to_string());
+    let choice =
+        left(Select::new("Nothing has been written yet.", vec![GO, CHANGE, QUIT]).prompt())?;
     Ok(match choice {
-        Ok(GO) => Next::Go,
-        Ok(CHANGE) => Next::Change,
-        Ok(_) => Next::Quit,
-        Err(_) => Next::Quit,
+        Some(GO) => Next::Go,
+        Some(CHANGE) => Next::Change,
+        _ => Next::Quit,
     })
 }
 
@@ -1667,6 +1676,27 @@ fn free(port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn leaving_a_question_is_not_an_error_but_a_real_failure_is() {
+        use inquire::InquireError;
+        assert_eq!(super::left(Ok::<_, InquireError>(5)), Ok(Some(5)));
+        assert_eq!(
+            super::left::<u8>(Err(InquireError::OperationCanceled)),
+            Ok(None),
+            "Esc"
+        );
+        assert_eq!(
+            super::left::<u8>(Err(InquireError::OperationInterrupted)),
+            Ok(None),
+            "Ctrl-C"
+        );
+        let io = InquireError::IO(std::io::Error::other("the terminal went away"));
+        assert!(
+            super::left::<u8>(Err(io))
+                .unwrap_err()
+                .contains("the terminal went away")
+        );
+    }
     use super::{
         Defaults, convert_from_file, distinct_machines, free_port, program_in, zone_from_link,
     };

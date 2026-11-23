@@ -59,3 +59,29 @@ fn something_that_is_no_certificate_is_refused() {
     let error = cert::check(&text, &k).unwrap_err();
     assert!(error.contains("holds no certificate"), "{error}");
 }
+
+#[test]
+fn a_failed_key_write_leaves_no_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, k) = (
+        dir.path().join("site.pem"),
+        dir.path().join("no-such-folder/site.key"),
+    );
+    let names = vec!["radio-a.example.org".to_string()];
+    assert!(cert::make(&names, &c, &k).is_err());
+    assert!(
+        !c.exists(),
+        "a certificate without its key would be served with the old one"
+    );
+}
+
+#[test]
+fn a_certificate_needs_a_name_it_can_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, k) = (dir.path().join("site.pem"), dir.path().join("site.key"));
+    let error = cert::make(&[], &c, &k).unwrap_err();
+    assert!(error.contains("at least one name"), "{error}");
+    let error = cert::make(&["radio a".to_string()], &c, &k).unwrap_err();
+    assert!(error.contains("not a host name or an address"), "{error}");
+    assert!(!c.exists() && !k.exists());
+}

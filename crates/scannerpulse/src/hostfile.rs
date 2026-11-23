@@ -23,14 +23,7 @@ pub fn parse(text: &str) -> Result<Vec<(String, String)>, String> {
             .split_once('=')
             .ok_or_else(|| format!("line {}: not NAME=value", n + 1))?;
         let name = name.trim();
-        let good = name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
-            && name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-        if !good {
+        if !good_name(name) {
             return Err(format!("line {}: {name:?} is not a variable's name", n + 1));
         }
         let value = unquote(value.trim()).map_err(|e| format!("line {}: {e}", n + 1))?;
@@ -43,6 +36,18 @@ pub fn parse(text: &str) -> Result<Vec<(String, String)>, String> {
     Ok(pairs)
 }
 
+/// Capital letters, digits and `_`, not starting with a digit.
+fn good_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// A value, unquoted. Inside quotes only `\"` and `\\` (what `render` writes) are taken; a raw quote or another
+/// escape is refused rather than read some other way than systemd reads it.
 fn unquote(value: &str) -> Result<String, String> {
     let Some(inner) = value.strip_prefix('"') else {
         return Ok(value.to_string());
@@ -56,12 +61,11 @@ fn unquote(value: &str) -> Result<String, String> {
         if c == '\\' {
             match chars.next() {
                 Some(escaped @ ('"' | '\\')) => out.push(escaped),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
+                Some(other) => return Err(format!("a quoted value holds the escape \\{other}")),
                 None => return Err("a quoted value ends with a backslash".into()),
             }
+        } else if c == '"' {
+            return Err("a quoted value holds a quote that is not escaped".into());
         } else {
             out.push(c);
         }
@@ -77,6 +81,9 @@ pub fn render(pairs: &[(&str, &str)]) -> Result<String, String> {
          # Read by the services (systemd EnvironmentFile) and by the command line.\n",
     );
     for (name, value) in pairs {
+        if !good_name(name) {
+            return Err(format!("{name:?} is not a variable's name"));
+        }
         if value.contains(['\n', '\r']) {
             return Err(format!("{name}'s value holds a line break"));
         }
@@ -117,6 +124,10 @@ pub fn to_apply(
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        // Read, but not text: no question of who may read it.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(format!("{} is not text (UTF-8): {error}", path.display()));
+        }
         Err(error) => {
             return Err(format!(
                 "cannot read {}: {error} (run as root or as the scannerpulse account)",
@@ -134,6 +145,39 @@ pub fn to_apply(
 #[cfg(test)]
 mod tests {
     use super::{changed, parse, render, to_apply};
+
+    #[test]
+    fn a_file_that_is_not_text_gets_no_root_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scannerpulse.env");
+        std::fs::write(&path, b"A=\xff\xfe\n").unwrap();
+        let error = to_apply(&path, |_| false).unwrap_err();
+        assert!(!error.contains("run as root"), "{error}");
+        assert!(error.contains("not text"), "{error}");
+    }
+
+    #[test]
+    fn render_refuses_a_name_parse_would_refuse() {
+        let error = render(&[("bad name", "x")]).unwrap_err();
+        assert!(error.contains("not a variable's name"), "{error}");
+        assert!(render(&[("SCANNERPULSE_HOST", "x")]).is_ok());
+    }
+
+    #[test]
+    fn a_quoted_value_holds_only_what_render_writes() {
+        assert!(
+            parse("A=\"x\"y\"\n").unwrap_err().contains("quote"),
+            "a raw quote inside"
+        );
+        assert!(
+            parse("A=\"x\\ny\"\n").unwrap_err().contains("escape"),
+            "an escape render never writes"
+        );
+        assert_eq!(
+            parse("A=\"x\\\"y\\\\z\"\n").unwrap(),
+            [("A".to_string(), "x\"y\\z".to_string())]
+        );
+    }
 
     #[test]
     fn a_nul_in_a_value_is_refused() {

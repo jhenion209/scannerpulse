@@ -163,15 +163,7 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
         };
-        let tls = match (path("SCANNERPULSE_TLS_CERT"), path("SCANNERPULSE_TLS_KEY")) {
-            (Some(cert), Some(key)) => Some(Tls { cert, key }),
-            (None, None) => None,
-            _ => {
-                return Err(
-                    "set both SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY, or neither".into(),
-                );
-            }
-        };
+        let tls = tls_pair(path("SCANNERPULSE_TLS_CERT"), path("SCANNERPULSE_TLS_KEY"))?;
         let acme = crate::acme::Settings::from_env()?;
         if acme.is_some() && tls.is_none() {
             return Err("SCANNERPULSE_ACME needs SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY: the certificate served until Let's Encrypt's arrives".into());
@@ -578,5 +570,33 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
             "the database does not answer",
         ),
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "the database is too slow"),
+    }
+}
+
+/// The certificate and its key: both set, or neither (plain HTTP).
+fn tls_pair(cert: Option<PathBuf>, key: Option<PathBuf>) -> Result<Option<Tls>, String> {
+    match (cert, key) {
+        (Some(cert), Some(key)) => Ok(Some(Tls { cert, key })),
+        (None, None) => Ok(None),
+        _ => Err("set both SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY, or neither".into()),
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::tls_pair;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_certificate_and_its_key_are_set_together_or_not_at_all() {
+        let p = |s: &str| Some(PathBuf::from(s));
+        assert!(tls_pair(p("/c.pem"), p("/c.key")).unwrap().is_some());
+        assert!(tls_pair(None, None).unwrap().is_none());
+        for (c, k) in [(p("/c.pem"), None), (None, p("/c.key"))] {
+            assert_eq!(
+                tls_pair(c, k).unwrap_err(),
+                "set both SCANNERPULSE_TLS_CERT and SCANNERPULSE_TLS_KEY, or neither"
+            );
+        }
     }
 }

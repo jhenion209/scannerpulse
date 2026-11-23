@@ -211,11 +211,11 @@ pub fn location_steps(
 /// database must answer to say which they are.
 pub(super) fn location_apart(
     folder: &Path,
-    known: Option<(Vec<PathBuf>, Option<PathBuf>, i64)>,
+    known: Result<super::uninstall::Known, String>,
 ) -> Result<(), String> {
-    let Some((recordings, archive, _)) = known else {
-        return Err("the database must answer, to check the folder against the recordings folder and the archive (and for the full backup that follows): start PostgreSQL, then try again".into());
-    };
+    let (recordings, archive, _) = known.map_err(|why| format!(
+        "the database must answer, to check the folder against the recordings folder and the archive (and for the full backup that follows), and it cannot be read ({why}): start PostgreSQL, then try again"
+    ))?;
     let mut others: Vec<(&Path, &str)> = recordings
         .iter()
         .map(|r| (r.as_path(), "the recordings folder"))
@@ -229,11 +229,11 @@ pub(super) fn location_apart(
 pub(super) fn read_secret(question: &str) -> Result<String, String> {
     use std::io::IsTerminal;
     let secret = if std::io::stdin().is_terminal() {
-        inquire::Password::new(question)
+        let typed = inquire::Password::new(question)
             .with_display_mode(inquire::PasswordDisplayMode::Masked)
             .without_confirmation()
-            .prompt()
-            .map_err(|error| error.to_string())?
+            .prompt();
+        super::ask::left(typed)?.ok_or("nothing was changed")?
     } else {
         let mut line = String::new();
         std::io::stdin()
@@ -691,12 +691,16 @@ mod tests {
             PathBuf::from("/srv/recordings"),
             PathBuf::from("/srv/archive"),
         );
-        let silent = location_apart(Path::new("/srv/backups"), None).unwrap_err();
-        assert!(silent.contains("the database must answer"), "{silent}");
-        let no_source = Some((vec![], Some(arc.clone()), 0));
+        let silent = location_apart(Path::new("/srv/backups"), Err("connection refused".into()))
+            .unwrap_err();
+        assert!(
+            silent.contains("the database must answer") && silent.contains("connection refused"),
+            "{silent}"
+        );
+        let no_source = Ok((vec![], Some(arc.clone()), Some(0)));
         let inside = location_apart(Path::new("/srv/archive/b"), no_source).unwrap_err();
         assert!(inside.contains("may not be inside each other"), "{inside}");
-        let known = Some((vec![rec.clone()], Some(arc.clone()), 0));
+        let known = Ok((vec![rec.clone()], Some(arc.clone()), Some(0)));
         assert!(location_apart(Path::new("/srv/recordings/b"), known.clone()).is_err());
         assert!(location_apart(Path::new("/srv/backups"), known).is_ok());
     }
