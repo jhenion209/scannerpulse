@@ -121,6 +121,11 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         }
     };
     let made_password = crate::sessions::random_hex(24);
+    // A PORT in the answers file is a choice, not something setup must explain.
+    let file_sets_port = answers_file
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|text| crate::hostfile::parse(&text).ok())
+        .is_some_and(|pairs| pairs.iter().any(|(name, _)| name == "PORT"));
     let (steps, db_password) = loop {
         if answers.database == steps::Database::Here {
             system::other_postgres(&seen)?;
@@ -180,12 +185,14 @@ pub async fn run(answers_file: Option<&Path>, dry_run: bool) -> Result<(), Strin
         };
         let steps = steps::steps(&answers, &system, Path::new(BINARY), &db_password);
         print!("{}", summary(&answers, &system, &steps));
-        if defaults.port != 443 && answers.port == defaults.port {
-            println!(
-                "Port 443 is in use by {}, so the site is served on port {}.",
-                ask::holder(443),
-                answers.port
-            );
+        if let Some(note) = port_note(
+            answers_file.is_some(),
+            file_sets_port,
+            defaults.port,
+            answers.port,
+            || ask::holder(443),
+        ) {
+            println!("{note}");
         }
         if dry_run {
             println!("\nThe steps' commands (a dry run: nothing was changed):");
@@ -475,8 +482,56 @@ fn finished(answers: &Answers) -> String {
     )
 }
 
+/// What to say about the port on an unattended run that took another port because 443 is in use; nothing when
+/// the run was interactive (the question said so), the answers file chose the port, or 443 was free. `holder` (it
+/// runs `ss`) is asked only when the note is shown.
+fn port_note(
+    unattended: bool,
+    file_sets_port: bool,
+    default: u16,
+    chosen: u16,
+    holder: impl FnOnce() -> String,
+) -> Option<String> {
+    (unattended && !file_sets_port && default != 443 && chosen == default).then(|| {
+        format!(
+            "Port 443 is in use by {}, so the site is served on port {chosen}.",
+            holder()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_port_note_is_for_an_unattended_run_that_did_not_choose_its_port() {
+        let holder = || "nginx".to_string();
+        let note = super::port_note(true, false, 8443, 8443, holder);
+        assert_eq!(
+            note.as_deref(),
+            Some("Port 443 is in use by nginx, so the site is served on port 8443.")
+        );
+        assert_eq!(
+            super::port_note(false, false, 8443, 8443, holder),
+            None,
+            "asked already on an interactive run"
+        );
+        assert_eq!(
+            super::port_note(true, true, 8443, 8443, holder),
+            None,
+            "the answers file chose it"
+        );
+        assert_eq!(
+            super::port_note(true, false, 443, 443, holder),
+            None,
+            "443 was free"
+        );
+        let asked = std::cell::Cell::new(false);
+        super::port_note(false, false, 8443, 8443, || {
+            asked.set(true);
+            String::new()
+        });
+        assert!(!asked.get(), "ss runs only when the note is shown");
+    }
     use super::{detail, finished, steps, summary, system};
     use std::path::{Path, PathBuf};
 

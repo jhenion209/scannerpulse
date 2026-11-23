@@ -158,6 +158,39 @@ mod tests {
     use super::*;
     use crate::setup::steps::Action;
 
+    /// Every apt-get step waits up to 300 s for another apt (an unattended upgrade) to let go of the lock.
+    fn apt_waits_for_its_lock(steps: &[crate::setup::steps::Step]) {
+        let mut apts = 0;
+        for step in steps {
+            if let crate::setup::steps::Action::Run { program, args, .. } = &step.action
+                && program == "apt-get"
+            {
+                apts += 1;
+                assert!(
+                    args.windows(2)
+                        .any(|w| w == ["-o", "DPkg::Lock::Timeout=300"]),
+                    "{}: {args:?}",
+                    step.title
+                );
+            }
+        }
+        assert!(apts > 0, "no apt-get step");
+    }
+
+    #[test]
+    fn installing_keepalived_on_debian_waits_for_the_apt_lock() {
+        let debian =
+            crate::setup::system::detect("ID=debian\nVERSION_ID=\"13\"\n", "x86_64").unwrap();
+        apt_waits_for_its_lock(&steps(
+            &debian,
+            "192.0.2.50/24",
+            "192.0.2.52",
+            true,
+            51,
+            443,
+        ));
+    }
+
     #[test]
     fn the_healthy_machine_holds_the_shared_address() {
         let first = conf("192.0.2.50/24", true, 7, 443);

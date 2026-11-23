@@ -26,6 +26,16 @@ pub struct Context {
 /// Runs `steps`, saying each; `quiet` keeps a step's own output (apt's, for
 /// one) unless it fails.
 pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(), String> {
+    apply_as("setup", steps, context, quiet).await
+}
+
+/// `apply` for the command `what` (setup, uninstall): a failure says which one stopped.
+pub async fn apply_as(
+    what: &str,
+    steps: &[Step],
+    context: &Context,
+    quiet: bool,
+) -> Result<(), String> {
     let total = steps.len();
     for (n, step) in steps.iter().enumerate() {
         let n = n + 1;
@@ -34,7 +44,7 @@ pub async fn apply(steps: &[Step], context: &Context, quiet: bool) -> Result<(),
         let _ = writeln!(std::io::stdout(), "[{n}/{total}] {}", step.title);
         let fail = |why: String| {
             format!(
-                "setup stopped at step {n} of {total}, {}: {why}",
+                "{what} stopped at step {n} of {total}, {}: {why}",
                 step.title
             )
         };
@@ -138,14 +148,29 @@ fn run(
     let mut child = command
         .spawn()
         .map_err(|error| format!("cannot run {program}: {error}"))?;
-    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| format!("cannot write to {program}: {error}"))?;
-    }
+    // The input goes in from a thread of its own while the output is read: a program that says more than a pipe
+    // holds before it reads would otherwise wait on us while we wait on it.
+    let writer = match (input, child.stdin.take()) {
+        (Some(text), Some(mut stdin)) => {
+            let text = text.to_string();
+            Some(std::thread::spawn(move || stdin.write_all(text.as_bytes())))
+        }
+        _ => None,
+    };
     let output = child
         .wait_with_output()
         .map_err(|error| format!("{program}: {error}"))?;
+    if let Some(writer) = writer {
+        // A program that ends without reading all of it closes the pipe: what it said decides, not the write.
+        let written = writer
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("the writer stopped")));
+        if let Err(error) = written
+            && output.status.success()
+        {
+            return Err(format!("cannot write to {program}: {error}"));
+        }
+    }
     if output.status.success() {
         return Ok(());
     }
@@ -487,23 +512,32 @@ async fn wait_for_second() -> Result<(), String> {
 /// checked: one the person installs names their site, not 127.0.0.1, and
 /// nothing secret goes to the loopback address.
 async fn wait_for_web(port: u16) -> Result<(), String> {
+    wait_for_web_within(port, WEB_WAIT).await
+}
+
+async fn wait_for_web_within(port: u16, budget: Duration) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(5))
         .build()
         .map_err(|error| error.to_string())?;
     let url = format!("https://127.0.0.1:{port}/health");
     let started = std::time::Instant::now();
     loop {
-        if let Ok(response) = client.get(&url).send().await
+        // Each try gets 5 s at most, and never more than is left of the wait.
+        let left = budget.saturating_sub(started.elapsed());
+        if let Ok(response) = client
+            .get(&url)
+            .timeout(left.min(Duration::from_secs(5)))
+            .send()
+            .await
             && response.status().is_success()
         {
             return Ok(());
         }
-        if started.elapsed() > WEB_WAIT {
+        if started.elapsed() > budget {
             return Err(format!(
                 "the web interface did not answer at {url} within {} s; see `journalctl -u scannerpulse-web`",
-                WEB_WAIT.as_secs()
+                budget.as_secs()
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -513,6 +547,43 @@ async fn wait_for_web(port: u16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{Context, apply};
+
+    #[test]
+    fn a_quiet_program_that_talks_before_it_reads_does_not_hang() {
+        // It prints 200 kB (more than a pipe holds) before reading its 200 kB of input.
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let input = "y".repeat(200_000);
+            let args = vec![
+                "-c".to_string(),
+                "head -c 200000 /dev/zero; cat >/dev/null".to_string(),
+            ];
+            let _ = done.send(super::run("sh", &args, Some(&input), &[], true));
+        });
+        let result = wait
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the step hung");
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_web_that_never_answers_ends_on_time() {
+        // Takes the connection, never answers: each request would wait out its own timeout.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _held: Vec<_> = listener.incoming().take(20).collect();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let started = std::time::Instant::now();
+        let result = super::wait_for_web_within(port, std::time::Duration::from_secs(1)).await;
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(2500),
+            "{:?}",
+            started.elapsed()
+        );
+    }
     use crate::setup::plan::Plan;
     use crate::setup::steps::{Action, Step};
     use std::os::unix::fs::PermissionsExt;
@@ -917,6 +988,13 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("the reason"), "{error}");
+        let error = super::apply_as("uninstall", &steps, &context(), true)
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with("uninstall stopped at step 1 of 2, fails:"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

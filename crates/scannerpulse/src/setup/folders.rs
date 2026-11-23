@@ -20,17 +20,27 @@ pub struct Folder {
 
 /// `path` as setup can use it, or why not.
 pub fn check(path: &Path) -> Result<Folder, String> {
+    check_with(path, MIN_FREE)
+}
+
+/// `check` with `min_free` bytes as the least free space.
+fn check_with(path: &Path, min_free: u64) -> Result<Folder, String> {
+    // Setup writes the path into unit files (RequiresMountsFor=), where a line break would end the line.
+    if path.to_string_lossy().chars().any(char::is_control) {
+        return Err(format!("{:?} holds a control character", path.display()));
+    }
     if !path.is_absolute() {
         return Err(format!(
             "{} is not a full path: start it with /",
             path.display()
         ));
     }
-    let meta = std::fs::metadata(path).map_err(|_| {
-        format!(
+    let meta = std::fs::metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => format!(
             "{} does not exist: make the folder first, or give another",
             path.display()
-        )
+        ),
+        _ => format!("{} cannot be looked at: {error}", path.display()),
     })?;
     if !meta.is_dir() {
         return Err(format!("{} is a file, not a folder", path.display()));
@@ -44,12 +54,12 @@ pub fn check(path: &Path) -> Result<Folder, String> {
     let stats =
         rustix::fs::statvfs(&real).map_err(|error| format!("{}: {error}", real.display()))?;
     let free_bytes = stats.f_bavail.saturating_mul(stats.f_frsize);
-    if free_bytes < MIN_FREE {
+    if free_bytes < min_free {
         return Err(format!(
             "{} has {} free; setup needs at least {}",
             real.display(),
             size(free_bytes),
-            size(MIN_FREE)
+            size(min_free)
         ));
     }
     let root = std::fs::metadata("/").map_err(|error| format!("/: {error}"))?;
@@ -106,7 +116,8 @@ pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
+    // 999.95 and up shows as 1000.0 at one decimal: the next unit then.
+    while value >= 999.95 && unit < UNITS.len() - 1 {
         value /= 1000.0;
         unit += 1;
     }
@@ -119,15 +130,15 @@ pub fn size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apart, check, size};
+    use super::{apart, check, check_with, size};
     use std::path::Path;
 
     #[test]
     fn a_folder_that_exists_and_can_be_written_is_taken() {
         let dir = tempfile::tempdir().unwrap();
-        let folder = check(dir.path()).unwrap();
+        // Whatever the test machine's free space: the free-space rule has its own test.
+        let folder = check_with(dir.path(), 0).unwrap();
         assert_eq!(folder.path, std::fs::canonicalize(dir.path()).unwrap());
-        assert!(folder.free_bytes >= super::MIN_FREE);
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             0,
@@ -158,13 +169,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let inner = dir.path().join("archive");
         std::fs::create_dir(&inner).unwrap();
-        let outer = check(dir.path()).unwrap();
-        let archive = check(&inner).unwrap();
+        let outer = check_with(dir.path(), 0).unwrap();
+        let archive = check_with(&inner, 0).unwrap();
         assert!(apart(&outer, &archive).is_err());
         assert!(apart(&archive, &outer).is_err());
         assert!(apart(&outer, &outer).is_err());
         let other = tempfile::tempdir().unwrap();
-        assert!(apart(&check(other.path()).unwrap(), &archive).is_ok());
+        assert!(apart(&check_with(other.path(), 0).unwrap(), &archive).is_ok());
     }
 
     #[test]
@@ -172,5 +183,33 @@ mod tests {
         assert_eq!(size(512), "512 bytes");
         assert_eq!(size(1_500_000), "1.5 MB");
         assert_eq!(size(12_300_000_000), "12.3 GB");
+        assert_eq!(size(999_999), "1.0 MB", "never 1000.0 KB");
+        assert_eq!(size(999_949), "999.9 KB");
+    }
+
+    #[test]
+    fn a_folder_with_too_little_free_space_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            check_with(dir.path(), u64::MAX)
+                .unwrap_err()
+                .contains("free; setup needs at least")
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_looked_at_says_why_not_that_it_is_missing() {
+        // A path through a file: it is not that nothing is there.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), b"x").unwrap();
+        let error = check(&dir.path().join("f/inside")).unwrap_err();
+        assert!(!error.contains("does not exist"), "{error}");
+    }
+
+    #[test]
+    fn a_path_with_a_control_character_is_refused() {
+        // A line break would end the RequiresMountsFor= line setup writes.
+        let error = check(Path::new("/srv/arch\nive")).unwrap_err();
+        assert!(error.contains("control character"), "{error}");
     }
 }

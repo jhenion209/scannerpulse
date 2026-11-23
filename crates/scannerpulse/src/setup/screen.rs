@@ -3,7 +3,7 @@
 
 use std::io::Write;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, style, terminal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,19 +117,44 @@ pub fn choose() -> Result<Option<Kind>, String> {
                     KeyCode::Up => selected = selected.saturating_sub(1),
                     KeyCode::Down => selected = (selected + 1).min(CHOICES.len() - 1),
                     KeyCode::Enter => return Ok(Some(CHOICES[selected].1)),
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    code if leaves(code, key.modifiers) => return Ok(None),
                     _ => {}
                 }
             }
         }
     })();
+    // The menu does not stay on screen under what comes next.
+    let _ = execute!(
+        std::io::stdout(),
+        terminal::Clear(terminal::ClearType::All),
+        cursor::MoveTo(0, 0)
+    );
     let _ = terminal::disable_raw_mode();
     result.map_err(fail)
 }
 
+/// Esc, q, or Ctrl-C (which raw mode turns into a key) leave the screen.
+fn leaves(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    matches!(code, KeyCode::Esc | KeyCode::Char('q'))
+        || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ADVANCED_NOTE, lines, wrap};
+    use super::{ADVANCED_NOTE, leaves, lines, wrap};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn esc_q_and_ctrl_c_leave_the_screen() {
+        assert!(leaves(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(leaves(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(
+            leaves(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            "raw mode turns Ctrl-C into a key"
+        );
+        assert!(!leaves(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!leaves(KeyCode::Enter, KeyModifiers::NONE));
+    }
 
     #[test]
     fn the_note_sits_beside_the_highlighted_choice() {
