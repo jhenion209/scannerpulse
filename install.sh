@@ -22,7 +22,7 @@ fail() {
 # All of it runs from here, once the shell has read the whole file: a
 # download cut off part way runs nothing.
 main() {
-    [ "$(uname -s)" = Linux ] || fail "ScannerPulse runs on Linux: $SUPPORTED."
+    [ "$(uname -s)" = Linux ] || fail "this system ($(uname -s)) is not supported; ScannerPulse runs on Linux: $SUPPORTED."
     case "$(uname -m)" in
         x86_64 | amd64) arch=x86_64 ;;
         aarch64 | arm64) arch=aarch64 ;;
@@ -46,16 +46,20 @@ main() {
 
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
+    # dash runs no EXIT trap when a signal ends it: Ctrl-C or a kill exits instead, so the folder goes too.
+    trap 'exit 1' HUP INT TERM
     program=scannerpulse-$arch-linux
     for file in "$program" SHA256SUMS SHA256SUMS.sig; do
         curl -fsSL -o "$tmp/$file" "$RELEASE/$file" || fail "cannot download $RELEASE/$file"
     done
     printf '%s' "$RELEASE_KEY" | base64 -d >"$tmp/key.gpg"
+    # The checker's own words are kept, to say why when the signature does not check out.
     if command -v gpgv >/dev/null; then
-        GNUPGHOME=$tmp gpgv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" 2>/dev/null
+        GNUPGHOME=$tmp gpgv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" 2>"$tmp/check.txt"
     else
-        sqv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" >/dev/null 2>&1
-    fi || fail "the release's signature does not check out; nothing was installed."
+        sqv --keyring "$tmp/key.gpg" "$tmp/SHA256SUMS.sig" "$tmp/SHA256SUMS" >"$tmp/check.txt" 2>&1
+    fi || fail "the release's signature does not check out; nothing was installed. The check said:
+$(cat "$tmp/check.txt")"
     (cd "$tmp" && grep "  $program\$" SHA256SUMS | sha256sum -c --quiet -) ||
         fail "the program does not match its signed checksum; nothing was installed."
 
@@ -68,7 +72,13 @@ main() {
     else
         fail "installing in $BIN_DIR needs root: run this as root."
     fi
-    $as_root install -m 0755 "$tmp/$program" "$BIN_DIR/scannerpulse"
+    # Written beside it, then renamed over it: a running ScannerPulse keeps its program, and no one ever runs a
+    # half-written one.
+    $as_root install -m 0755 "$tmp/$program" "$BIN_DIR/.scannerpulse.new" &&
+        $as_root mv -f "$BIN_DIR/.scannerpulse.new" "$BIN_DIR/scannerpulse" || {
+        $as_root rm -f "$BIN_DIR/.scannerpulse.new"
+        fail "cannot install $BIN_DIR/scannerpulse; the program there is unchanged."
+    }
     echo "Installed $("$BIN_DIR/scannerpulse" --version) in $BIN_DIR/scannerpulse."
     # A release may add tables: on a machine set up already, the new program
     # brings the database up to date (it reads the settings file itself).
