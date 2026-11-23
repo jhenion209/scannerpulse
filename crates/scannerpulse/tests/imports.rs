@@ -900,3 +900,53 @@ async fn an_end_named_import_of_a_long_call_starting_the_month_before_is_filed(p
         "two hours before its name"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_re_review_of_an_end_named_import_counts_copies_at_each_offset_as_end(pool: PgPool) {
+    let (_archive, places) = site(&pool).await;
+    let old = tempfile::tempdir().unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    // The import is kept as End at +01:00 (nothing in its folder yet).
+    imports::start(
+        &mut conn,
+        "Old",
+        old.path(),
+        Some(60),
+        Some(NameTime::End),
+        "admin",
+    )
+    .await
+    .unwrap();
+    run_jobs(&pool).await;
+    // Then the archive's 4 s calls of 13:05 to 13:55 turn up in it, named at
+    // their end an hour early.
+    for k in 0..6 {
+        let minute = 5 + 10 * k;
+        sqlx::query(
+            "INSERT INTO calls (started_at, duration_ms, talkgroup_id, source_id, location_id, rel_path) \
+             SELECT $1, 3996, t.id, $2, $3, $4 FROM talkgroups t WHERE t.number = 702",
+        )
+        .bind(at(13, minute))
+        .bind(places.1)
+        .bind(places.0)
+        .bind(format!("x{k}.mp3"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        std::fs::write(
+            old.path().join(format!("20190301_12{minute:02}04_x.mp3")),
+            recording("Metro", 702, "Fire", 4),
+        )
+        .unwrap();
+    }
+    let job = imports::start_review(&mut conn, "Old", old.path(), "admin")
+        .await
+        .unwrap();
+    run_jobs(&pool).await;
+    let review = imports::review(&mut conn, job).await.unwrap().unwrap();
+    assert!(review.done, "{review:?}");
+    assert_eq!(review.copies, 6, "{review:?}");
+    // At each offset the files are read as end times too: copies at +01:00 only.
+    assert_eq!(review.copies_at, [0, 0, 0, 6, 0]);
+    assert_eq!(review.suggested, Some(60));
+}

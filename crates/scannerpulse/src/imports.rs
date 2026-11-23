@@ -734,9 +734,13 @@ pub(crate) async fn review_step(
         // The same file at each offset: a clock or a zone an hour or two off
         // shows as copies found only once the times are moved, and the new
         // calls an import at that offset would make are counted with them.
+        // Read with the kept import's setting for the time in file names.
         for (i, offset) in OFFSETS.iter().enumerate() {
             let moved = FileCall {
-                started_at: started_at(call.local_start, *offset, zone),
+                started_at: work.kept_name_time.start(
+                    started_at(call.local_start, *offset, zone),
+                    call.duration_ms,
+                ),
                 ..call.clone()
             };
             match classify(conn, &moved, purged_before, zone).await? {

@@ -368,7 +368,7 @@ pub async fn machine_warnings(db: impl sqlx::PgExecutor<'_>) -> sqlx::Result<Vec
 
 /// The recorders whose clocks need a look, measured from their newest files
 /// of the last day ([`SAMPLE`] at most, [`FEWEST`] at least; never an
-/// import). A file is seen, by the database's clock, once it has been still
+/// import; only files seen since its time in file names last changed). A file is seen, by the database's clock, once it has been still
 /// for [`crate::watcher::STABLE_FOR`] after its call ended (its name's time
 /// and its length): counting from then, a recorder is named when the delay
 /// [`LOW_TAIL`] of its files beat is more than [`LIMIT_MS`] early (its clock
@@ -401,6 +401,7 @@ pub async fn recorder_warnings(db: &mut sqlx::PgConnection) -> sqlx::Result<Vec<
              FROM ingest_files f \
              WHERE f.source_id = s.id AND f.state = 'done' AND f.named_at IS NOT NULL \
                AND f.first_seen > now() - interval '1 day' \
+               AND f.first_seen > coalesce(s.name_time_set_at, '-infinity') \
                AND s.removed_at IS NULL AND s.intake <> 'asked' \
                AND NOT EXISTS (SELECT 1 FROM imports i WHERE i.source_id = s.id) \
              ORDER BY f.first_seen DESC LIMIT $1) f \

@@ -283,11 +283,13 @@ impl Filer {
             .talkgroup
             .as_ref()
             .map(|tg| (tg.number, tg.name.as_str()));
-        let rel =
-            match archive::rel_path(call.local_start.date(), &archive::folder(talkgroup), name) {
-                Ok(rel) => rel,
-                Err(why) => return self.reject_file(row, &folder, &path, why).await,
-            };
+        // The day the call started, as consolidation files it (an End
+        // recorder's call that ends after midnight started the day before).
+        let day = call.started_at.with_timezone(&self.zone).date_naive();
+        let rel = match archive::rel_path(day, &archive::folder(talkgroup), name) {
+            Ok(rel) => rel,
+            Err(why) => return self.reject_file(row, &folder, &path, why).await,
+        };
         let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
         let digest = archive::sha256(&data);
         let writing = archive::WRITES.lock().await;

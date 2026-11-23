@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
-import { freshStorage, signIn } from './admin';
+import { ASSOCIATE, freshStorage, signIn } from './admin';
 
 // The Recorders area. The seed's recorder `live` is watched. A test adds a
 // recorder in /tmp, which the server's machine has and its account may write
@@ -189,4 +189,27 @@ test('the preview and what waits have no accessibility fault and no sideways scr
   const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
   expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
+});
+
+test('a refused change of the time in file names puts the select back', async ({ page }) => {
+  await answerPosts(page, '/api/admin/recorders/*/end-names', () => ({
+    status: 400,
+    body: { error: 'bad request', detail: 'the recorder was removed meanwhile' },
+  }));
+  await signIn(page, '#recorders');
+  const select = card(page, 'live').getByLabel('Time in file names');
+  await expect(select).toHaveValue('start');
+  await select.selectOption('end');
+  await expect(card(page, 'live').getByText('the recorder was removed meanwhile')).toBeVisible();
+  await expect(select).toHaveValue('start');
+});
+
+test('an associate without the recorders function reads the time in file names as text', async ({ page }) => {
+  await signIn(page, '#recorders', ASSOCIATE);
+  const live = card(page, 'live');
+  await expect(live.getByText('Time in file names')).toBeVisible();
+  await expect(live.locator('label')).toHaveCount(0);
+  await expect(live.getByRole('combobox')).toHaveCount(0);
+  const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
+  expect(result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
 });

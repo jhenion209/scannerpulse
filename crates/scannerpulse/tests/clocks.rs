@@ -2,6 +2,7 @@ mod common;
 
 use chrono::{DateTime, Duration, Utc};
 use scannerpulse::clocks::{self, Checked};
+use scannerpulse::reader::NameTime;
 use scannerpulse::store;
 use sqlx::PgPool;
 
@@ -507,4 +508,43 @@ async fn calls_of_one_length_tell_nothing_of_names(pool: PgPool) {
             "same: its clock is 2.7 s ahead of the database's: its files are seen before their calls end"
         ]
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn files_from_before_a_names_change_are_not_measured(pool: PgPool) {
+    let sdrtrunk = recorder(&pool, "sdrtrunk").await;
+    spread(&pool, sdrtrunk, |_| 2_300).await;
+    assert_eq!(recorder_warnings(&pool).await.len(), 1, "told to set End");
+    let mut conn = pool.acquire().await.unwrap();
+    scannerpulse::recorders::change(
+        &mut conn,
+        sdrtrunk,
+        scannerpulse::recorders::Change::NameTime(NameTime::End),
+    )
+    .await
+    .unwrap();
+    // Every file it has was read as a start: none measures the new setting.
+    assert_eq!(recorder_warnings(&pool).await, Vec::<String>::new());
+    let set_at: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT name_time_set_at FROM sources WHERE id = $1")
+            .bind(sdrtrunk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(set_at.is_some());
+    // Setting it again to what it is keeps the time.
+    scannerpulse::recorders::change(
+        &mut conn,
+        sdrtrunk,
+        scannerpulse::recorders::Change::NameTime(NameTime::End),
+    )
+    .await
+    .unwrap();
+    let again: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT name_time_set_at FROM sources WHERE id = $1")
+            .bind(sdrtrunk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(again, set_at);
 }

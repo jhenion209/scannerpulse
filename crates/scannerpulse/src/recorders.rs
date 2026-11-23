@@ -337,7 +337,12 @@ pub async fn change(conn: &mut PgConnection, id: i16, change: Change) -> Result<
     let asked = intake == "asked";
     match change {
         Change::NameTime(name_time) => {
-            sqlx::query("UPDATE sources SET name_time = $2 WHERE id = $1")
+            // A real change restarts the clock checks' sample (files read with the old setting measure it wrongly).
+            sqlx::query(
+                "UPDATE sources SET name_time = $2, \
+                     name_time_set_at = CASE WHEN name_time = $2 THEN name_time_set_at ELSE now() END \
+                 WHERE id = $1",
+            )
                 .bind(id)
                 .bind(name_time.as_str())
                 .execute(&mut *conn)

@@ -75,16 +75,24 @@
     return () => clearInterval(timer);
   });
 
-  async function apply(r: Recorder, change: Change) {
+  /** Asks for `change`; false when the server refused it (said under the recorder). */
+  async function apply(r: Recorder, change: Change): Promise<boolean> {
     delete refusals[r.id];
     try {
       await admin('POST', `/api/admin/recorders/${r.id}/${change}`);
       removing = null;
       tell(changedText(r.name, change));
       await read();
+      return true;
     } catch (error) {
       refusals[r.id] = why(error);
+      return false;
     }
+  }
+
+  /** The select shows the stored setting again when the change is refused. */
+  async function setNameTime(r: Recorder, select: HTMLSelectElement) {
+    if (!(await apply(r, select.value === 'end' ? 'end-names' : 'start-names'))) select.value = r.name_time ?? 'start';
   }
 
   async function preview(r: Recorder) {
@@ -168,18 +176,18 @@
             <dt>Last file</dt><dd>{lastText(r, now)}</dd>
             <dt>Today</dt><dd>{todayText(r)}</dd>
             {#if held}<dt>Waiting</dt><dd>{held}</dd>{/if}
-            <dt><label for={`name-time-${r.id}`}>Time in file names</label></dt>
-            <dd>
-              {#if can('recorders')}
+            {#if can('recorders')}
+              <dt><label for={`name-time-${r.id}`}>Time in file names</label></dt>
+              <dd>
                 <select id={`name-time-${r.id}`} value={r.name_time ?? 'start'}
-                  onchange={(e) => apply(r, e.currentTarget.value === 'end' ? 'end-names' : 'start-names')}>
+                  onchange={(e) => setNameTime(r, e.currentTarget)}>
                   <option value="start">Start</option>
                   <option value="end">End</option>
                 </select>
-              {:else}
-                {r.name_time === 'end' ? 'End' : 'Start'}
-              {/if}
-            </dd>
+              </dd>
+            {:else}
+              <dt>Time in file names</dt><dd>{r.name_time === 'end' ? 'End' : 'Start'}</dd>
+            {/if}
           </dl>
           {#each troubles as trouble (trouble)}<p class="problem">{trouble}</p>{/each}
           {#if r.clock}<p class="problem">{clockSentence(r.clock)}</p>{/if}
