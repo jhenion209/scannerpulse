@@ -658,3 +658,24 @@ async fn a_recorder_whose_share_hangs_holds_up_no_other_recorder(pool: PgPool) -
     ANSWER.store(true, Ordering::SeqCst);
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_end_named_call_from_before_midnight_is_filed_on_the_day_it_started(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    sqlx::query("UPDATE sources SET name_time = 'end' WHERE id = $1")
+        .bind(site.source_row.id)
+        .execute(&site.pool)
+        .await?;
+    // Named at its end, 00:00:00 on the 16th; it started on the 15th.
+    let name = "20310116_000000SYSB_South_Bravo__TO_215_FROM_4021.mp3";
+    site.arrive(name, &bravo()).await;
+    let done = outcomes(site.filer().pass(10).await?);
+    let [Outcome::Filed(id, _)] = done[..] else {
+        panic!("{done:?}")
+    };
+    // Filed as consolidation files it: the day it started.
+    assert_eq!(site.calls().await, [(id, format!("{DIR}/{name}"))]);
+    Ok(())
+}
