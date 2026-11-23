@@ -33,10 +33,12 @@ pub fn parse(text: &str) -> Result<Vec<(String, String)>, String> {
         if !good {
             return Err(format!("line {}: {name:?} is not a variable's name", n + 1));
         }
-        pairs.push((
-            name.to_string(),
-            unquote(value.trim()).map_err(|e| format!("line {}: {e}", n + 1))?,
-        ));
+        let value = unquote(value.trim()).map_err(|e| format!("line {}: {e}", n + 1))?;
+        // The environment cannot hold a NUL (setting it would panic).
+        if value.contains('\0') {
+            return Err(format!("line {}: {name}'s value holds a NUL byte", n + 1));
+        }
+        pairs.push((name.to_string(), value));
     }
     Ok(pairs)
 }
@@ -68,7 +70,7 @@ fn unquote(value: &str) -> Result<String, String> {
 }
 
 /// The file's text for `pairs`, every value quoted, after a heading that says
-/// what the file is. A value holding a line break is refused.
+/// what the file is. A value holding a line break or a NUL is refused.
 pub fn render(pairs: &[(&str, &str)]) -> Result<String, String> {
     let mut text = String::from(
         "# ScannerPulse: this machine's settings, written by `scannerpulse setup`.\n\
@@ -77,6 +79,9 @@ pub fn render(pairs: &[(&str, &str)]) -> Result<String, String> {
     for (name, value) in pairs {
         if value.contains(['\n', '\r']) {
             return Err(format!("{name}'s value holds a line break"));
+        }
+        if value.contains('\0') {
+            return Err(format!("{name}'s value holds a NUL byte"));
         }
         let quoted = value.replace('\\', "\\\\").replace('"', "\\\"");
         text.push_str(&format!("{name}=\"{quoted}\"\n"));
@@ -129,6 +134,14 @@ pub fn to_apply(
 #[cfg(test)]
 mod tests {
     use super::{changed, parse, render, to_apply};
+
+    #[test]
+    fn a_nul_in_a_value_is_refused() {
+        // set_var panics on a NUL: the file is refused instead, read or written.
+        assert!(parse("A=\"x\0y\"\n").unwrap_err().contains("NUL"));
+        assert!(parse("A=x\0y\n").unwrap_err().contains("NUL"));
+        assert!(render(&[("A", "x\0y")]).unwrap_err().contains("NUL"));
+    }
 
     #[test]
     fn a_written_file_reads_back_the_same() {

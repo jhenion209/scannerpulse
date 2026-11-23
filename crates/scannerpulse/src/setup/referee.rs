@@ -104,7 +104,7 @@ pub fn steps(
         Some(format!(
             "{}ALTER USER autoctl_node PASSWORD '{}';\nSELECT pg_reload_conf();\n",
             super::steps::QUIET_SQL,
-            plan.monitor_password.replace('\'', "''")
+            super::steps::scram(&plan.monitor_password)
         )),
     ));
     steps.push(hub_key_step(plan, hub, binary));
@@ -233,7 +233,12 @@ mod tests {
             panic!()
         };
         assert!(!args.join(" ").contains("secret"));
-        assert!(input.as_deref().unwrap().starts_with("SET log_statement = none;\nSET log_min_error_statement = panic;\nALTER USER autoctl_node PASSWORD 'referee-secret-3';"));
+        let sql = input.as_deref().unwrap();
+        assert!(sql.starts_with("SET log_statement = none;\nSET log_min_error_statement = panic;\nALTER USER autoctl_node PASSWORD 'SCRAM-SHA-256$4096:"), "{sql}");
+        assert!(
+            !sql.contains("referee-secret-3"),
+            "the password itself never reaches PostgreSQL: {sql}"
+        );
         assert!(titles.contains(&"Open port 5432 in the firewall, if firewalld runs"));
         assert!(
             titles.contains(&"Let the ScannerPulse machine run this machine's database commands")

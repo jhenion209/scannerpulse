@@ -675,8 +675,58 @@ pub(super) fn setfacl(title: &str, args: &[&str]) -> Step {
 pub(super) const QUIET_SQL: &str =
     "SET log_statement = none;\nSET log_min_error_statement = panic;\n";
 
+/// PostgreSQL's SCRAM-SHA-256 verifier for `password` with `salt`: given as the
+/// role's PASSWORD, the password itself never reaches PostgreSQL (nor
+/// pg_stat_statements, which keeps a statement's text whatever is logged).
+/// The passwords setup makes are ASCII, which SASLprep leaves as they are.
+pub(super) fn scram_verifier(password: &str, salt: &[u8; 16]) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    const ROUNDS: u32 = 4096;
+    let hmac = |key: &[u8], data: &[u8]| -> [u8; 32] {
+        let mut block = [0u8; 64];
+        block[..key.len()].copy_from_slice(key); // keys here are 32 bytes or fewer
+        let pad = |b: u8| block.map(|k| k ^ b);
+        let inner = Sha256::new()
+            .chain_update(pad(0x36))
+            .chain_update(data)
+            .finalize();
+        Sha256::new()
+            .chain_update(pad(0x5c))
+            .chain_update(inner)
+            .finalize()
+            .into()
+    };
+    // PBKDF2-HMAC-SHA-256, one 32-byte block.
+    let mut u = hmac(
+        password.as_bytes(),
+        &[salt.as_slice(), &1u32.to_be_bytes()].concat(),
+    );
+    let mut salted = u;
+    for _ in 1..ROUNDS {
+        u = hmac(password.as_bytes(), &u);
+        salted.iter_mut().zip(u).for_each(|(s, x)| *s ^= x);
+    }
+    let stored: [u8; 32] = Sha256::digest(hmac(&salted, b"Client Key")).into();
+    let server = hmac(&salted, b"Server Key");
+    let b64 = |x: &[u8]| base64::engine::general_purpose::STANDARD.encode(x);
+    format!(
+        "SCRAM-SHA-256${ROUNDS}:{}${}:{}",
+        b64(salt),
+        b64(&stored),
+        b64(&server)
+    )
+}
+
+/// `password`'s SCRAM-SHA-256 verifier with a fresh random salt.
+pub(super) fn scram(password: &str) -> String {
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).expect("the system's random source works");
+    scram_verifier(password, &salt)
+}
+
 pub(super) fn database_sql(password: &str) -> String {
-    let quoted = password.replace('\'', "''");
+    let quoted = scram(password);
     format!(
         "{QUIET_SQL}\
          SELECT format('CREATE ROLE {ACCOUNT} LOGIN PASSWORD %L', '{quoted}') \
@@ -2033,6 +2083,24 @@ mod tests {
             "SET log_statement = none;\nSET log_min_error_statement = panic;\n"
         );
         assert!(super::database_sql("pw").starts_with(super::QUIET_SQL));
+    }
+
+    #[test]
+    fn a_scram_verifier_matches_postgresqls() {
+        // Computed with Python's hashlib and hmac (PBKDF2-HMAC-SHA-256, 4096 rounds).
+        let salt: [u8; 16] = std::array::from_fn(|i| i as u8);
+        assert_eq!(
+            super::scram_verifier("in-secret", &salt),
+            "SCRAM-SHA-256$4096:AAECAwQFBgcICQoLDA0ODw==$o5NR+2Ai5SuP1rKWYoHLV7ojMlOWiDp7NS3YClXlgEg=:CJEbeSSM5RRBfioZ5kfA2xpoBOWWsNT+lRIskbPr/xs="
+        );
+    }
+
+    #[test]
+    fn the_password_never_reaches_postgresql_in_plain() {
+        // pg_stat_statements keeps a utility statement's text whatever log_statement says.
+        let sql = super::database_sql("pw-in-clear");
+        assert!(!sql.contains("pw-in-clear"), "{sql}");
+        assert_eq!(sql.matches("'SCRAM-SHA-256$4096:").count(), 2, "{sql}");
     }
 
     #[test]
