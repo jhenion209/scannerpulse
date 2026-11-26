@@ -72,6 +72,83 @@ async fn an_admin_turns_a_talkgroups_transcription_on_and_off(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn an_admin_switches_several_talkgroups_at_once_all_or_none(pool: PgPool) {
+    let seven = common::talkgroup(&pool, "SYSA", 7).await;
+    let three = common::talkgroup(&pool, "SYSA", 3).await;
+    let nine = common::talkgroup(&pool, "SYSA", 9).await;
+    let app = app(&pool);
+    let (cookie, csrf) = signed(&pool, &app).await;
+    let change = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+    let uri = "/api/admin/talkgroups/transcribe";
+    let on = |pool: PgPool| async move {
+        let rows: Vec<(i64, bool)> =
+            sqlx::query_as("SELECT number, transcribe FROM talkgroups ORDER BY number")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        rows
+    };
+
+    let both = send(
+        &app,
+        "PUT",
+        uri,
+        &change,
+        Some(json!({"ids": [seven, three, seven], "on": true})),
+    )
+    .await;
+    assert_eq!(both.status, 200);
+    assert_eq!(
+        both.body["ids"],
+        json!([three.min(seven), three.max(seven)])
+    );
+    assert_eq!(on(pool.clone()).await, [(3, true), (7, true), (9, false)]);
+
+    // One id that is no talkgroup: nothing changes.
+    let unknown = send(
+        &app,
+        "PUT",
+        uri,
+        &change,
+        Some(json!({"ids": [nine, 999999], "on": true})),
+    )
+    .await;
+    assert_eq!(unknown.status, 404);
+    assert_eq!(on(pool.clone()).await, [(3, true), (7, true), (9, false)]);
+
+    let none = send(
+        &app,
+        "PUT",
+        uri,
+        &change,
+        Some(json!({"ids": [], "on": true})),
+    )
+    .await;
+    assert_eq!(none.status, 400);
+
+    let off = send(
+        &app,
+        "PUT",
+        uri,
+        &change,
+        Some(json!({"ids": [seven, three], "on": false})),
+    )
+    .await;
+    assert_eq!(off.status, 200);
+    assert_eq!(on(pool.clone()).await, [(3, false), (7, false), (9, false)]);
+
+    let without = send(
+        &app,
+        "PUT",
+        uri,
+        &[("cookie", &cookie)],
+        Some(json!({"ids": [nine], "on": true})),
+    )
+    .await;
+    assert_eq!(without.status, 403);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn an_admin_puts_the_failed_calls_back_in_the_queue(pool: PgPool) {
     let talkgroup = common::talkgroup(&pool, "SYSA", 7).await;
     sqlx::query("UPDATE talkgroups SET transcribe = true")

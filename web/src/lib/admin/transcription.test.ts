@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, sortTalkgroups, type AdminTalkgroup } from './transcription';
+import { matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, selection, sortTalkgroups, type AdminTalkgroup } from './transcription';
 
 const tg = (id: number, number: number, name: string, system = 'Metro'): AdminTalkgroup => ({
   id, system, number, name, transcribe: false, files_correct: true,
@@ -67,5 +67,16 @@ describe('the failed calls put back', () => {
     expect(retriedText(0)).toBe('No failed call to try again.');
     expect(retriedText(1)).toBe('1 failed call is back in the queue.');
     expect(retriedText(1234)).toBe('1,234 failed calls are back in the queue.');
+  });
+});
+
+describe('selecting the shown talkgroups', () => {
+  it('says whether all, some or none of the shown are selected', () => {
+    expect(selection(list, new Set([1, 2, 3]))).toBe('all');
+    expect(selection(list, new Set([2]))).toBe('some');
+    expect(selection(list, new Set([99]))).toBe('none');
+    // A selection the search hides does not count for the shown.
+    expect(selection(list.slice(0, 2), new Set([1, 2, 3]))).toBe('all');
+    expect(selection([], new Set([1]))).toBe('none');
   });
 });

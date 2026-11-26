@@ -42,6 +42,55 @@ pub async fn transcribe(
     Ok(Json(json!({"id": id, "transcribe": body.on})))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Switches {
+    pub ids: Vec<i32>,
+    pub on: bool,
+}
+
+/// More talkgroups than one request may name; a site has a few thousand.
+const MOST_SWITCHES: usize = 20_000;
+
+/// `PUT /api/admin/talkgroups/transcribe`: the switch of every talkgroup the
+/// body names, all or none.
+pub async fn transcribe_many(
+    admin: Admin,
+    State(state): State<AppState>,
+    Json(body): Json<Switches>,
+) -> Result<Json<Value>, ApiError> {
+    if body.ids.is_empty() {
+        return Err(ApiError::BadRequest("name at least one talkgroup".into()));
+    }
+    if body.ids.len() > MOST_SWITCHES {
+        return Err(ApiError::BadRequest(format!(
+            "name at most {MOST_SWITCHES} talkgroups"
+        )));
+    }
+    if !crate::talkgroups::set_transcribe_many(&state.pool, &body.ids, body.on).await? {
+        return Err(ApiError::Missing(
+            "one of the talkgroups no longer exists; nothing was changed".into(),
+        ));
+    }
+    let mut ids = body.ids.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    admin
+        .record(
+            &state,
+            format!(
+                "turned transcription {} for {} talkgroups: {}",
+                if body.on { "on" } else { "off" },
+                ids.len(),
+                ids.iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .await;
+    Ok(Json(json!({"ids": ids, "transcribe": body.on})))
+}
+
 /// `POST /api/admin/queue/retry`: every failed call is tried again.
 pub async fn retry_failed(
     admin: Admin,

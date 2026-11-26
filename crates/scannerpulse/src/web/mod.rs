@@ -326,6 +326,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/reports/traffic", get(admin::traffic))
         .route("/api/admin/talkgroups", get(transcription::talkgroups))
         .route(
+            "/api/admin/talkgroups/transcribe",
+            axum::routing::put(transcription::transcribe_many),
+        )
+        .route(
             "/api/admin/talkgroups/{id}/transcribe",
             axum::routing::put(transcription::transcribe),
         )

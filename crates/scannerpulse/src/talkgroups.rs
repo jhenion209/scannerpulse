@@ -44,6 +44,25 @@ pub async fn set_transcribe(
     Ok(done.rows_affected() == 1)
 }
 
+/// Turns the transcription of every talkgroup in `ids` on or off, all or
+/// none: false, and nothing changed, when one of them is not a talkgroup.
+pub async fn set_transcribe_many(pool: &sqlx::PgPool, ids: &[i32], on: bool) -> sqlx::Result<bool> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut tx = pool.begin().await?;
+    let done = sqlx::query("UPDATE talkgroups SET transcribe = $2 WHERE id = ANY($1)")
+        .bind(&ids)
+        .bind(on)
+        .execute(&mut *tx)
+        .await?;
+    if done.rows_affected() != ids.len() as u64 {
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// The talkgroup written as SYSTEM/NUMBER.
 pub async fn find(
     db: impl sqlx::PgExecutor<'_>,

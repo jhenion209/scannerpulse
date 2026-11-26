@@ -42,6 +42,7 @@ const NEEDS: &[(&str, &str, Need)] = &[
         "/api/admin/talkgroups/{id}/transcribe",
         On(F::Transcribe),
     ),
+    ("PUT", "/api/admin/talkgroups/transcribe", On(F::Transcribe)),
     ("POST", "/api/admin/queue/retry", On(F::Queue)),
     ("POST", "/api/admin/recorders", On(F::Recorders)),
     (

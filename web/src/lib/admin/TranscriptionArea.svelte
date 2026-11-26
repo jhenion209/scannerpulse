@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { counted } from '../format';
   import { tell } from '../notice.svelte';
   import ImprovementSection from './ImprovementSection.svelte';
   import { admin, can, why } from './session.svelte';
   import {
-    matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, sortTalkgroups,
+    matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, selection, sortTalkgroups,
     type AdminTalkgroup, type QueueFields, type TalkgroupColumn, type TalkgroupSort,
   } from './transcription';
 
@@ -14,7 +15,12 @@
   let search = $state('');
   /** System, then number (the server's order) until a header is clicked. */
   let sort = $state<TalkgroupSort>({ column: 'system', descending: false });
-  const shown = $derived(talkgroups ? sortTalkgroups(matchTalkgroups(talkgroups, search), sort) : []);
+  /** The rows are ordered when the list is read, searched or sorted, not when a switch flips: sorted
+   * by Transcribe, a flipped row would otherwise jump to the other end of the table under the pointer. */
+  const shown = $derived.by(() => {
+    const list = talkgroups, text = search, order = sort;
+    return list ? untrack(() => sortTalkgroups(matchTalkgroups(list, text), order)) : [];
+  });
   const columns: { key: TalkgroupColumn; label: string; num?: boolean }[] = [
     { key: 'system', label: 'System' }, { key: 'number', label: 'Number', num: true },
     { key: 'name', label: 'Name' }, { key: 'transcribe', label: 'Transcribe' },
@@ -37,21 +43,45 @@
 
   async function setSwitch(talkgroup: AdminTalkgroup, box: HTMLInputElement) {
     const value = box.checked;
-    const focused = document.activeElement === box;
     delete refusals[talkgroup.id];
     try {
       await admin('PUT', `/api/admin/talkgroups/${talkgroup.id}/transcribe`, { on: value });
       talkgroup.transcribe = value;
-      // Sorted by Transcribe, the row moves, and a moved element loses the focus: give it back.
-      if (focused) {
-        await tick();
-        box.focus();
-      }
     } catch (error) {
       refusals[talkgroup.id] = why(error);
       // `checked` is one-way: nothing writes the saved state back to a box the person toggled.
       box.checked = talkgroup.transcribe;
       await read();
+    }
+  }
+
+  // Several at once: rows are selected, across searches, then switched together, all or none.
+  const selected = new SvelteSet<number>();
+  const shownSelected = $derived(selection(shown, selected));
+  let batching = $state(false);
+  let batchRefusal = $state<string | null>(null);
+
+  function selectShown() {
+    if (shownSelected === 'all') for (const t of shown) selected.delete(t.id);
+    else for (const t of shown) selected.add(t.id);
+  }
+
+  async function setSelected(on: boolean) {
+    if (batching || selected.size === 0) return;
+    const ids = [...selected];
+    batchRefusal = null;
+    batching = true;
+    try {
+      await admin('PUT', '/api/admin/talkgroups/transcribe', { ids, on });
+      const chosen = new Set(ids);
+      for (const t of talkgroups ?? []) if (chosen.has(t.id)) t.transcribe = on;
+      tell(`Transcription is ${on ? 'on' : 'off'} for ${counted(ids.length, 'talkgroup')}.`);
+      selected.clear();
+    } catch (error) {
+      batchRefusal = why(error);
+      await read();
+    } finally {
+      batching = false;
     }
   }
 
@@ -139,9 +169,25 @@
       <input id="tg-search" type="search" bind:value={search} />
       <span>{on.toLocaleString('en-US')} of {talkgroups.length.toLocaleString('en-US')} on</span>
     </div>
+    {#if can('transcribe')}
+      <div class="row batch" role="group" aria-label="Selected talkgroups">
+        <span role="status">{counted(selected.size, 'talkgroup')} selected</span>
+        <button type="button" class="primary" disabled={batching || selected.size === 0} onclick={() => setSelected(true)}>Turn on selected</button>
+        <button type="button" disabled={batching || selected.size === 0} onclick={() => setSelected(false)}>Turn off selected</button>
+        <button type="button" disabled={batching || selected.size === 0} onclick={() => selected.clear()}>Clear selection</button>
+      </div>
+      <p class="hint">Search, select the rows (the box in the header selects every row shown), search again to add more, then turn them all on or off.</p>
+      {#if batchRefusal}<p class="problem" role="alert">Nothing changed: {batchRefusal}</p>{/if}
+    {/if}
     <table>
       <caption class="visually-hidden">Each talkgroup's transcription switch</caption>
       <thead><tr>
+        {#if can('transcribe')}
+          <th scope="col">
+            <input type="checkbox" aria-label="Select every talkgroup shown" disabled={shown.length === 0}
+              checked={shownSelected === 'all'} indeterminate={shownSelected === 'some'} onchange={selectShown} />
+          </th>
+        {/if}
         {#each columns as column (column.key)}
           <th scope="col" class:num={column.num} aria-sort={ariaSort(column.key)}>
             <button type="button" class="sort" onclick={() => (sort = nextSort(sort, column.key))}>{column.label}<span aria-hidden="true">{ariaSort(column.key) === 'ascending' ? ' ▲' : ariaSort(column.key) === 'descending' ? ' ▼' : ''}</span></button>
@@ -150,7 +196,14 @@
       </tr></thead>
       <tbody>
         {#each shown as talkgroup (talkgroup.id)}
-          <tr>
+          <tr class:picked={selected.has(talkgroup.id)}>
+            {#if can('transcribe')}
+              <td>
+                <input type="checkbox" aria-label={`Select ${talkgroup.name} (${talkgroup.system} ${talkgroup.number})`}
+                  checked={selected.has(talkgroup.id)}
+                  onchange={(event) => (event.currentTarget.checked ? selected.add(talkgroup.id) : selected.delete(talkgroup.id))} />
+              </td>
+            {/if}
             <td>{talkgroup.system}</td>
             <td class="num">{talkgroup.number}</td>
             <td class="long">{talkgroup.name}</td>
@@ -208,4 +261,7 @@
   .hint { margin: 0; color: var(--muted); }
   select { max-width: 100%; }
   .sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
+  /* Stays in view while the long table scrolls under it. */
+  .batch { position: sticky; top: 0; z-index: 1; background: var(--bg); padding-block: 0.4rem; flex-wrap: wrap; }
+  tr.picked { background: var(--surface); }
 </style>

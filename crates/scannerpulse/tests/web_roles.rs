@@ -36,6 +36,12 @@ fn changes() -> Vec<(&'static str, &'static str, Option<Value>, Function)> {
             Some(json!({"on": true})),
             F::Transcribe,
         ),
+        (
+            "PUT",
+            "/api/admin/talkgroups/transcribe",
+            Some(json!({"ids": [1], "on": true})),
+            F::Transcribe,
+        ),
         ("POST", "/api/admin/queue/retry", None, F::Queue),
         (
             "POST",

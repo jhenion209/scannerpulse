@@ -30,6 +30,35 @@ test("each talkgroup's switch turns its transcription on and off, and is kept", 
   await expect(switchOf(page, name)).not.toBeChecked();
 });
 
+test('rows selected across searches are switched together', async ({ page }) => {
+  await signIn(page, '#transcription');
+  const search = page.getByLabel('Find a talkgroup');
+  const batch = () => page.waitForResponse((r) => r.url().endsWith('/api/admin/talkgroups/transcribe') && r.request().method() === 'PUT');
+  const metro = [/^Transcribe Metro Fire Dispatch/, /^Transcribe Metro Police One/];
+  try {
+    await search.fill('metro');
+    await page.getByRole('checkbox', { name: 'Select every talkgroup shown' }).check();
+    await search.fill('201');
+    await page.getByRole('checkbox', { name: /^Select Valley Ambulance/ }).check();
+    await search.fill('');
+    await expect(page.getByText('3 talkgroups selected')).toBeVisible();
+    await page.getByRole('checkbox', { name: /^Select Valley Ambulance/ }).uncheck();
+    await expect(page.getByRole('checkbox', { name: 'Select every talkgroup shown' })).toHaveJSProperty('indeterminate', true);
+    await Promise.all([batch(), page.getByRole('button', { name: 'Turn on selected' }).click()]);
+    await expect(page.getByText('0 talkgroups selected')).toBeVisible();
+    await page.reload();
+    for (const name of metro) await expect(switchOf(page, name)).toBeChecked();
+    await expect(switchOf(page, /^Transcribe Valley Ambulance/)).not.toBeChecked();
+  } finally {
+    // The server is not reseeded between runs: every switch goes back off, whatever failed above.
+    await page.reload();
+    await page.getByRole('checkbox', { name: 'Select every talkgroup shown' }).check();
+    await Promise.all([batch(), page.getByRole('button', { name: 'Turn off selected' }).click()]);
+  }
+  await page.reload();
+  for (const name of metro) await expect(switchOf(page, name)).not.toBeChecked();
+});
+
 test('the list finds a talkgroup by name or number', async ({ page }) => {
   await signIn(page, '#transcription');
   const rows = page.getByRole('table', { name: "Each talkgroup's transcription switch" }).locator('tbody tr');
@@ -57,7 +86,7 @@ test("a column's header sorts the list, and a second click turns the order round
   await expect(first).toContainText('Metro Police One');
 });
 
-test('a switch whose row moves keeps the focus, for the next key', async ({ page }) => {
+test('sorted by Transcribe, a flipped switch stays in its row and keeps the focus', async ({ page }) => {
   await signIn(page, '#transcription');
   const table = page.getByRole('table', { name: "Each talkgroup's transcription switch" });
   const transcribe = table.getByRole('columnheader', { name: 'Transcribe' }).getByRole('button');
@@ -69,8 +98,13 @@ test('a switch whose row moves keeps the focus, for the next key', async ({ page
     await expect(table.locator('tbody tr').first()).toContainText('Metro Fire Dispatch');
     await switchOf(page, name).focus();
     await Promise.all([saved(), page.keyboard.press('Space')]);
-    await expect(table.locator('tbody tr').last()).toContainText('Metro Fire Dispatch');
+    // The order is kept until the list is sorted or searched again: no jump under the pointer.
+    await expect(switchOf(page, name)).toBeChecked();
+    await expect(table.locator('tbody tr').first()).toContainText('Metro Fire Dispatch');
     await expect(switchOf(page, name)).toBeFocused();
+    await page.getByLabel('Find a talkgroup').fill('a');
+    await page.getByLabel('Find a talkgroup').fill('');
+    await expect(table.locator('tbody tr').last()).toContainText('Metro Fire Dispatch');
   } finally {
     // The server is not reseeded between runs: the switch goes back off, whatever failed above.
     await page.reload();

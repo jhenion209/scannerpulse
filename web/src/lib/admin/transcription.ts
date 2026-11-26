@@ -51,6 +51,12 @@ export function sortTalkgroups(list: AdminTalkgroup[], sort: TalkgroupSort): Adm
   );
 }
 
+/** How many of the shown talkgroups are selected: all, some or none (none when none is shown). */
+export function selection(shown: AdminTalkgroup[], selected: ReadonlySet<number>): 'all' | 'some' | 'none' {
+  const picked = shown.filter((t) => selected.has(t.id)).length;
+  return picked === 0 ? 'none' : picked === shown.length ? 'all' : 'some';
+}
+
 /** The order after a click on `column`'s header: the same column flips, another starts ascending. */
 export const nextSort = (sort: TalkgroupSort, column: TalkgroupColumn): TalkgroupSort =>
   sort.column === column ? { column, descending: !sort.descending } : { column, descending: false };
