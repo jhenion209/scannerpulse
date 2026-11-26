@@ -59,6 +59,22 @@ test('rows selected across searches are switched together', async ({ page }) => 
   for (const name of metro) await expect(switchOf(page, name)).not.toBeChecked();
 });
 
+test('a shift-click selects or clears every row between it and the last box clicked', async ({ page }) => {
+  await signIn(page, '#transcription');
+  const pick = (name: RegExp) => page.getByRole('checkbox', { name });
+  const fire = pick(/^Select Metro Fire Dispatch/), police = pick(/^Select Metro Police One/), valley = pick(/^Select Valley Ambulance/);
+  await fire.click();
+  await valley.click({ modifiers: ['Shift'] });
+  await expect(page.getByText('3 talkgroups selected')).toBeVisible();
+  for (const box of [fire, police, valley]) await expect(box).toBeChecked();
+  // Cleared the same way, from the last box clicked.
+  await valley.click();
+  await police.click({ modifiers: ['Shift'] });
+  await expect(page.getByText('1 talkgroup selected')).toBeVisible();
+  await expect(fire).toBeChecked();
+  await expect(police).not.toBeChecked();
+});
+
 test('the list finds a talkgroup by name or number', async ({ page }) => {
   await signIn(page, '#transcription');
   const rows = page.getByRole('table', { name: "Each talkgroup's transcription switch" }).locator('tbody tr');

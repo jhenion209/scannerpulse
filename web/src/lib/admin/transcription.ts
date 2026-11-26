@@ -57,6 +57,15 @@ export function selection(shown: AdminTalkgroup[], selected: ReadonlySet<number>
   return picked === 0 ? 'none' : picked === shown.length ? 'all' : 'some';
 }
 
+/** The ids of the shown rows from `anchor` to `id`, both included, in either direction: a
+ * shift-click's range. Only `id` when the anchor is not shown (another search hid it). */
+export function rangeIds(shown: AdminTalkgroup[], anchor: number | null, id: number): number[] {
+  const from = shown.findIndex((t) => t.id === anchor);
+  const to = shown.findIndex((t) => t.id === id);
+  if (from < 0 || to < 0) return [id];
+  return shown.slice(Math.min(from, to), Math.max(from, to) + 1).map((t) => t.id);
+}
+
 /** The order after a click on `column`'s header: the same column flips, another starts ascending. */
 export const nextSort = (sort: TalkgroupSort, column: TalkgroupColumn): TalkgroupSort =>
   sort.column === column ? { column, descending: !sort.descending } : { column, descending: false };

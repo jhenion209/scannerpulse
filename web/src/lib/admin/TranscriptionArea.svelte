@@ -6,7 +6,7 @@
   import ImprovementSection from './ImprovementSection.svelte';
   import { admin, can, why } from './session.svelte';
   import {
-    matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, selection, sortTalkgroups,
+    matchTalkgroups, nextSort, previewText, queueBody, queueQuery, rangeIds, retriedText, selection, sortTalkgroups,
     type AdminTalkgroup, type QueueFields, type TalkgroupColumn, type TalkgroupSort,
   } from './transcription';
 
@@ -60,6 +60,18 @@
   const shownSelected = $derived(selection(shown, selected));
   let batching = $state(false);
   let batchRefusal = $state<string | null>(null);
+
+  /** The row last picked by hand: a shift-click picks every shown row from it to the one clicked. */
+  let anchor: number | null = null;
+
+  /** A row's box was clicked: it, or with Shift the range from the anchor, takes the box's new state. */
+  function pick(id: number, on: boolean, range: boolean) {
+    for (const each of range ? rangeIds(shown, anchor, id) : [id]) {
+      if (on) selected.add(each);
+      else selected.delete(each);
+    }
+    anchor = id;
+  }
 
   function selectShown() {
     if (shownSelected === 'all') for (const t of shown) selected.delete(t.id);
@@ -176,7 +188,7 @@
         <button type="button" disabled={batching || selected.size === 0} onclick={() => setSelected(false)}>Turn off selected</button>
         <button type="button" disabled={batching || selected.size === 0} onclick={() => selected.clear()}>Clear selection</button>
       </div>
-      <p class="hint">Search, select the rows (the box in the header selects every row shown), search again to add more, then turn them all on or off.</p>
+      <p class="hint">Search, select the rows (Shift-click selects every row between two boxes; the box in the header selects every row shown), search again to add more, then turn them all on or off.</p>
       {#if batchRefusal}<p class="problem" role="alert">Nothing changed: {batchRefusal}</p>{/if}
     {/if}
     <table>
@@ -201,7 +213,8 @@
               <td>
                 <input type="checkbox" aria-label={`Select ${talkgroup.name} (${talkgroup.system} ${talkgroup.number})`}
                   checked={selected.has(talkgroup.id)}
-                  onchange={(event) => (event.currentTarget.checked ? selected.add(talkgroup.id) : selected.delete(talkgroup.id))} />
+                  onmousedown={(event) => { if (event.shiftKey) event.preventDefault(); /* no text selection across the rows */ }}
+                  onclick={(event) => pick(talkgroup.id, event.currentTarget.checked, event.shiftKey)} />
               </td>
             {/if}
             <td>{talkgroup.system}</td>

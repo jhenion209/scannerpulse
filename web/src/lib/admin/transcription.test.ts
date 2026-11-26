@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchTalkgroups, nextSort, previewText, queueBody, queueQuery, retriedText, selection, sortTalkgroups, type AdminTalkgroup } from './transcription';
+import { matchTalkgroups, nextSort, previewText, queueBody, queueQuery, rangeIds, retriedText, selection, sortTalkgroups, type AdminTalkgroup } from './transcription';
 
 const tg = (id: number, number: number, name: string, system = 'Metro'): AdminTalkgroup => ({
   id, system, number, name, transcribe: false, files_correct: true,
@@ -78,5 +78,18 @@ describe('selecting the shown talkgroups', () => {
     // A selection the search hides does not count for the shown.
     expect(selection(list.slice(0, 2), new Set([1, 2, 3]))).toBe('all');
     expect(selection([], new Set([1]))).toBe('none');
+  });
+});
+
+describe("a shift-click's range", () => {
+  const rows = [tg(1, 101, 'a'), tg(2, 102, 'b'), tg(3, 103, 'c'), tg(4, 104, 'd')];
+  it('takes every shown row from the anchor to the row clicked, either way', () => {
+    expect(rangeIds(rows, 1, 3)).toEqual([1, 2, 3]);
+    expect(rangeIds(rows, 4, 2)).toEqual([2, 3, 4]);
+    expect(rangeIds(rows, 2, 2)).toEqual([2]);
+  });
+  it('takes only the row clicked when there is no anchor or the search hides it', () => {
+    expect(rangeIds(rows, null, 3)).toEqual([3]);
+    expect(rangeIds(rows, 99, 3)).toEqual([3]);
   });
 });
