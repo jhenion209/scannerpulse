@@ -538,15 +538,55 @@ async fn two_transmissions_in_a_row_each_heard_by_one_recorder_stay_two_calls(
     Ok(())
 }
 
-// The rule's cost: a call shorter than about 2 s whose copies are named a
-// second apart overlaps too little on the names to be told from a second
-// transmission, and stays two calls (a duplicate kept, never a call lost).
+// A call shorter than about 2 s whose copies are named a second apart
+// overlaps too little on the names, but both name the same radio and start
+// within [`store::NAME_SKEW`]: one call.
 #[sqlx::test(migrations = "./migrations")]
-async fn a_short_copy_named_a_second_later_stays_another_call(pool: PgPool) -> sqlx::Result<()> {
+async fn a_short_copy_named_a_second_later_is_the_same_call(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    site.arrive(site.north_id, &bravo("120000", 28, 4021)).await;
+    let done = site.pass().await;
+    let [Outcome::Filed(id, _)] = done[..] else {
+        panic!("{done:?}")
+    };
+    site.arrive(site.south_id, &bravo("120001", 20, 4021)).await;
+    assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
+    assert_eq!(site.calls().await.len(), 1);
+    Ok(())
+}
+
+// A copy named a second earlier is matched the same way.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_short_copy_named_a_second_earlier_is_the_same_call(pool: PgPool) -> sqlx::Result<()> {
+    let site = Site::new(pool).await;
+    site.arrive(site.north_id, &bravo("120001", 28, 4021)).await;
+    let done = site.pass().await;
+    let [Outcome::Filed(id, _)] = done[..] else {
+        panic!("{done:?}")
+    };
+    site.arrive(site.south_id, &bravo("120000", 20, 4021)).await;
+    assert_eq!(site.pass().await, [Outcome::Duplicate(id)]);
+    Ok(())
+}
+
+// Without the radio on both copies, a short copy named a second apart cannot
+// be told from another transmission: it stays two calls (a duplicate kept,
+// never a call lost).
+#[sqlx::test(migrations = "./migrations")]
+async fn a_short_copy_without_a_radio_named_a_second_later_stays_another_call(
+    pool: PgPool,
+) -> sqlx::Result<()> {
     let site = Site::new(pool).await;
     site.arrive(site.north_id, &bravo("120000", 28, 4021)).await;
     site.pass().await;
-    site.arrive(site.south_id, &bravo("120001", 20, 4021)).await;
+    let mut tag = id3::Tag::new();
+    tag.set_title("215\"Bravo EMS\"");
+    tag.set_text("TIT1", "SYSB");
+    let copy = (
+        "20310115_120001SYSB_South_Bravo__TO_215.mp3".to_string(),
+        common::tagged(&tag, 20),
+    );
+    site.arrive(site.south_id, &copy).await;
     let done = site.pass().await;
     assert!(matches!(done[..], [Outcome::Filed(..)]), "{done:?}");
     assert_eq!(site.calls().await.len(), 2);

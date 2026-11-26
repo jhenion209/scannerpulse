@@ -735,9 +735,21 @@ async fn lookups(
 /// its name, to the second, so two transmissions in a row can seem to
 /// overlap by up to a second; copies of one call overlap by more, and by at
 /// least half the shorter recording. A call under about 2 s whose copies are
-/// named a second apart therefore stays two calls: a duplicate kept, never a
-/// call lost (the owner's choice, 2026-10-21).
+/// named a second apart overlaps too little on the names; [`NAME_SKEW`]
+/// matches those copies when both name the same radio.
 pub const LEAST_OVERLAP: Duration = Duration::from_secs(1);
+
+/// How far apart the starts of two short copies of one call may be when both
+/// name the same radio. Names are to the second and recorders name by start
+/// or by end, so short copies that overlap too little for [`LEAST_OVERLAP`]
+/// start up to about 1.5 s apart: 17,742 pairs of two recorders' copies (one
+/// naming by start, the other by end) started 0.5 to 1.5 s apart, half of
+/// them under 1.3 s long. Without the radio on both, such copies stay two calls (a duplicate
+/// kept, never a call lost; the owner's choice, 2026-10-21). The cost: a
+/// radio that keys up again within 1.5 s of its last start, each time heard
+/// by one recorder only, is taken for one call (the owner's choice,
+/// 2026-11-26).
+pub const NAME_SKEW: Duration = Duration::from_millis(1500);
 
 /// How long a replacement waits for a lock another transaction holds.
 pub const LOCK_WAIT: &str = "2s";
@@ -752,8 +764,9 @@ const KEPT: &str = "(EXISTS (SELECT 1 FROM transcripts t WHERE t.call_id = c.id 
                                AND e.started_at = c.started_at))";
 
 /// A call another recorder filed that a file is a copy of: the same
-/// talkgroup, recordings that overlap by more than [`LEAST_OVERLAP`] and by
-/// at least half the shorter one, and the same radio when both name one.
+/// talkgroup, the same radio when both name one, and recordings that overlap
+/// by more than [`LEAST_OVERLAP`] and by at least half the shorter one, or,
+/// when both name the radio, that start within [`NAME_SKEW`].
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct SameCall {
     pub id: i64,
@@ -812,6 +825,7 @@ pub async fn same_call(
     source_id: Option<i16>,
 ) -> sqlx::Result<Option<SameCall>> {
     let least = i32::try_from(LEAST_OVERLAP.as_millis()).unwrap_or(i32::MAX);
+    let skew = i32::try_from(NAME_SKEW.as_millis()).unwrap_or(i32::MAX);
     sqlx::query_as(&format!(
         "SELECT c.id, c.started_at, coalesce(c.duration_ms, 0) AS duration_ms, c.source_id, \
                 s.name AS recorder, c.talkgroup_id, c.location_id, c.rel_path, c.file_mtime, \
@@ -823,13 +837,16 @@ pub async fn same_call(
                FROM calls c \
                WHERE c.talkgroup_id = $1 \
                  AND c.started_at > $2 - interval '1 hour' \
-                 AND c.started_at < $2 + $3 * interval '1 millisecond' \
+                 AND c.started_at < $2 + greatest($3, $7) * interval '1 millisecond' \
                  AND ($4::smallint IS NULL OR (c.source_id <> $4 \
                       AND NOT ($4 = ANY (coalesce(c.copies_from, '{{}}'))))) \
                  AND ($6::bigint IS NULL OR c.radio_id IS NULL OR c.radio_id = $6)) c \
          JOIN sources s ON s.id = c.source_id \
-         WHERE c.overlap > $5 * interval '1 millisecond' \
-           AND 2 * c.overlap >= least(coalesce(c.duration_ms, 0), $3) * interval '1 millisecond' \
+         WHERE (c.overlap > $5 * interval '1 millisecond' \
+                AND 2 * c.overlap >= least(coalesce(c.duration_ms, 0), $3) * interval '1 millisecond') \
+            OR ($6::bigint IS NOT NULL AND c.radio_id IS NOT NULL \
+                AND c.started_at BETWEEN $2 - $7 * interval '1 millisecond' \
+                                     AND $2 + $7 * interval '1 millisecond') \
          ORDER BY c.overlap DESC, c.started_at, c.id \
          LIMIT 1"
     ))
@@ -839,6 +856,7 @@ pub async fn same_call(
     .bind(source_id)
     .bind(least)
     .bind(call.described.radio_id)
+    .bind(skew)
     .fetch_optional(db)
     .await
 }

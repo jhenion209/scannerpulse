@@ -421,9 +421,13 @@ when both name one, and the two recordings overlap by more than a second and
 by at least half the shorter one; of several such calls, the one it overlaps
 most. A file's start comes from its name, to the second, so two
 transmissions in a row can seem to overlap by up to a second: they stay two
-calls, whether one recorder heard both or each heard one. The cost: a call
-shorter than about 2 s whose copies are named a second apart stays two calls
-(a duplicate kept, never a call lost). The longer recording stays, by the
+calls, whether one recorder heard both or each heard one. A call shorter
+than about 2 s whose copies are named a second apart overlaps too little on
+the names: when both copies name the same radio and start within 1.5 s, it
+is one call; when either names no radio, it stays two calls (a duplicate
+kept, never a call lost). The cost: a radio that keys up again within 1.5 s
+of its last start, each time heard by one recorder only, is taken for one
+call. The longer recording stays, by the
 length measured from the MP3's frames; at equal length, the one filed first.
 A copy that is not longer is deleted from its recorder's folder and never
 reaches the archive, and the recorder's count of duplicates removed goes up.
@@ -525,9 +529,10 @@ reads up to 1,000 of the others, drawn at random over the folder, and
 counts, at the offset the import keeps (none for a new one) and at each
 whole-hour offset it tries:
 - the new calls;
-- the copies of calls already in the archive: the same talkgroup,
-  overlapping by more than a second and by at least half the shorter, the
-  same radio when both name one;
+- the copies of calls already in the archive: the same talkgroup, the same
+  radio when both name one, overlapping by more than a second and by at
+  least half the shorter, or naming the same radio and starting within
+  1.5 s;
 - the files of a system not named yet;
 - the talkgroups the files name otherwise.
 
